@@ -1,0 +1,113 @@
+name: 🧪 Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'CMakeLists.txt'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-20.04
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v1.14
+      with:
+        cmake-version: 3.20.x
+    
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libhidapi-dev ninja-build
+    
+    - name: Create Build Directory
+      run: cmake -E make_directory build
+    
+    - name: Configure CMake
+      run: |
+        cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTS=ON
+    
+    - name: Build Tests
+      run: |
+        cd build
+        cmake --build . --config Debug --target tests --parallel 4
+    
+    - name: Run Unit Tests
+      run: |
+        cd build
+        ./bin/tests --gtest_output=xml:test-results.xml 2>&1 || true
+    
+    - name: Upload Test Results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-results
+        path: build/test-results.xml
+    
+    - name: Publish Test Report
+      if: always()
+      uses: EnricoMi/publish-unit-test-result-action@v2.14
+      with:
+        files: build/test-results.xml
+        check_name: Test Results
+        comment_mode: always
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-20.04
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y lcov libhidapi-dev ninja-build
+    
+    - name: Create Build Directory
+      run: cmake -E make_directory build
+    
+    - name: Configure CMake
+      run: |
+        cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON -DENABLE_TESTS=ON
+    
+    - name: Build with Coverage
+      run: |
+        cd build
+        cmake --build . --config Debug --parallel 4
+    
+    - name: Run Tests
+      run: |
+        cd build
+        ./bin/tests || true
+    
+    - name: Generate Coverage Report
+      run: |
+        cd build
+        lcov --capture --directory . --output-file coverage.info
+        lcov --remove coverage.info '/usr/*' --output-file coverage.info
+        
+    - name: Upload to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        files: build/coverage.info
+        fail_ci_if_error: false

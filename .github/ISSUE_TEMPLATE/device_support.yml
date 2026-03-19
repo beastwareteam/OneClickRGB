@@ -1,0 +1,82 @@
+name: 🎮 Device Support Request
+description: Request support for a new device
+labels: ["device-support", "triage"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: "Help us add support for your RGB device! 🎨"
+
+  - type: input
+    id: brand
+    attributes:
+      label: Device Brand & Model
+      placeholder: "ASUS ROG Strix LC 360 RGB"
+    validations:
+      required: true
+
+  - type: input
+    id: device_type
+    attributes:
+      label: Device Type
+      placeholder: "Gaming Mouse / Keyboard / RGB Fan / etc"
+      options:
+        - Gaming Mouse
+        - Mechanical Keyboard
+        - Headset
+        - RGB Fan
+        - Liquid Cooler
+        - RGB Strip
+        - Case Lighting
+        - RAM
+        - GPU
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: vendor_id
+    attributes:
+      label: Vendor ID (hex)
+      description: Run "Get-CimInstance Win32_PnPEntity" on Windows or "lsusb -v" on Linux
+      placeholder: "0x0b05"
+    validations:
+      required: true
+
+  - type: input
+    id: product_id
+    attributes:
+      label: Product ID (hex)
+      placeholder: "0x19af"
+    validations:
+      required: true
+
+  - type: textarea
+    id: protocol
+    attributes:
+      label: Protocol & Technical Info
+      description: What communication protocol does it use?
+      placeholder: |
+        Protocol: HID
+        Reference: https://...
+        HID Report Structure: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: implementation
+    attributes:
+      label: Implementation Progress
+      description: Do you have code or resources to help?
+      placeholder: |
+        - [ ] HID initialization code
+        - [ ] Color control routines
+        - [ ] Animation support
+        - Testing capability
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Information
+      description: Links, documentation, screenshots?

@@ -1,0 +1,39 @@
+name: ✨ Feature Request
+description: Suggest a new feature
+labels: ["enhancement", "triage"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks for suggesting a feature! 🙌"
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Is this related to a problem?
+      description: What problem are you trying to solve?
+      placeholder: "I'm trying to... but I can't..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: How should this work?
+      placeholder: "It would be great if OneClickRGB could..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternative Solutions
+      description: Any alternatives you've considered?
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Screenshots, references, or other context?

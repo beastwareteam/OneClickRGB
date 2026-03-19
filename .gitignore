@@ -1,0 +1,92 @@
+# Build artifacts
+build/
+dist/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.lib
+*.exp
+
+# IDE & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+CTestTestfile.cmake
+
+# Qt
+moc_*.cpp
+moc_*.h
+ui_*.h
+*.pro.user
+*.prl
+.qmake.stash
+
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj*
+*.filters
+Debug/
+Release/
+x64/
+Win32/
+
+# XCode
+*.xcodeproj/
+*.xcworkspace/
+*.ipa
+*.dSYM
+
+# Dependencies & Package Managers
+vcpkg_installed/
+conan/
+node_modules/
+.venv/
+venv/
+env/
+
+# Test & Coverage
+coverage/
+*.gcov
+*.gcda
+*.gcno
+test-results.xml
+test-results/
+
+# Logs
+*.log
+logs/
+
+# Temporary & Backup
+*.tmp
+*.bak
+*.swp
+temp/
+tmp/
+
+# OS Specific
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific
+config/devices_local.json
+*.ocrgbmod
+production/build/
+.env
+.env.local
