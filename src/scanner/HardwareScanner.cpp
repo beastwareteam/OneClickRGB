@@ -1,12 +1,13 @@
 /*---------------------------------------------------------*\
 | HardwareScanner.cpp                                       |
 |                                                           |
-| Hardware-First Detection with REAL HIDAPI                 |
+| Hardware-First Detection with Device Registry            |
 |                                                           |
 | This file is part of the OneClickRGB project              |
 \*---------------------------------------------------------*/
 
 #include "HardwareScanner.h"
+#include "../core/DeviceRegistry.h"
 #include <iostream>
 #include <hidapi.h>
 
@@ -77,7 +78,13 @@ std::string DetectedHardware::GetHardwareId() const
 \*---------------------------------------------------------*/
 HardwareScanner::HardwareScanner()
 {
-    InitializeBuiltinDatabase();
+    // Load device registry from JSON file
+    auto& registry = DeviceRegistry::getInstance();
+    if (!registry.loadFromFile("config/devices.json")) {
+        std::cerr << "[SCANNER] Failed to load device registry!\n";
+    } else {
+        std::cout << "[SCANNER] Loaded " << registry.getDeviceCount() << " devices from registry\n";
+    }
 }
 
 HardwareScanner::~HardwareScanner()
@@ -135,20 +142,14 @@ std::vector<DetectedHardware> HardwareScanner::ScanUSBHID_Windows()
     {
         total_hid++;
 
-        // Check if this VID:PID is in our database
-        uint32_t key = MakeKey(current->vendor_id, current->product_id);
+        // Check if this VID:PID is in our device registry
+        auto& registry = DeviceRegistry::getInstance();
+        const DeviceInfo* deviceInfo = registry.findDevice(current->vendor_id, current->product_id);
 
-        if (controller_database.find(key) != controller_database.end())
+        if (deviceInfo != nullptr)
         {
-            const ControllerEntry& entry = controller_database[key];
-
-            // Check if this is the correct interface/usage_page
-            bool interface_match = (entry.interface_number < 0) ||
-                                   (current->interface_number == entry.interface_number);
-            bool usage_match = (entry.usage_page < 0) ||
-                               (static_cast<int>(current->usage_page) == entry.usage_page);
-
-            if (interface_match && usage_match)
+            // For now, we only check VID/PID match
+            // TODO: Add interface/usage page filtering if needed
             {
                 DetectedHardware hw;
                 hw.vendor_id = current->vendor_id;
@@ -178,12 +179,11 @@ std::vector<DetectedHardware> HardwareScanner::ScanUSBHID_Windows()
                     std::cout << "  [+] Found: " << hw.product_name;
                     if (hw.product_name.empty())
                     {
-                        std::cout << entry.display_name;
+                        std::cout << deviceInfo->name;
                     }
                     std::cout << " (" << std::hex << hw.vendor_id << ":"
                               << hw.product_id << std::dec << ")";
-                    std::cout << " [Interface " << current->interface_number
-                              << ", Usage 0x" << std::hex << current->usage_page << std::dec << "]\n";
+                    std::cout << " [" << deviceInfo->manufacturer << " " << deviceInfo->deviceType << "]\n";
 
                     devices.push_back(hw);
                     matched++;
@@ -217,9 +217,10 @@ std::vector<DetectedHardware> HardwareScanner::ScanUSBHID_Linux()
 
     while (current != nullptr)
     {
-        uint32_t key = MakeKey(current->vendor_id, current->product_id);
+        auto& registry = DeviceRegistry::getInstance();
+        const DeviceInfo* deviceInfo = registry.findDevice(current->vendor_id, current->product_id);
 
-        if (controller_database.find(key) != controller_database.end())
+        if (deviceInfo != nullptr)
         {
             DetectedHardware hw;
             hw.vendor_id = current->vendor_id;
@@ -313,141 +314,40 @@ std::vector<DetectedHardware> HardwareScanner::ScanPCI()
 
 bool HardwareScanner::HasKnownController(const DetectedHardware& hw) const
 {
-    uint32_t key = MakeKey(hw.vendor_id, hw.product_id);
-    return controller_database.find(key) != controller_database.end();
+    auto& registry = DeviceRegistry::getInstance();
+    return registry.findDevice(hw.vendor_id, hw.product_id) != nullptr;
 }
 
-const ControllerEntry* HardwareScanner::GetControllerEntry(const DetectedHardware& hw) const
+const DeviceInfo* HardwareScanner::GetDeviceInfo(const DetectedHardware& hw) const
 {
-    uint32_t key = MakeKey(hw.vendor_id, hw.product_id);
-    auto it = controller_database.find(key);
-    if (it != controller_database.end())
-    {
-        return &it->second;
-    }
-    return nullptr;
+    auto& registry = DeviceRegistry::getInstance();
+    return registry.findDevice(hw.vendor_id, hw.product_id);
 }
 
-std::vector<std::pair<DetectedHardware, ControllerEntry>>
+std::vector<std::pair<DetectedHardware, const DeviceInfo*>>
 HardwareScanner::GetMatchedDevices()
 {
-    std::vector<std::pair<DetectedHardware, ControllerEntry>> matched;
+    std::vector<std::pair<DetectedHardware, const DeviceInfo*>> matched;
 
     auto all_hw = ScanAll();
 
     for (const auto& hw : all_hw)
     {
-        const ControllerEntry* entry = GetControllerEntry(hw);
-        if (entry != nullptr)
+        const DeviceInfo* deviceInfo = GetDeviceInfo(hw);
+        if (deviceInfo != nullptr)
         {
-            matched.push_back({hw, *entry});
+            matched.push_back({hw, deviceInfo});
         }
     }
 
     return matched;
 }
 
-bool HardwareScanner::LoadControllerDatabase(const std::string& path)
+size_t HardwareScanner::GetKnownDeviceCount() const
 {
-    return true;
+    auto& registry = DeviceRegistry::getInstance();
+    return registry.getDeviceCount();
 }
-
-/*---------------------------------------------------------*\
-| Built-in Controller Database                              |
-| Extended list of supported RGB devices                    |
-\*---------------------------------------------------------*/
-void HardwareScanner::InitializeBuiltinDatabase()
-{
-    // ==================== CORSAIR ====================
-    // Keyboards
-    controller_database[MakeKey(0x1B1C, 0x1B2D)] = {0x1B1C, 0x1B2D, "CorsairPeripheral", "Corsair K95 RGB Platinum", "keyboard"};
-    controller_database[MakeKey(0x1B1C, 0x1B11)] = {0x1B1C, 0x1B11, "CorsairPeripheral", "Corsair K70 RGB", "keyboard"};
-    controller_database[MakeKey(0x1B1C, 0x1B13)] = {0x1B1C, 0x1B13, "CorsairPeripheral", "Corsair K70 LUX RGB", "keyboard"};
-    controller_database[MakeKey(0x1B1C, 0x1B49)] = {0x1B1C, 0x1B49, "CorsairPeripheral", "Corsair K70 RGB MK.2", "keyboard"};
-    controller_database[MakeKey(0x1B1C, 0x1B6B)] = {0x1B1C, 0x1B6B, "CorsairPeripheral", "Corsair K70 RGB Pro", "keyboard"};
-    controller_database[MakeKey(0x1B1C, 0x1B17)] = {0x1B1C, 0x1B17, "CorsairPeripheral", "Corsair K65 RGB", "keyboard"};
-    controller_database[MakeKey(0x1B1C, 0x1B37)] = {0x1B1C, 0x1B37, "CorsairPeripheral", "Corsair K60 RGB Pro", "keyboard"};
-    controller_database[MakeKey(0x1B1C, 0x1B4F)] = {0x1B1C, 0x1B4F, "CorsairPeripheral", "Corsair K100 RGB", "keyboard"};
-
-    // Mice
-    controller_database[MakeKey(0x1B1C, 0x1B2E)] = {0x1B1C, 0x1B2E, "CorsairPeripheral", "Corsair M65 RGB", "mouse"};
-    controller_database[MakeKey(0x1B1C, 0x1B5A)] = {0x1B1C, 0x1B5A, "CorsairPeripheral", "Corsair Dark Core RGB", "mouse"};
-    controller_database[MakeKey(0x1B1C, 0x1B34)] = {0x1B1C, 0x1B34, "CorsairPeripheral", "Corsair Scimitar RGB", "mouse"};
-    controller_database[MakeKey(0x1B1C, 0x1B66)] = {0x1B1C, 0x1B66, "CorsairPeripheral", "Corsair Sabre RGB Pro", "mouse"};
-
-    // Headsets
-    controller_database[MakeKey(0x1B1C, 0x0A14)] = {0x1B1C, 0x0A14, "CorsairPeripheral", "Corsair Void RGB", "headset"};
-    controller_database[MakeKey(0x1B1C, 0x0A55)] = {0x1B1C, 0x0A55, "CorsairPeripheral", "Corsair Virtuoso RGB", "headset"};
-
-    // Lighting Controllers
-    controller_database[MakeKey(0x1B1C, 0x0C0B)] = {0x1B1C, 0x0C0B, "CorsairLightingNode", "Corsair Lighting Node Pro", "ledstrip"};
-    controller_database[MakeKey(0x1B1C, 0x0C1A)] = {0x1B1C, 0x0C1A, "CorsairCommanderCore", "Corsair Commander Core", "ledstrip"};
-    controller_database[MakeKey(0x1B1C, 0x0C10)] = {0x1B1C, 0x0C10, "CorsairCommanderPro", "Corsair Commander Pro", "ledstrip"};
-    controller_database[MakeKey(0x1B1C, 0x0C32)] = {0x1B1C, 0x0C32, "CorsairCommanderCore", "Corsair Commander Core XT", "ledstrip"};
-
-    // ==================== RAZER ====================
-    // Keyboards
-    controller_database[MakeKey(0x1532, 0x0226)] = {0x1532, 0x0226, "RazerPeripheral", "Razer Huntsman Elite", "keyboard"};
-    controller_database[MakeKey(0x1532, 0x0227)] = {0x1532, 0x0227, "RazerPeripheral", "Razer Huntsman", "keyboard"};
-    controller_database[MakeKey(0x1532, 0x0246)] = {0x1532, 0x0246, "RazerPeripheral", "Razer Huntsman V2", "keyboard"};
-    controller_database[MakeKey(0x1532, 0x026A)] = {0x1532, 0x026A, "RazerPeripheral", "Razer Huntsman V3 Pro", "keyboard"};
-    controller_database[MakeKey(0x1532, 0x020F)] = {0x1532, 0x020F, "RazerPeripheral", "Razer BlackWidow Chroma", "keyboard"};
-    controller_database[MakeKey(0x1532, 0x0221)] = {0x1532, 0x0221, "RazerPeripheral", "Razer BlackWidow Chroma V2", "keyboard"};
-    controller_database[MakeKey(0x1532, 0x024E)] = {0x1532, 0x024E, "RazerPeripheral", "Razer BlackWidow V4", "keyboard"};
-    controller_database[MakeKey(0x1532, 0x0282)] = {0x1532, 0x0282, "RazerPeripheral", "Razer Ornata V3", "keyboard"};
-
-    // Mice
-    controller_database[MakeKey(0x1532, 0x0084)] = {0x1532, 0x0084, "RazerPeripheral", "Razer DeathAdder V2", "mouse"};
-    controller_database[MakeKey(0x1532, 0x007C)] = {0x1532, 0x007C, "RazerPeripheral", "Razer DeathAdder Elite", "mouse"};
-    controller_database[MakeKey(0x1532, 0x0078)] = {0x1532, 0x0078, "RazerPeripheral", "Razer Basilisk", "mouse"};
-    controller_database[MakeKey(0x1532, 0x0086)] = {0x1532, 0x0086, "RazerPeripheral", "Razer Basilisk V2", "mouse"};
-    controller_database[MakeKey(0x1532, 0x0099)] = {0x1532, 0x0099, "RazerPeripheral", "Razer Basilisk V3", "mouse"};
-    controller_database[MakeKey(0x1532, 0x0043)] = {0x1532, 0x0043, "RazerPeripheral", "Razer Mamba", "mouse"};
-    controller_database[MakeKey(0x1532, 0x005B)] = {0x1532, 0x005B, "RazerPeripheral", "Razer Naga Trinity", "mouse"};
-    controller_database[MakeKey(0x1532, 0x0083)] = {0x1532, 0x0083, "RazerPeripheral", "Razer Viper Ultimate", "mouse"};
-
-    // Mousepads
-    controller_database[MakeKey(0x1532, 0x0C00)] = {0x1532, 0x0C00, "RazerPeripheral", "Razer Firefly", "mousemat"};
-    controller_database[MakeKey(0x1532, 0x0C04)] = {0x1532, 0x0C04, "RazerPeripheral", "Razer Firefly V2", "mousemat"};
-    controller_database[MakeKey(0x1532, 0x0068)] = {0x1532, 0x0068, "RazerPeripheral", "Razer Goliathus Chroma", "mousemat"};
-
-    // ==================== LOGITECH ====================
-    controller_database[MakeKey(0x046D, 0xC336)] = {0x046D, 0xC336, "LogitechG", "Logitech G213", "keyboard"};
-    controller_database[MakeKey(0x046D, 0xC339)] = {0x046D, 0xC339, "LogitechG", "Logitech G Pro Keyboard", "keyboard"};
-    controller_database[MakeKey(0x046D, 0xC33C)] = {0x046D, 0xC33C, "LogitechG", "Logitech G513", "keyboard"};
-    controller_database[MakeKey(0x046D, 0xC342)] = {0x046D, 0xC342, "LogitechG", "Logitech G512", "keyboard"};
-    controller_database[MakeKey(0x046D, 0xC900)] = {0x046D, 0xC900, "LogitechG", "Logitech G915", "keyboard"};
-    controller_database[MakeKey(0x046D, 0xC33F)] = {0x046D, 0xC33F, "LogitechG", "Logitech G815", "keyboard"};
-    controller_database[MakeKey(0x046D, 0xC082)] = {0x046D, 0xC082, "LogitechG", "Logitech G502 Hero", "mouse"};
-    controller_database[MakeKey(0x046D, 0xC08B)] = {0x046D, 0xC08B, "LogitechG", "Logitech G502 Lightspeed", "mouse"};
-    controller_database[MakeKey(0x046D, 0xC084)] = {0x046D, 0xC084, "LogitechG", "Logitech G203", "mouse"};
-    controller_database[MakeKey(0x046D, 0xC092)] = {0x046D, 0xC092, "LogitechG", "Logitech G Pro Wireless", "mouse"};
-    controller_database[MakeKey(0x046D, 0xC088)] = {0x046D, 0xC088, "LogitechG", "Logitech G903", "mouse"};
-
-    // ==================== STEELSERIES ====================
-    controller_database[MakeKey(0x1038, 0x1610)] = {0x1038, 0x1610, "SteelSeriesApex", "SteelSeries Apex Pro", "keyboard"};
-    controller_database[MakeKey(0x1038, 0x1612)] = {0x1038, 0x1612, "SteelSeriesApex", "SteelSeries Apex 7", "keyboard"};
-    controller_database[MakeKey(0x1038, 0x161C)] = {0x1038, 0x161C, "SteelSeriesApex", "SteelSeries Apex 5", "keyboard"};
-    controller_database[MakeKey(0x1038, 0x161A)] = {0x1038, 0x161A, "SteelSeriesApex", "SteelSeries Apex 3", "keyboard"};
-    controller_database[MakeKey(0x1038, 0x184C)] = {0x1038, 0x184C, "SteelSeriesRival", "SteelSeries Rival 3", "mouse"};
-    controller_database[MakeKey(0x1038, 0x1836)] = {0x1038, 0x1836, "SteelSeriesRival", "SteelSeries Aerox 3", "mouse"};
-    controller_database[MakeKey(0x1038, 0x1724)] = {0x1038, 0x1724, "SteelSeriesRival", "SteelSeries Rival 600", "mouse", 0, 0xFFC0, -1};  // Interface 0, Usage Page 0xFFC0
-    controller_database[MakeKey(0x1038, 0x1832)] = {0x1038, 0x1832, "SteelSeriesRival", "SteelSeries Sensei Ten", "mouse"};
-
-    // ==================== ASUS ====================
-    // Motherboards (AURA LED Controller)
-    controller_database[MakeKey(0x0B05, 0x1866)] = {0x0B05, 0x1866, "AsusAuraMainboard", "ASUS Aura Motherboard", "motherboard"};
-    controller_database[MakeKey(0x0B05, 0x18F3)] = {0x0B05, 0x18F3, "AsusAuraMainboard", "ASUS Aura Motherboard", "motherboard"};
-    controller_database[MakeKey(0x0B05, 0x1939)] = {0x0B05, 0x1939, "AsusAuraMainboard", "ASUS Aura Motherboard", "motherboard"};
-    controller_database[MakeKey(0x0B05, 0x19AF)] = {0x0B05, 0x19AF, "AsusAuraMainboard", "ASUS Aura Motherboard", "motherboard", 2, 0xFF72, -1};  // Interface 2, Usage Page 0xFF72
-    controller_database[MakeKey(0x0B05, 0x1AA6)] = {0x0B05, 0x1AA6, "AsusAuraMainboard", "ASUS Aura Motherboard", "motherboard"};
-    // Addressable LED Controllers
-    controller_database[MakeKey(0x0B05, 0x1867)] = {0x0B05, 0x1867, "AsusAuraAddressable", "ASUS Aura Addressable Header", "ledstrip"};
-    controller_database[MakeKey(0x0B05, 0x1872)] = {0x0B05, 0x1872, "AsusAuraAddressable", "ASUS Aura Addressable Header", "ledstrip"};
-    controller_database[MakeKey(0x0B05, 0x1889)] = {0x0B05, 0x1889, "AsusAuraTerminal", "ASUS Aura Terminal", "ledstrip"};
-    // Keyboards
-    controller_database[MakeKey(0x0B05, 0x18F8)] = {0x0B05, 0x18F8, "AsusAuraKeyboard", "ASUS ROG Strix Scope", "keyboard"};
-    controller_database[MakeKey(0x0B05, 0x190C)] = {0x0B05, 0x190C, "AsusAuraKeyboard", "ASUS ROG Strix Scope TKL", "keyboard"};
     controller_database[MakeKey(0x0B05, 0x1875)] = {0x0B05, 0x1875, "AsusAuraKeyboard", "ASUS ROG Strix Flare", "keyboard"};
     controller_database[MakeKey(0x0B05, 0x193C)] = {0x0B05, 0x193C, "AsusAuraKeyboard", "ASUS ROG Falchion", "keyboard"};
     // Mice

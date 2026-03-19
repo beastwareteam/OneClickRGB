@@ -29,6 +29,7 @@ set(CORE_SOURCES
     src/core/OneClickRGB.cpp
     src/core/AutoStart.cpp
     src/core/ConfigManager.cpp
+    src/core/DeviceRegistry.cpp
 )
 
 set(SCANNER_SOURCES

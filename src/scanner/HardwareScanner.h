@@ -17,6 +17,8 @@
 
 namespace OneClickRGB {
 
+struct DeviceInfo; // Forward declaration
+
 /*---------------------------------------------------------*\
 | Detected Hardware Info (before loading any controller)    |
 \*---------------------------------------------------------*/
@@ -38,24 +40,6 @@ struct DetectedHardware
 
     // Unique identifier for matching with controller database
     std::string GetHardwareId() const;
-};
-
-/*---------------------------------------------------------*\
-| Controller Database Entry                                 |
-| Maps VID/PID to the controller module to load             |
-\*---------------------------------------------------------*/
-struct ControllerEntry
-{
-    uint16_t        vendor_id;
-    uint16_t        product_id;
-    std::string     controller_name;        // e.g., "CorsairPeripheral"
-    std::string     display_name;           // e.g., "Corsair K70 RGB"
-    std::string     device_type;            // keyboard, mouse, strip, etc.
-
-    // Optional: interface/usage filtering for HID
-    int             interface_number = -1;  // -1 = any
-    int             usage_page = -1;        // -1 = any
-    int             usage = -1;             // -1 = any
 };
 
 /*---------------------------------------------------------*\
@@ -87,11 +71,11 @@ public:
     // Check if hardware has a known RGB controller
     bool HasKnownController(const DetectedHardware& hw) const;
 
-    // Get controller info for detected hardware
-    const ControllerEntry* GetControllerEntry(const DetectedHardware& hw) const;
+    // Get device info for detected hardware
+    const DeviceInfo* GetDeviceInfo(const DetectedHardware& hw) const;
 
     // Get list of hardware that matches known RGB controllers
-    std::vector<std::pair<DetectedHardware, ControllerEntry>>
+    std::vector<std::pair<DetectedHardware, const DeviceInfo*>>
         GetMatchedDevices();
 
     /*-----------------------------------------------------*\
@@ -102,20 +86,9 @@ public:
     bool LoadControllerDatabase(const std::string& path);
 
     // Get statistics
-    size_t GetKnownDeviceCount() const { return controller_database.size(); }
+    size_t GetKnownDeviceCount() const;
 
 private:
-    // VID/PID -> ControllerEntry mapping
-    std::unordered_map<uint32_t, ControllerEntry> controller_database;
-
-    // Helper to create lookup key
-    static uint32_t MakeKey(uint16_t vid, uint16_t pid) {
-        return (static_cast<uint32_t>(vid) << 16) | pid;
-    }
-
-    // Initialize built-in controller database
-    void InitializeBuiltinDatabase();
-
     // Platform-specific scanning
     std::vector<DetectedHardware> ScanUSBHID_Windows();
     std::vector<DetectedHardware> ScanUSBHID_Linux();
