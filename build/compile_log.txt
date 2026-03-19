@@ -1,0 +1,8 @@
+Der Befehl "vswhere.exe" ist entweder falsch geschrieben oder
+konnte nicht gefunden werden.
+**********************************************************************
+** Visual Studio 2019 Developer Command Prompt v16.0
+** Copyright (c) 2021 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+evision_edge_refresh.cpp

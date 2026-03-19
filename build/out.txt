@@ -1,0 +1,4 @@
+Compiling oneclick_rgb.cpp with GPU support...
+oneclick_rgb.cpp
+
+SUCCESS! oneclick_rgb.exe created.
