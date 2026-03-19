@@ -1,0 +1,104 @@
+name: 🔒 Security Scan
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - '.github/workflows/security.yml'
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly Monday 2 AM
+
+jobs:
+  codeql:
+    name: CodeQL Analysis
+    runs-on: ubuntu-20.04
+    
+    permissions:
+      security-events: write
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+    
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v2
+      with:
+        languages: 'cpp'
+        queries: security-extended
+    
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v1.14
+    
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libhidapi-dev
+    
+    - name: Build
+      run: |
+        mkdir build && cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release
+        cmake --build . --config Release
+    
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
+      with:
+        category: "/language:cpp"
+
+  dependency-check:
+    name: Dependency Vulnerability Check
+    runs-on: ubuntu-20.04
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Run Dependency Check
+      uses: dependency-check/Dependency-Check_Action@main
+      with:
+        project: OneClickRGB
+        path: .
+        format: JSON
+        args: >
+          --exclude .git
+    
+    - name: Upload Dependency Check Results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: dependency-check-report
+        path: reports/
+
+  linting:
+    name: Code Quality & Linting
+    runs-on: ubuntu-20.04
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Install Linters
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-format cppcheck
+    
+    - name: Run cpplint
+      continue-on-error: true
+      run: |
+        find src -name "*.cpp" -o -name "*.h" | xargs cpplint --filter=-build/c++11 || true
+    
+    - name: Check Code Formatting
+      continue-on-error: true
+      run: |
+        find src -name "*.cpp" -o -name "*.h" | \
+        while read file; do
+          if ! clang-format --dry-run --Werror "$file" > /dev/null 2>&1; then
+            echo "File needs formatting: $file"
+            exit 1
+          fi
+        done || true

@@ -1,0 +1,169 @@
+name: 📦 Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '!v*-dev'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Get Version
+      id: version
+      run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+    
+    - name: Get Changelog
+      id: changelog
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        # Extract changelog for this version
+        sed -n "/## \[$VERSION\]/,/## \[/p" CHANGELOG.md | head -n -1 > RELEASE_NOTES.md
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        body_path: RELEASE_NOTES.md
+        draft: false
+        prerelease: ${{ contains(steps.version.outputs.version, '-alpha') || contains(steps.version.outputs.version, '-beta') }}
+        files: |
+          CHANGELOG.md
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-release:
+    name: Build Release Artifacts
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact-name: OneClickRGB-windows
+            artifact-suffix: .exe
+            
+          - os: ubuntu-20.04
+            artifact-name: OneClickRGB-linux
+            artifact-suffix: ""
+            
+          - os: macos-latest
+            artifact-name: OneClickRGB-macos
+            artifact-suffix: ""
+    
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v1.14
+    
+    - name: Install Dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libhidapi-dev ninja-build
+    
+    - name: Install Dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install hidapi ninja
+    
+    - name: Setup MSVC (Windows)
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1.12
+    
+    - name: Build
+      run: |
+        mkdir build && cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release
+        cmake --build . --config Release --parallel 4
+    
+    - name: Package (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        cd build
+        mkdir -p OneClickRGB/bin
+        cp bin/oneclickrgb OneClickRGB/bin/
+        cp ../config/devices.json OneClickRGB/
+        tar czf OneClickRGB-linux-${{ github.run_number }}.tar.gz OneClickRGB/
+    
+    - name: Package (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        cd build
+        mkdir -p OneClickRGB/bin
+        cp bin/oneclickrgb OneClickRGB/bin/
+        cp ../config/devices.json OneClickRGB/
+        tar czf OneClickRGB-macos-${{ github.run_number }}.tar.gz OneClickRGB/
+    
+    - name: Package (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        cd build
+        mkdir OneClickRGB\bin
+        copy bin\oneclickrgb.exe OneClickRGB\bin\
+        copy ..\config\devices.json OneClickRGB\
+        7z a OneClickRGB-windows-${{ github.run_number }}.zip OneClickRGB\
+    
+    - name: Upload Release Assets
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          ${{ matrix.artifact-name }}-${{ github.run_number }}*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-release:
+    name: Publish Release Information
+    needs: [create-release, build-release]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Get Version
+      id: version
+      run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+    
+    - name: Create Release Summary
+      run: |
+        echo "## Release ${{ steps.version.outputs.version }}" > RELEASE_SUMMARY.md
+        echo "" >> RELEASE_SUMMARY.md
+        echo "✅ Release successfully published!" >> RELEASE_SUMMARY.md
+        echo "" >> RELEASE_SUMMARY.md
+        echo "### Download:" >> RELEASE_SUMMARY.md
+        echo "- [Windows](https://github.com/BeastwareTeam/OneClickRGB/releases/tag/${{ steps.version.outputs.version }})" >> RELEASE_SUMMARY.md
+        echo "- [Linux](https://github.com/BeastwareTeam/OneClickRGB/releases/tag/${{ steps.version.outputs.version }})" >> RELEASE_SUMMARY.md
+        echo "- [macOS](https://github.com/BeastwareTeam/OneClickRGB/releases/tag/${{ steps.version.outputs.version }})" >> RELEASE_SUMMARY.md
+    
+    - name: Notify Slack (optional)
+      if: vars.SLACK_WEBHOOK_URL
+      uses: slackapi/slack-github-action@v1.24
+      with:
+        webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        payload: |
+          {
+            "text": "🎉 OneClickRGB ${{ steps.version.outputs.version }} released!",
+            "blocks": [
+              {
+                "type": "text",
+                "text": "Release ${{ steps.version.outputs.version }} available"
+              }
+            ]
+          }
