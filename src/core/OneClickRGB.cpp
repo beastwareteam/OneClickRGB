@@ -7,6 +7,7 @@
 \*---------------------------------------------------------*/
 
 #include "OneClickRGB.h"
+#include "modules/ModuleManager.h"
 #include <fstream>
 
 #ifdef _WIN32
@@ -76,6 +77,23 @@ bool Application::Initialize(const AppConfig& cfg)
     {
         config.profile_directory = config.config_directory + "/profiles";
     }
+
+    // Initialize module system
+    auto& moduleManager = ModuleManager::getInstance();
+    std::string modulePath = config.config_directory + "/modules";
+    if (!moduleManager.Initialize(modulePath)) {
+        std::cerr << "[OneClickRGB] Failed to initialize module system" << std::endl;
+        return false;
+    }
+
+    // Register built-in modules (will be loaded from DLLs or built-in factories)
+    // For now, we'll load them dynamically
+    moduleManager.LoadModule("asus_aura");
+    moduleManager.LoadModule("steelseries");
+
+    // Load all available modules
+    size_t loadedModules = moduleManager.LoadAllModules();
+    std::cout << "[OneClickRGB] Loaded " << loadedModules << " modules" << std::endl;
 
     // Initialize profile manager
     profile_manager = std::make_unique<ProfileManager>();

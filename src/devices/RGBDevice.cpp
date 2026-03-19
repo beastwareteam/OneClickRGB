@@ -7,6 +7,8 @@
 \*---------------------------------------------------------*/
 
 #include "RGBDevice.h"
+#include "../core/modules/ModuleManager.h"
+#include "../core/DeviceRegistry.h"
 #include <algorithm>
 
 namespace OneClickRGB {
@@ -298,10 +300,27 @@ DeviceType RGBDevice::StringToDeviceType(const std::string& type)
 | DeviceFactory Implementation                              |
 \*---------------------------------------------------------*/
 std::unique_ptr<RGBDevice> DeviceFactory::Create(
-    const DetectedHardware& hw,
-    const ControllerEntry& entry)
+    const DetectedHardware& hw)
 {
-    return std::make_unique<RGBDevice>(hw, entry);
+    // Get device info from registry
+    auto& registry = DeviceRegistry::getInstance();
+    const DeviceInfo* deviceInfo = registry.findDevice(hw.vendor_id, hw.product_id);
+
+    if (!deviceInfo) {
+        return nullptr;
+    }
+
+    // Create controller using module system
+    auto& moduleManager = ModuleManager::getInstance();
+    auto controller = moduleManager.CreateController(*deviceInfo, hw.device_path);
+
+    if (!controller) {
+        return nullptr;
+    }
+
+    // For now, return the controller directly
+    // TODO: Wrap in RGBDevice interface
+    return controller;
 }
 
 } // namespace OneClickRGB

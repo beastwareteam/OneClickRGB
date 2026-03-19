@@ -30,6 +30,7 @@ set(CORE_SOURCES
     src/core/AutoStart.cpp
     src/core/ConfigManager.cpp
     src/core/DeviceRegistry.cpp
+    src/core/modules/ModuleManager.cpp
 )
 
 set(SCANNER_SOURCES
@@ -72,6 +73,38 @@ endif()
 if(WIN32)
     target_link_libraries(oneclickrgb_core PUBLIC shell32)
 endif()
+
+# ==================== MODULES ====================
+
+# ASUS Aura Module
+add_library(asus_aura_module SHARED
+    src/modules/AsusAuraModule.cpp
+    src/controllers/AsusAuraMainboardController.cpp
+)
+
+target_link_libraries(asus_aura_module PRIVATE oneclickrgb_core)
+set_target_properties(asus_aura_module PROPERTIES
+    OUTPUT_NAME "asus_aura"
+    PREFIX ""
+)
+
+# SteelSeries Module
+add_library(steelseries_module SHARED
+    src/modules/SteelSeriesModule.cpp
+    src/controllers/SteelSeriesRival600Controller.cpp
+)
+
+target_link_libraries(steelseries_module PRIVATE oneclickrgb_core)
+set_target_properties(steelseries_module PROPERTIES
+    OUTPUT_NAME "steelseries"
+    PREFIX ""
+)
+
+# Install modules
+install(TARGETS asus_aura_module steelseries_module
+    LIBRARY DESTINATION modules
+    RUNTIME DESTINATION modules
+)
 
 # CLI Application
 if(BUILD_CLI)

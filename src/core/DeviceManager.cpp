@@ -53,10 +53,10 @@ void DeviceManager::QuickScan()
 
     status_message = "Found " + std::to_string(matched.size()) + " RGB devices";
 
-    // Create device objects (but don't initialize them yet)
-    for (const auto& [hw, entry] : matched)
+    // Create device objects using module system
+    for (const auto& [hw, deviceInfo] : matched)
     {
-        auto device = DeviceFactory::Create(hw, entry);
+        auto device = DeviceFactory::Create(hw);
         if (device)
         {
             devices.push_back(std::move(device));

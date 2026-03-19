@@ -218,8 +218,7 @@ class DeviceFactory
 {
 public:
     static std::unique_ptr<RGBDevice> Create(
-        const DetectedHardware& hw,
-        const ControllerEntry& entry);
+        const DetectedHardware& hw);
 };
 
 } // namespace OneClickRGB
