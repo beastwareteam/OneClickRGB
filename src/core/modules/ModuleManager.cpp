@@ -1,5 +1,6 @@
 #include "ModuleManager.h"
 #include "../DeviceRegistry.h"
+#include "../../devices/RGBDevice.h"
 #include <iostream>
 #include <filesystem>
 #include <algorithm>

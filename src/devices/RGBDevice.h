@@ -50,6 +50,16 @@ struct RGBColor
 };
 
 /*---------------------------------------------------------*\
+| Controller Entry from Database                            |
+\*---------------------------------------------------------*/
+struct ControllerEntry
+{
+    std::string display_name;
+    std::string controller_name;
+    std::string device_type;
+};
+
+/*---------------------------------------------------------*\
 | Device Type Enum                                          |
 \*---------------------------------------------------------*/
 enum class DeviceType

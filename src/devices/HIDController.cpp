@@ -11,6 +11,7 @@
 #include <cstring>
 #include <algorithm>
 #include <memory>
+#include <hidapi.h>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
