@@ -27,7 +27,9 @@ echo.
 
 :: Compile all source files
 set SOURCES=
-set SOURCES=%SOURCES% "%SRC_DIR%\main.cpp"
+set SOURCES=%SOURCES% "%SRC_DIR%\main_gui.cpp"
+set SOURCES=%SOURCES% "%SRC_DIR%\ui\MainWindow.cpp"
+set SOURCES=%SOURCES% "%BUILD_DIR%\moc_MainWindow.cpp"
 set SOURCES=%SOURCES% "%SRC_DIR%\core\OneClickRGB.cpp"
 set SOURCES=%SOURCES% "%SRC_DIR%\core\DeviceManager.cpp"
 set SOURCES=%SOURCES% "%SRC_DIR%\core\ProfileManager.cpp"
@@ -48,9 +50,15 @@ set INCLUDES=/I"%SRC_DIR%"
 set INCLUDES=%INCLUDES% /I"%ROOT_DIR%\dependencies\hidapi"
 set INCLUDES=%INCLUDES% /I"%ROOT_DIR%\dependencies"
 set INCLUDES=%INCLUDES% /I"%QT_DIR%\include"
+set INCLUDES=%INCLUDES% /I"%QT_DIR%\include\QtCore"
+set INCLUDES=%INCLUDES% /I"%QT_DIR%\include\QtGui"
+set INCLUDES=%INCLUDES% /I"%QT_DIR%\include\QtWidgets"
 
 :: Libraries
-set LIBS=shell32.lib advapi32.lib setupapi.lib "%ROOT_DIR%\dependencies\hidapi\hidapi.lib"
+set LIBS=shell32.lib advapi32.lib setupapi.lib "%ROOT_DIR%\dependencies\hidapi\hidapi.lib" Qt5Core.lib Qt5Gui.lib Qt5Widgets.lib
+
+:: Library paths
+set LIBPATHS=/LIBPATH:"%QT_DIR%\lib"
 
 :: Output
 set OUTPUT=%BUILD_DIR%\oneclickrgb.exe
@@ -60,7 +68,7 @@ echo Output: %OUTPUT%
 echo Includes: %INCLUDES%
 echo.
 
-cl.exe %CFLAGS% %INCLUDES% %SOURCES% /Fe"%OUTPUT%" /link %LIBS%
+cl.exe %CFLAGS% %INCLUDES% %SOURCES% /Fe"%OUTPUT%" /link %LIBPATHS% %LIBS%
 
 if errorlevel 1 (
     echo.
