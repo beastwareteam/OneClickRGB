@@ -110,6 +110,14 @@
 #define ID_BTN_MAXIMIZE 3031
 #define ID_BTN_CLOSE 3032
 
+// Global Hotkeys
+#define ID_HOTKEY_BLUE 4001
+#define ID_HOTKEY_RED 4002
+#define ID_HOTKEY_GREEN 4003
+#define ID_HOTKEY_WHITE 4004
+#define ID_HOTKEY_OFF 4005
+#define ID_HOTKEY_TOGGLE 4006
+
 // Control IDs
 #define ID_BTN_APPLY 1001
 #define ID_BTN_PICK_COLOR 1002
@@ -502,6 +510,9 @@ std::wstring GetAppDataPath() {
     return dir;
 }
 
+// Window position storage
+int g_windowX = CW_USEDEFAULT, g_windowY = CW_USEDEFAULT;
+
 void SaveAppSettings() {
     std::wstring path = GetAppDataPath() + L"\\app_settings.cfg";
     std::ofstream file(path);
@@ -512,6 +523,13 @@ void SaveAppSettings() {
         if (!g_state.lastProfile.empty()) {
             std::string profileName(g_state.lastProfile.begin(), g_state.lastProfile.end());
             file << "lastProfile=" << profileName << "\n";
+        }
+        // Save window position
+        if (g_state.hWnd) {
+            RECT rc;
+            GetWindowRect(g_state.hWnd, &rc);
+            file << "windowX=" << rc.left << "\n";
+            file << "windowY=" << rc.top << "\n";
         }
         file.close();
     }
@@ -536,6 +554,13 @@ void LoadAppSettings() {
             if (line.find("lastProfile=") == 0) {
                 std::string profileName = line.substr(12);
                 g_state.lastProfile = std::wstring(profileName.begin(), profileName.end());
+            }
+            // Load window position
+            if (line.find("windowX=") == 0) {
+                g_windowX = std::stoi(line.substr(8));
+            }
+            if (line.find("windowY=") == 0) {
+                g_windowY = std::stoi(line.substr(8));
             }
         }
         file.close();
@@ -2891,6 +2916,54 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             }
         }
+
+        // Register global hotkeys (Ctrl+Alt+1-6)
+        RegisterHotKey(hWnd, ID_HOTKEY_BLUE, MOD_CONTROL | MOD_ALT, '1');
+        RegisterHotKey(hWnd, ID_HOTKEY_RED, MOD_CONTROL | MOD_ALT, '2');
+        RegisterHotKey(hWnd, ID_HOTKEY_GREEN, MOD_CONTROL | MOD_ALT, '3');
+        RegisterHotKey(hWnd, ID_HOTKEY_WHITE, MOD_CONTROL | MOD_ALT, '4');
+        RegisterHotKey(hWnd, ID_HOTKEY_OFF, MOD_CONTROL | MOD_ALT, '0');
+        RegisterHotKey(hWnd, ID_HOTKEY_TOGGLE, MOD_CONTROL | MOD_ALT, VK_SPACE);
+
+        break;
+    }
+
+    case WM_HOTKEY: {
+        static bool ledsOn = true;
+        static uint8_t lastR = 0, lastG = 34, lastB = 255;
+
+        switch (wParam) {
+            case ID_HOTKEY_BLUE:
+                SetPresetColor(0, 34, 255);
+                ApplyColors();
+                break;
+            case ID_HOTKEY_RED:
+                SetPresetColor(255, 0, 0);
+                ApplyColors();
+                break;
+            case ID_HOTKEY_GREEN:
+                SetPresetColor(0, 255, 0);
+                ApplyColors();
+                break;
+            case ID_HOTKEY_WHITE:
+                SetPresetColor(255, 255, 255);
+                ApplyColors();
+                break;
+            case ID_HOTKEY_OFF:
+                SetPresetColor(0, 0, 0);
+                ApplyColors();
+                break;
+            case ID_HOTKEY_TOGGLE:
+                if (ledsOn) {
+                    lastR = g_state.red; lastG = g_state.green; lastB = g_state.blue;
+                    SetPresetColor(0, 0, 0);
+                } else {
+                    SetPresetColor(lastR, lastG, lastB);
+                }
+                ledsOn = !ledsOn;
+                ApplyColors();
+                break;
+        }
         break;
     }
 
@@ -3358,7 +3431,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
 
     case WM_DESTROY:
+        // Save window position before exit
+        SaveAppSettings();
         g_watcherRunning = false;  // Stop resume watcher thread
+        // Unregister hotkeys
+        UnregisterHotKey(hWnd, ID_HOTKEY_BLUE);
+        UnregisterHotKey(hWnd, ID_HOTKEY_RED);
+        UnregisterHotKey(hWnd, ID_HOTKEY_GREEN);
+        UnregisterHotKey(hWnd, ID_HOTKEY_WHITE);
+        UnregisterHotKey(hWnd, ID_HOTKEY_OFF);
+        UnregisterHotKey(hWnd, ID_HOTKEY_TOGGLE);
         WTSUnRegisterSessionNotification(hWnd);
         RemoveTrayIcon();
         if (g_hBgBrush) DeleteObject(g_hBgBrush);
@@ -3421,10 +3503,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     bool isAdmin = IsRunningAsAdmin();
     swprintf_s(g_windowTitle, 256, g_str->windowTitle, isAdmin ? L"\x2705" : L"\x274C");
 
-    // Create window
+    // Create window with saved position
     g_state.hWnd = CreateWindowW(L"OneClickRGBClass", g_windowTitle,
         style,
-        CW_USEDEFAULT, CW_USEDEFAULT, WINDOW_WIDTH, WINDOW_HEIGHT,
+        g_windowX, g_windowY, WINDOW_WIDTH, WINDOW_HEIGHT,
         NULL, NULL, hInstance, NULL);
 
     // Enable rounded corners on Windows 11
