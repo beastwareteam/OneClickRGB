@@ -2591,7 +2591,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         const int GTH = GROUP_TITLE_H;  // 18 - group title height
         const int IS = ITEM_SPACING;    // 6 - vertical item spacing
         const int IHS = ITEM_H_SPACING; // 8 - horizontal item spacing
-        const int TBH = TITLEBAR_H;     // 32 - custom titlebar height
 
         // Window client area = WINDOW_WIDTH (555)
         // Group box width = WINDOW_WIDTH - 2*MARGIN = 555 - 24 = 531
@@ -2599,32 +2598,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Inner content width = CW - 2*GP = 531 - 20 = 511
         const int ICW = CW - GP * 2;  // 511 = usable width inside group
 
-        // ═══════════════════════════════════════════════════════════════
-        // CUSTOM TITLEBAR
-        // ═══════════════════════════════════════════════════════════════
-        // Titlebar buttons (right-aligned): Close, Maximize, Minimize
-        int btnW = 46;
-        int btnH = TBH;
-        int btnX = WINDOW_WIDTH - btnW;
-
-        // Close button (X) - actually minimizes to tray
-        g_state.hBtnClose = CreateWindowW(L"BUTTON", L"\u2715",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            btnX, 0, btnW, btnH, hWnd, (HMENU)ID_BTN_CLOSE, NULL, NULL);
-        btnX -= btnW;
-
-        // Maximize button
-        g_state.hBtnMaximize = CreateWindowW(L"BUTTON", L"\u25A1",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            btnX, 0, btnW, btnH, hWnd, (HMENU)ID_BTN_MAXIMIZE, NULL, NULL);
-        btnX -= btnW;
-
-        // Minimize button
-        g_state.hBtnMinimize = CreateWindowW(L"BUTTON", L"\u2014",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            btnX, 0, btnW, btnH, hWnd, (HMENU)ID_BTN_MINIMIZE, NULL, NULL);
-
-        int y = TBH + M;  // Start content below titlebar
+        // Start content at top margin (standard Windows titlebar)
+        int y = M;
         int x = M;  // x = left edge of group boxes
         int gy;  // Group content y start
 
@@ -2729,10 +2704,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         // Row 1: Keyboard + Edge mode
         CreateWindowW(L"STATIC", g_str->keyboardEffect, WS_CHILD | WS_VISIBLE,
-            x + GP, gy + 2, 56, CTRL_H, hWnd, NULL, NULL, NULL);
+            x + GP, gy + 2, 52, CTRL_H, hWnd, NULL, NULL, NULL);
         g_state.hComboKbMode = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            x + GP + 60, gy, MAX_COMBO_W, 200, hWnd, (HMENU)ID_COMBO_KB_MODE, NULL, NULL);
+            x + GP + 56, gy, 130, 200, hWnd, (HMENU)ID_COMBO_KB_MODE, NULL, NULL);
         SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Static");
         SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Breathing");
         SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Spectrum");
@@ -2746,12 +2721,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Hurricane");
         SendMessage(g_state.hComboKbMode, CB_SETCURSEL, 0, 0);
 
-        int ex = x + GP + 60 + MAX_COMBO_W + IHS * 2;
         CreateWindowW(L"STATIC", g_str->edgeEffect, WS_CHILD | WS_VISIBLE,
-            ex, gy + 2, 36, CTRL_H, hWnd, NULL, NULL, NULL);
+            x + GP + 200, gy + 2, 36, CTRL_H, hWnd, NULL, NULL, NULL);
         g_state.hComboEdgeMode = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-            ex + 40, gy, 120, 200, hWnd, (HMENU)ID_COMBO_EDGE_MODE, NULL, NULL);
+            x + GP + 240, gy, 120, 200, hWnd, (HMENU)ID_COMBO_EDGE_MODE, NULL, NULL);
         SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)L"Freeze");
         SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)L"Wave");
         SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)L"Spectrum");
@@ -2788,46 +2762,46 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int g3y = y;
         gy = y + GTH + GP;
 
-        // Row 1: ASUS Aura, SteelSeries, Keyboard
+        // Row 1: Device checkboxes
         g_state.hCheckAura = CreateWindowW(L"BUTTON", L"ASUS Aura",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP, gy, 100, CTRL_H, hWnd, (HMENU)ID_CHECK_AURA, NULL, NULL);
+            x + GP, gy, 85, CTRL_H, hWnd, (HMENU)ID_CHECK_AURA, NULL, NULL);
         SendMessage(g_state.hCheckAura, BM_SETCHECK, BST_CHECKED, 0);
 
         g_state.hCheckMouse = CreateWindowW(L"BUTTON", L"SteelSeries",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP + 104, gy, 100, CTRL_H, hWnd, (HMENU)ID_CHECK_MOUSE, NULL, NULL);
+            x + GP + 90, gy, 85, CTRL_H, hWnd, (HMENU)ID_CHECK_MOUSE, NULL, NULL);
         SendMessage(g_state.hCheckMouse, BM_SETCHECK, BST_CHECKED, 0);
 
         g_state.hCheckKeyboard = CreateWindowW(L"BUTTON", L"Keyboard",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP + 208, gy, 95, CTRL_H, hWnd, (HMENU)ID_CHECK_KEYBOARD, NULL, NULL);
+            x + GP + 180, gy, 80, CTRL_H, hWnd, (HMENU)ID_CHECK_KEYBOARD, NULL, NULL);
         SendMessage(g_state.hCheckKeyboard, BM_SETCHECK, BST_CHECKED, 0);
 
-        CreateWindowW(L"BUTTON", g_str->channelCorrection,
-            WS_CHILD | WS_VISIBLE,
-            x + GP + ICW - 175, gy, 80, CTRL_H, hWnd, (HMENU)ID_BTN_CHANNEL_SETTINGS, NULL, NULL);
-
-        CreateWindowW(L"BUTTON", L"ASUS Test",
-            WS_CHILD | WS_VISIBLE,
-            x + GP + ICW - 90, gy, 70, CTRL_H, hWnd, (HMENU)ID_BTN_ASUS_TEST, NULL, NULL);
-
-        CreateWindowW(L"BUTTON", L"HID Reset",
-            WS_CHILD | WS_VISIBLE,
-            x + GP + ICW - 18, gy, 70, CTRL_H, hWnd, (HMENU)ID_BTN_HID_RESET, NULL, NULL);
-
-        // Row 2: Edge LEDs, RAM
-        gy += CTRL_H + IS;
-
-        g_state.hCheckEdge = CreateWindowW(L"BUTTON", L"Edge LEDs",
+        g_state.hCheckEdge = CreateWindowW(L"BUTTON", L"Edge",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP, gy, 95, CTRL_H, hWnd, (HMENU)ID_CHECK_EDGE, NULL, NULL);
+            x + GP + 265, gy, 55, CTRL_H, hWnd, (HMENU)ID_CHECK_EDGE, NULL, NULL);
         SendMessage(g_state.hCheckEdge, BM_SETCHECK, BST_CHECKED, 0);
 
         g_state.hCheckRAM = CreateWindowW(L"BUTTON", L"RAM",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP + 104, gy, 65, CTRL_H, hWnd, (HMENU)ID_CHECK_RAM, NULL, NULL);
+            x + GP + 325, gy, 50, CTRL_H, hWnd, (HMENU)ID_CHECK_RAM, NULL, NULL);
         SendMessage(g_state.hCheckRAM, BM_SETCHECK, BST_CHECKED, 0);
+
+        // Row 2: Action buttons (right-aligned within group)
+        gy += CTRL_H + IS;
+
+        CreateWindowW(L"BUTTON", g_str->channelCorrection,
+            WS_CHILD | WS_VISIBLE,
+            x + GP, gy, 70, CTRL_H, hWnd, (HMENU)ID_BTN_CHANNEL_SETTINGS, NULL, NULL);
+
+        CreateWindowW(L"BUTTON", L"ASUS",
+            WS_CHILD | WS_VISIBLE,
+            x + GP + 75, gy, 50, CTRL_H, hWnd, (HMENU)ID_BTN_ASUS_TEST, NULL, NULL);
+
+        CreateWindowW(L"BUTTON", L"HID Reset",
+            WS_CHILD | WS_VISIBLE,
+            x + GP + 130, gy, 70, CTRL_H, hWnd, (HMENU)ID_BTN_HID_RESET, NULL, NULL);
 
         int g3h = gy + CTRL_H + GP - g3y;
         g_groups[2] = {x, g3y, CW, g3h, g_str->devices};
@@ -2839,20 +2813,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int g4y = y;
         gy = y + GTH + GP;
 
+        // Row 1: Profile dropdown + Save/Load
         CreateWindowW(L"STATIC", g_str->profile, WS_CHILD | WS_VISIBLE,
-            x + GP, gy + 2, 42, CTRL_H, hWnd, NULL, NULL, NULL);
+            x + GP, gy + 2, 40, CTRL_H, hWnd, NULL, NULL, NULL);
         g_state.hComboProfiles = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | WS_VSCROLL,
-            x + GP + 46, gy, 120, 200, hWnd, (HMENU)ID_COMBO_PROFILES, NULL, NULL);
+            x + GP + 44, gy, 110, 200, hWnd, (HMENU)ID_COMBO_PROFILES, NULL, NULL);
 
         CreateWindowW(L"BUTTON", g_str->save, WS_CHILD | WS_VISIBLE,
-            x + GP + 170, gy, 50, CTRL_H, hWnd, (HMENU)ID_BTN_SAVE_PROFILE, NULL, NULL);
+            x + GP + 160, gy, 65, CTRL_H, hWnd, (HMENU)ID_BTN_SAVE_PROFILE, NULL, NULL);
         CreateWindowW(L"BUTTON", g_str->load, WS_CHILD | WS_VISIBLE,
-            x + GP + 224, gy, 50, CTRL_H, hWnd, (HMENU)ID_BTN_LOAD_PROFILE, NULL, NULL);
+            x + GP + 230, gy, 50, CTRL_H, hWnd, (HMENU)ID_BTN_LOAD_PROFILE, NULL, NULL);
 
+        // Settings checkboxes
         g_state.hCheckAutostart = CreateWindowW(L"BUTTON", g_str->autostart,
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP + 284, gy, 80, CTRL_H, hWnd, (HMENU)ID_CHECK_AUTOSTART, NULL, NULL);
+            x + GP + 285, gy, 75, CTRL_H, hWnd, (HMENU)ID_CHECK_AUTOSTART, NULL, NULL);
         if (IsAutoStartEnabled()) {
             SendMessage(g_state.hCheckAutostart, BM_SETCHECK, BST_CHECKED, 0);
             g_state.autostart = true;
@@ -2860,7 +2836,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         g_state.hCheckMinimizeTray = CreateWindowW(L"BUTTON", g_str->tray,
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP + 368, gy, 50, CTRL_H, hWnd, (HMENU)ID_CHECK_MINIMIZE_TRAY, NULL, NULL);
+            x + GP + 365, gy, 45, CTRL_H, hWnd, (HMENU)ID_CHECK_MINIMIZE_TRAY, NULL, NULL);
         SendMessage(g_state.hCheckMinimizeTray, BM_SETCHECK, BST_CHECKED, 0);
 
         int g4h = gy + CTRL_H + GP - g4y;
@@ -2988,32 +2964,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         );
         g.FillRectangle(&bgBrush, 0, 0, clientRect.right, clientRect.bottom);
 
-        // ═══════════════════════════════════════════════════════════════
-        // CUSTOM TITLEBAR
-        // ═══════════════════════════════════════════════════════════════
-        // Titlebar background (slightly darker)
-        Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 15, 17, 25));
-        g.FillRectangle(&titleBrush, 0, 0, clientRect.right, TITLEBAR_H);
-
-        // Draw logo in titlebar (left side, same margin as content)
-        int logoSize = 22;
-        int logoX = MARGIN;
-        int logoY = (TITLEBAR_H - logoSize) / 2;
-
-        if (g_pLogoImage && g_logoWidth > 0 && g_logoHeight > 0) {
-            g.DrawImage(g_pLogoImage,
-                Gdiplus::Rect(logoX, logoY, logoSize, logoSize),
-                0, 0, g_logoWidth, g_logoHeight,
-                Gdiplus::UnitPixel);
-        }
-
-        // Draw window title next to logo
-        Gdiplus::Font titleFont(L"Segoe UI", 10, Gdiplus::FontStyleBold);
-        Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 220, 225, 235));
-        g.DrawString(g_windowTitle, -1, &titleFont,
-            Gdiplus::PointF((float)(logoX + logoSize + 8), (float)(TITLEBAR_H - 18) / 2),
-            &textBrush);
-
         // Draw group boxes with rounded corners
         for (int i = 0; i < g_numGroups; i++) {
             DrawThemedGroupBox(hdc, g_groups[i]);
@@ -3064,53 +3014,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return (LRESULT)GetStockObject(HOLLOW_BRUSH);
     }
 
-    case WM_DRAWITEM: {
-        DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lParam;
-        if (dis->CtlType == ODT_BUTTON) {
-            // Custom titlebar button drawing
-            HDC hdc = dis->hDC;
-            RECT rc = dis->rcItem;
-
-            // Background color based on state
-            COLORREF bgColor;
-            if (dis->itemState & ODS_SELECTED) {
-                bgColor = RGB(60, 65, 75);  // Pressed
-            } else if (dis->itemState & ODS_HOTLIGHT || GetCapture() == dis->hwndItem) {
-                if (dis->CtlID == ID_BTN_CLOSE) {
-                    bgColor = RGB(200, 60, 60);  // Red for close hover
-                } else {
-                    bgColor = RGB(50, 55, 65);  // Hover
-                }
-            } else {
-                bgColor = RGB(15, 17, 25);  // Normal (match titlebar)
-            }
-
-            HBRUSH hBrush = CreateSolidBrush(bgColor);
-            FillRect(hdc, &rc, hBrush);
-            DeleteObject(hBrush);
-
-            // Draw icon
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(200, 205, 215));
-
-            wchar_t text[8];
-            GetWindowTextW(dis->hwndItem, text, 8);
-
-            HFONT hFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            HFONT oldFont = (HFONT)SelectObject(hdc, hFont);
-
-            DrawTextW(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-            SelectObject(hdc, oldFont);
-            DeleteObject(hFont);
-
-            return TRUE;
-        }
-        break;
-    }
-
     case WM_CTLCOLOREDIT: {
         HDC hdc = (HDC)wParam;
         SetTextColor(hdc, RGB(230, 235, 245));
@@ -3130,38 +3033,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_ERASEBKGND:
         return 1;  // Prevent flicker, WM_PAINT handles background
-
-    case WM_NCHITTEST: {
-        // Custom hit testing for frameless window
-        POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        ScreenToClient(hWnd, &pt);
-
-        RECT rc;
-        GetClientRect(hWnd, &rc);
-
-        const int border = 6;  // Resize border thickness
-
-        // Check resize borders first
-        if (pt.y < border) {
-            if (pt.x < border) return HTTOPLEFT;
-            if (pt.x >= rc.right - border) return HTTOPRIGHT;
-            return HTTOP;
-        }
-        if (pt.y >= rc.bottom - border) {
-            if (pt.x < border) return HTBOTTOMLEFT;
-            if (pt.x >= rc.right - border) return HTBOTTOMRIGHT;
-            return HTBOTTOM;
-        }
-        if (pt.x < border) return HTLEFT;
-        if (pt.x >= rc.right - border) return HTRIGHT;
-
-        // Titlebar area (for dragging) - exclude buttons
-        if (pt.y < TITLEBAR_H && pt.x < WINDOW_WIDTH - 3 * 46) {
-            return HTCAPTION;
-        }
-
-        return HTCLIENT;
-    }
 
     case WM_GETMINMAXINFO: {
         // Set minimum window size
@@ -3209,22 +3080,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
 
-        // Custom titlebar buttons
-        if (id == ID_BTN_CLOSE) {
-            // Close button minimizes to tray instead of closing
-            MinimizeToTray();
-        }
-        else if (id == ID_BTN_MAXIMIZE) {
-            if (IsZoomed(hWnd)) {
-                ShowWindow(hWnd, SW_RESTORE);
-            } else {
-                ShowWindow(hWnd, SW_MAXIMIZE);
-            }
-        }
-        else if (id == ID_BTN_MINIMIZE) {
-            ShowWindow(hWnd, SW_MINIMIZE);
-        }
-        else if (id == ID_BTN_APPLY) {
+        if (id == ID_BTN_APPLY) {
             ApplyColors();  // Direct call, no thread
         }
         else if (id == ID_BTN_PICK_COLOR) {
@@ -3496,22 +3352,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));  // Custom icon from resource
     RegisterClassW(&wc);
 
-    // Frameless window with custom titlebar, resizable
-    DWORD style = WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+    // Standard Windows window with normal titlebar
+    DWORD style = WS_OVERLAPPEDWINDOW;  // Full window controls including move/resize
 
     // Build window title with admin status
     bool isAdmin = IsRunningAsAdmin();
     swprintf_s(g_windowTitle, 256, g_str->windowTitle, isAdmin ? L"\x2705" : L"\x274C");
 
+    // Calculate window size to get exact client area
+    RECT rc = {0, 0, WINDOW_WIDTH, WINDOW_HEIGHT - TITLEBAR_H};  // Subtract custom titlebar height we're not using
+    AdjustWindowRect(&rc, style, FALSE);
+
     // Create window with saved position
     g_state.hWnd = CreateWindowW(L"OneClickRGBClass", g_windowTitle,
         style,
-        g_windowX, g_windowY, WINDOW_WIDTH, WINDOW_HEIGHT,
+        g_windowX, g_windowY, rc.right - rc.left, rc.bottom - rc.top,
         NULL, NULL, hInstance, NULL);
-
-    // Enable rounded corners on Windows 11
-    DWORD cornerPref = 2;  // DWMWCP_ROUND
-    DwmSetWindowAttribute(g_state.hWnd, 33, &cornerPref, sizeof(cornerPref));
 
     // Register for power setting notifications (resume from sleep)
     GUID GUID_CONSOLE_DISPLAY_STATE = {0x6fe69556, 0x704a, 0x47a0, {0x8f, 0x24, 0x8d, 0x93, 0x6f, 0xda, 0x47}};
