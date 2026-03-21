@@ -65,13 +65,13 @@
 #define APP_VERSION L"3.4"
 
 // Layout constants (responsive)
-#define WINDOW_WIDTH 555
-#define WINDOW_HEIGHT 680
+#define WINDOW_WIDTH 640
+#define WINDOW_HEIGHT 820
 #define TITLEBAR_H 32       // Custom titlebar height
 #define MARGIN 12           // Window margin
 #define GROUP_MARGIN 8      // Space between groups
-#define GROUP_TITLE_H 18    // Height for group title
-#define GROUP_PADDING 10    // Padding inside group (after title)
+#define GROUP_TITLE_H 32    // Height for group title badge + spacing below
+#define GROUP_PADDING 12    // Padding inside group (uniform: left, top, bottom)
 #define ITEM_SPACING 6      // Vertical spacing between items
 #define ITEM_H_SPACING 8    // Horizontal spacing between items
 #define BORDER_RADIUS 8     // Rounded corners for groups
@@ -83,12 +83,14 @@
 #define LABEL_W 70
 #define CHECKBOX_W 85
 #define SMALL_BTN_W 50
-#define COLOR_BTN_W 44
+#define COLOR_BTN_W 48      // Minimum width for color preset buttons
+#define BTN_GAP 6           // Gap between buttons
 
 // Control heights
-#define CTRL_H 22
+#define CTRL_H 28           // Minimum height for buttons (includes 2px inset on each side)
+#define BTN_H 28            // Explicit button height
 #define SLIDER_H 20
-#define STATUS_H 90
+#define STATUS_H 120
 
 // Tray icon
 #define WM_TRAYICON (WM_USER + 1)
@@ -456,6 +458,8 @@ struct AppState {
     HWND hComboKbMode = NULL, hComboEdgeMode = NULL;
     HWND hComboProfiles = NULL;
     HWND hStatus = NULL;
+    HWND hStatusBorder = NULL;  // Rounded border container for status log
+    HWND hLogo = NULL;  // Logo control (always on top)
     HWND hCheckAura = NULL, hCheckMouse = NULL, hCheckKeyboard = NULL;
     HWND hCheckRAM = NULL, hCheckEdge = NULL;
     HWND hCheckAutostart = NULL, hCheckMinimizeTray = NULL, hCheckAutoApply = NULL;
@@ -484,6 +488,7 @@ struct AppState {
     bool autostart = false;
     bool minimizeToTray = true;
     bool autoApply = true;
+    bool dryRun = false;  // Dry-run mode: skip hardware communication
 
     // Status
     std::wstring statusLog;
@@ -1270,6 +1275,11 @@ static std::string GetExeDirA() {
     return pos != std::string::npos ? dir.substr(0, pos) : ".";
 }
 
+// Reset G.Skill RAM to a known state (turn off LEDs)
+bool ResetGSkillRAM() {
+    return SetGSkillRAM(0, 0, 0);  // Turn off all LEDs
+}
+
 bool SetGSkillRAM(uint8_t r, uint8_t g, uint8_t b) {
     std::string exeDir = GetExeDirA();
 
@@ -1502,9 +1512,9 @@ void SystemRestart() {
 //=============================================================================
 
 void FullHIDReset() {
-    AppendStatus(L"Resetting ASUS Aura...");
+    AppendStatus(L"Resetting all RGB devices...");
 
-    // Shutdown and reinitialize HID
+    // === 1. Reset ASUS Aura (HID) ===
     hid_exit();
     Sleep(500);
     if (hid_init() != 0) {
@@ -1524,47 +1534,57 @@ void FullHIDReset() {
     }
     hid_free_enumeration(devs);
 
-    if (!dev) {
-        AppendStatus(L"[ERROR] ASUS Aura not found");
-        return;
-    }
+    if (dev) {
+        uint8_t buf[65];
 
-    uint8_t buf[65];
-
-    // Request Config Table (0xB0)
-    memset(buf, 0, sizeof(buf));
-    buf[0x00] = 0xEC;
-    buf[0x01] = 0xB0;
-    hid_write(dev, buf, 65);
-    hid_read_timeout(dev, buf, 65, 500);
-    Sleep(20);
-
-    // SetGen1 - Required before Direct Mode
-    memset(buf, 0, sizeof(buf));
-    buf[0x00] = 0xEC;
-    buf[0x01] = 0x52;
-    buf[0x02] = 0x53;
-    buf[0x03] = 0x00;
-    buf[0x04] = 0x01;
-    hid_write(dev, buf, 65);
-    Sleep(50);
-
-    // Switch all channels to Direct Mode (0x35 with mode 0xFF)
-    for (int ch = 0; ch < 8; ch++) {
+        // Request Config Table (0xB0)
         memset(buf, 0, sizeof(buf));
         buf[0x00] = 0xEC;
-        buf[0x01] = 0x35;
-        buf[0x02] = ch;
-        buf[0x03] = 0x00;
-        buf[0x04] = 0x00;
-        buf[0x05] = 0xFF;
+        buf[0x01] = 0xB0;
         hid_write(dev, buf, 65);
-        Sleep(5);
+        hid_read_timeout(dev, buf, 65, 500);
+        Sleep(20);
+
+        // SetGen1 - Required before Direct Mode
+        memset(buf, 0, sizeof(buf));
+        buf[0x00] = 0xEC;
+        buf[0x01] = 0x52;
+        buf[0x02] = 0x53;
+        buf[0x03] = 0x00;
+        buf[0x04] = 0x01;
+        hid_write(dev, buf, 65);
+        Sleep(50);
+
+        // Switch all channels to Direct Mode (0x35 with mode 0xFF)
+        for (int ch = 0; ch < 8; ch++) {
+            memset(buf, 0, sizeof(buf));
+            buf[0x00] = 0xEC;
+            buf[0x01] = 0x35;
+            buf[0x02] = ch;
+            buf[0x03] = 0x00;
+            buf[0x04] = 0x00;
+            buf[0x05] = 0xFF;
+            hid_write(dev, buf, 65);
+            Sleep(5);
+        }
+
+        hid_close(dev);
+        AppendStatus(L"ASUS Aura reset OK");
+    } else {
+        AppendStatus(L"[WARN] ASUS Aura not found");
     }
 
-    hid_close(dev);
     hid_exit();
-    AppendStatus(L"ASUS Aura reset OK");
+
+    // === 2. Reset G.Skill RAM (SMBus) ===
+    // G.Skill RAM uses SMBus, not HID - reset separately
+    if (g_state.enableRAM) {
+        AppendStatus(L"Resetting G.Skill RAM...");
+        // Brief reset pulse: turn off, wait, then ApplyColors will set correct color
+        SetGSkillRAM(0, 0, 0);
+        Sleep(100);
+        AppendStatus(L"G.Skill RAM reset OK");
+    }
 }
 
 //=============================================================================
@@ -1587,13 +1607,33 @@ void ApplyColors() {
     int brightness = g_state.brightness;
     int speed = g_state.speed;
     int edgeMode = g_state.edgeMode;
+    bool dryRun = g_state.dryRun;
 
     ClearStatus();
+
+    if (dryRun) {
+        AppendStatus(L"=== DRY RUN MODE ===");
+    }
     AppendStatus(L"=== Applying RGB Settings ===");
 
-    wchar_t buf[64];
-    swprintf(buf, 64, L"Color: #%02X%02X%02X", r, g, b);
+    wchar_t buf[128];
+    swprintf(buf, 128, L"Color: #%02X%02X%02X", r, g, b);
     AppendStatus(buf);
+
+    // Skip hardware communication in dry-run mode
+    if (dryRun) {
+        if (doAura) AppendStatus(L"[DRY] ASUS Aura: skipped");
+        if (doMouse) AppendStatus(L"[DRY] SteelSeries: skipped");
+        if (doKeyboard) {
+            swprintf(buf, 128, L"[DRY] Keyboard mode %d: skipped", kbMode);
+            AppendStatus(buf);
+        }
+        if (doEdge) AppendStatus(L"[DRY] Edge LEDs: skipped");
+        if (doRAM) AppendStatus(L"[DRY] G.Skill RAM: skipped");
+        AppendStatus(L"=== DRY RUN Complete ===");
+        g_state.applying = false;
+        return;
+    }
 
     hid_init();
 
@@ -2555,11 +2595,44 @@ void DrawThemedGroupBox(HDC hdc, const GroupRect& g) {
     borderPen.SetAlignment(Gdiplus::PenAlignmentCenter);
     gfx.DrawPath(&borderPen, &path);
 
-    // Title
+    // Title badge
     Gdiplus::FontFamily fontFamily(L"Segoe UI");
-    Gdiplus::Font font(&fontFamily, 10, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
-    Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 80, 180, 255));
-    gfx.DrawString(g.title, -1, &font, Gdiplus::PointF((float)g.x + 12, (float)g.y + 2), &textBrush);
+    Gdiplus::Font font(&fontFamily, 9, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+
+    // Measure text for badge size
+    Gdiplus::RectF textBounds;
+    gfx.MeasureString(g.title, -1, &font, Gdiplus::PointF(0, 0), &textBounds);
+
+    float badgeX = (float)g.x + GROUP_PADDING;  // Same as left padding
+    float badgeY = (float)g.y + GROUP_PADDING; // Same as top padding
+    float badgeW = textBounds.Width + 18;
+    float badgeH = 20;
+    float badgeR = 5.0f;
+
+    // Badge rounded rect
+    Gdiplus::GraphicsPath badgePath;
+    float bd = badgeR * 2;
+    badgePath.AddArc(badgeX, badgeY, bd, bd, 180, 90);
+    badgePath.AddArc(badgeX + badgeW - bd, badgeY, bd, bd, 270, 90);
+    badgePath.AddArc(badgeX + badgeW - bd, badgeY + badgeH - bd, bd, bd, 0, 90);
+    badgePath.AddArc(badgeX, badgeY + badgeH - bd, bd, bd, 90, 90);
+    badgePath.CloseFigure();
+
+    // Badge fill (subtle gradient feel)
+    Gdiplus::SolidBrush badgeFill(Gdiplus::Color(255, 35, 80, 140));
+    gfx.FillPath(&badgeFill, &badgePath);
+
+    // Badge border
+    Gdiplus::Pen badgeBorderPen(Gdiplus::Color(255, 60, 120, 200), 1.0f);
+    gfx.DrawPath(&badgeBorderPen, &badgePath);
+
+    // Title text (centered in badge)
+    Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 180, 220, 255));
+    Gdiplus::StringFormat format;
+    format.SetAlignment(Gdiplus::StringAlignmentCenter);
+    format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+    Gdiplus::RectF badgeRect(badgeX, badgeY, badgeW, badgeH);
+    gfx.DrawString(g.title, -1, &font, badgeRect, &format, &textBrush);
 }
 
 // Modern button drawing helper
@@ -2568,11 +2641,13 @@ void DrawModernButton(HDC hdc, RECT* rc, const wchar_t* text, bool isHovered, bo
     gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-    float x = (float)rc->left;
-    float y = (float)rc->top;
-    float w = (float)(rc->right - rc->left);
-    float h = (float)(rc->bottom - rc->top);
-    float radius = 6.0f;
+    // Inset by 2px so border (1px pen width) isn't clipped at control edges
+    float inset = 2.0f;
+    float x = (float)rc->left + inset;
+    float y = (float)rc->top + inset;
+    float w = (float)(rc->right - rc->left) - inset * 2;
+    float h = (float)(rc->bottom - rc->top) - inset * 2;
+    float radius = 4.0f;  // Slightly smaller radius for better fit
 
     // Rounded rectangle path
     Gdiplus::GraphicsPath path;
@@ -2636,9 +2711,100 @@ void DrawModernButton(HDC hdc, RECT* rc, const wchar_t* text, bool isHovered, bo
     gfx.DrawString(text, -1, &font, textRect, &format, &textBrush);
 }
 
+// Draw modern checkbox with badge-style background
+void DrawModernCheckbox(HDC hdc, RECT* rc, const wchar_t* text, bool isChecked, bool isHovered) {
+    Gdiplus::Graphics gfx(hdc);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+    int w = rc->right - rc->left;
+    int h = rc->bottom - rc->top;
+
+    // Badge background (rounded rect for entire control) - no rectangular clear!
+    int padding = 2;
+    float badgeRadius = 5.0f;
+    Gdiplus::GraphicsPath badgePath;
+    float bd = badgeRadius * 2;
+    badgePath.AddArc((float)padding, (float)padding, bd, bd, 180, 90);
+    badgePath.AddArc((float)(w - padding) - bd, (float)padding, bd, bd, 270, 90);
+    badgePath.AddArc((float)(w - padding) - bd, (float)(h - padding) - bd, bd, bd, 0, 90);
+    badgePath.AddArc((float)padding, (float)(h - padding) - bd, bd, bd, 90, 90);
+    badgePath.CloseFigure();
+
+    // Badge fill - same colors as buttons
+    Gdiplus::Color badgeBg = isHovered ?
+        Gdiplus::Color(255, 55, 60, 80) :   // Hover: same as button bg hover
+        Gdiplus::Color(255, 40, 45, 60);    // Normal: same as button bg
+    Gdiplus::SolidBrush badgeBrush(badgeBg);
+    gfx.FillPath(&badgeBrush, &badgePath);
+
+    // Badge border - same colors as buttons
+    Gdiplus::Color badgeBorderColor = isHovered ?
+        Gdiplus::Color(255, 100, 160, 220) :  // Hover: same as button border hover
+        Gdiplus::Color(255, 70, 80, 100);     // Normal: same as button border
+    Gdiplus::Pen badgeBorder(badgeBorderColor, 1.0f);
+    gfx.DrawPath(&badgeBorder, &badgePath);
+
+    // Checkbox square
+    int boxSize = 14;
+    int boxX = padding + 8;
+    int boxY = (h - boxSize) / 2;
+
+    Gdiplus::GraphicsPath boxPath;
+    float radius = 3.0f;
+    float d = radius * 2;
+    boxPath.AddArc((float)boxX, (float)boxY, d, d, 180, 90);
+    boxPath.AddArc((float)boxX + boxSize - d, (float)boxY, d, d, 270, 90);
+    boxPath.AddArc((float)boxX + boxSize - d, (float)boxY + boxSize - d, d, d, 0, 90);
+    boxPath.AddArc((float)boxX, (float)boxY + boxSize - d, d, d, 90, 90);
+    boxPath.CloseFigure();
+
+    // Checkbox background
+    Gdiplus::Color boxBg = isChecked ?
+        Gdiplus::Color(255, 50, 130, 210) : Gdiplus::Color(255, 30, 35, 48);
+    Gdiplus::SolidBrush boxBrush(boxBg);
+    gfx.FillPath(&boxBrush, &boxPath);
+
+    // Checkbox border
+    Gdiplus::Color boxBorder = isChecked ?
+        Gdiplus::Color(255, 80, 160, 240) : Gdiplus::Color(255, 70, 80, 100);
+    Gdiplus::Pen boxPen(boxBorder, 1.0f);
+    gfx.DrawPath(&boxPen, &boxPath);
+
+    // Checkmark
+    if (isChecked) {
+        Gdiplus::Pen checkPen(Gdiplus::Color(255, 255, 255, 255), 2.0f);
+        checkPen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
+        int cx = boxX + boxSize / 2;
+        int cy = boxY + boxSize / 2;
+        Gdiplus::Point pts[3] = {
+            {cx - 3, cy},
+            {cx - 1, cy + 3},
+            {cx + 4, cy - 3}
+        };
+        gfx.DrawLines(&checkPen, pts, 3);
+    }
+
+    // Text with more padding
+    int textX = boxX + boxSize + 10;
+    Gdiplus::FontFamily fontFamily(L"Segoe UI");
+    Gdiplus::Font font(&fontFamily, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+    Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 220, 225, 235));
+    Gdiplus::RectF textRect((float)textX, 0.0f, (float)(w - textX - 6), (float)h);
+    Gdiplus::StringFormat format;
+    format.SetAlignment(Gdiplus::StringAlignmentNear);
+    format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+    format.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);  // Prevent text wrapping
+    gfx.DrawString(text, -1, &font, textRect, &format, &textBrush);
+}
+
 // Track button hover states
 std::map<HWND, bool> g_buttonHover;
 std::map<HWND, bool> g_buttonPressed;
+std::map<HWND, bool> g_checkboxHover;
+std::map<HWND, bool> g_checkboxChecked;
+std::map<HWND, bool> g_labelHover;
+std::map<HWND, bool> g_comboHover;
 
 // Button subclass procedure for hover tracking
 LRESULT CALLBACK ModernButtonProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
@@ -2671,6 +2837,9 @@ LRESULT CALLBACK ModernButtonProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
 
+// Forward declarations
+void ApplyModernCheckboxStyle(HWND hCheck);
+
 // Helper to create a modern owner-draw button with hover tracking
 HWND CreateModernButton(LPCWSTR text, DWORD style, int x, int y, int w, int h, HWND parent, int id) {
     HWND hBtn = CreateWindowW(L"BUTTON", text,
@@ -2680,6 +2849,299 @@ HWND CreateModernButton(LPCWSTR text, DWORD style, int x, int y, int w, int h, H
         SetWindowSubclass(hBtn, ModernButtonProc, 0, 0);
     }
     return hBtn;
+}
+
+// Helper to create modern checkbox with auto-calculated width based on text
+// Returns the created HWND and sets outWidth to the calculated width
+HWND CreateModernCheckbox(LPCWSTR text, int x, int y, int h, HWND parent, int id, int* outWidth) {
+    // Calculate text width
+    HDC hdc = GetDC(parent);
+    HFONT hFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+
+    SIZE textSize;
+    GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &textSize);
+
+    SelectObject(hdc, hOldFont);
+    DeleteObject(hFont);
+    ReleaseDC(parent, hdc);
+
+    // Width = padding(10) + checkbox(14) + gap(10) + text + padding(16) + extra(8)
+    int width = 10 + 14 + 10 + textSize.cx + 16 + 8;
+    if (outWidth) *outWidth = width;
+
+    HWND hCheck = CreateWindowW(L"BUTTON", text,
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+        x, y, width, h, parent, (HMENU)(INT_PTR)id, NULL, NULL);
+
+    if (hCheck) {
+        ApplyModernCheckboxStyle(hCheck);
+    }
+    return hCheck;
+}
+
+// Checkbox subclass for owner-draw behavior
+LRESULT CALLBACK ModernCheckboxProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    switch (uMsg) {
+        case BM_GETCHECK: {
+            // Return our tracked state
+            return g_checkboxChecked[hWnd] ? BST_CHECKED : BST_UNCHECKED;
+        }
+        case BM_SETCHECK: {
+            // Set our tracked state
+            g_checkboxChecked[hWnd] = (wParam == BST_CHECKED);
+            InvalidateRect(hWnd, NULL, TRUE);
+            return 0;
+        }
+        case WM_ERASEBKGND: {
+            // Copy parent background to simulate transparency
+            HWND hParent = GetParent(hWnd);
+            HDC hdc = (HDC)wParam;
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+
+            // Get position relative to parent
+            POINT pt = {0, 0};
+            MapWindowPoints(hWnd, hParent, &pt, 1);
+
+            // Get parent DC and copy background
+            HDC hParentDC = GetDC(hParent);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, hParentDC, pt.x, pt.y, SRCCOPY);
+            ReleaseDC(hParent, hParentDC);
+            return 1;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+
+            wchar_t text[64] = {0};
+            GetWindowTextW(hWnd, text, 64);
+            bool isChecked = g_checkboxChecked[hWnd];
+            bool isHovered = g_checkboxHover[hWnd];
+
+            DrawModernCheckbox(hdc, &rc, text, isChecked, isHovered);
+
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            if (!g_checkboxHover[hWnd]) {
+                g_checkboxHover[hWnd] = true;
+                TRACKMOUSEEVENT tme = {};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hWnd;
+                TrackMouseEvent(&tme);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            break;
+        }
+        case WM_MOUSELEAVE: {
+            g_checkboxHover[hWnd] = false;
+            InvalidateRect(hWnd, NULL, FALSE);
+            break;
+        }
+        case WM_LBUTTONDOWN: {
+            SetCapture(hWnd);
+            break;
+        }
+        case WM_LBUTTONUP: {
+            ReleaseCapture();
+            // Check if mouse is still over the control
+            POINT pt = {LOWORD(lParam), HIWORD(lParam)};
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            if (PtInRect(&rc, pt)) {
+                // Toggle state
+                g_checkboxChecked[hWnd] = !g_checkboxChecked[hWnd];
+                InvalidateRect(hWnd, NULL, TRUE);
+                // Notify parent of state change (send BN_CLICKED)
+                SendMessage(GetParent(hWnd), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(hWnd), BN_CLICKED), (LPARAM)hWnd);
+            }
+            return 0;
+        }
+        case WM_NCDESTROY: {
+            g_checkboxHover.erase(hWnd);
+            g_checkboxChecked.erase(hWnd);
+            RemoveWindowSubclass(hWnd, ModernCheckboxProc, uIdSubclass);
+            break;
+        }
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+// Helper to apply modern checkbox style
+void ApplyModernCheckboxStyle(HWND hCheck) {
+    g_checkboxChecked[hCheck] = false; // Initialize unchecked
+    SetWindowSubclass(hCheck, ModernCheckboxProc, 0, 0);
+}
+
+// Combobox subclass for modern border styling with hover
+LRESULT CALLBACK ModernComboProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    switch (uMsg) {
+        case WM_PAINT: {
+            // Let default paint happen first
+            LRESULT result = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+
+            // Then draw our border on top
+            HDC hdc = GetDC(hWnd);
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+
+            bool isHovered = g_comboHover[hWnd];
+
+            Gdiplus::Graphics g(hdc);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+            // Draw rounded border - brighter on hover
+            float radius = 4.0f;
+            float x = 0.5f, y = 0.5f;
+            float w = (float)(rc.right - rc.left) - 1.0f;
+            float h = (float)(rc.bottom - rc.top) - 1.0f;
+
+            Gdiplus::GraphicsPath path;
+            float d = radius * 2;
+            path.AddArc(x, y, d, d, 180, 90);
+            path.AddArc(x + w - d, y, d, d, 270, 90);
+            path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+            path.AddArc(x, y + h - d, d, d, 90, 90);
+            path.CloseFigure();
+
+            // Border color (same as buttons)
+            Gdiplus::Color borderColor = isHovered ?
+                Gdiplus::Color(255, 100, 160, 220) :  // Hover: same as button border hover
+                Gdiplus::Color(255, 70, 80, 100);     // Normal: same as button border
+            Gdiplus::Pen borderPen(borderColor, 1.0f);
+            g.DrawPath(&borderPen, &path);
+
+            ReleaseDC(hWnd, hdc);
+            return result;
+        }
+        case WM_MOUSEMOVE: {
+            if (!g_comboHover[hWnd]) {
+                g_comboHover[hWnd] = true;
+                TRACKMOUSEEVENT tme = {};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hWnd;
+                TrackMouseEvent(&tme);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            break;
+        }
+        case WM_MOUSELEAVE: {
+            g_comboHover[hWnd] = false;
+            InvalidateRect(hWnd, NULL, FALSE);
+            break;
+        }
+        case WM_NCDESTROY: {
+            g_comboHover.erase(hWnd);
+            RemoveWindowSubclass(hWnd, ModernComboProc, uIdSubclass);
+            break;
+        }
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+// Helper to apply modern combobox style
+void ApplyModernComboStyle(HWND hCombo) {
+    SetWindowSubclass(hCombo, ModernComboProc, 0, 0);
+}
+
+// Label subclass for hover effect
+LRESULT CALLBACK ModernLabelProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    switch (uMsg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+
+            wchar_t text[128] = {0};
+            GetWindowTextW(hWnd, text, 128);
+            bool isHovered = g_labelHover[hWnd];
+
+            // Draw with GDI+
+            Gdiplus::Graphics gfx(hdc);
+            gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+            // Text color changes on hover (same colors as buttons)
+            Gdiplus::Color textColor = isHovered ?
+                Gdiplus::Color(255, 100, 160, 220) :  // Hover: same as button border hover
+                Gdiplus::Color(255, 220, 225, 235);   // Normal: same as button text
+
+            Gdiplus::FontFamily fontFamily(L"Segoe UI");
+            Gdiplus::Font font(&fontFamily, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+            Gdiplus::SolidBrush textBrush(textColor);
+            Gdiplus::StringFormat format;
+            format.SetAlignment(Gdiplus::StringAlignmentNear);
+            format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+
+            Gdiplus::RectF textRect((float)rc.left, (float)rc.top, (float)(rc.right - rc.left), (float)(rc.bottom - rc.top));
+            gfx.DrawString(text, -1, &font, textRect, &format, &textBrush);
+
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND: {
+            // Copy parent background
+            HWND hParent = GetParent(hWnd);
+            HDC hdc = (HDC)wParam;
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            POINT pt = {0, 0};
+            MapWindowPoints(hWnd, hParent, &pt, 1);
+            HDC hParentDC = GetDC(hParent);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, hParentDC, pt.x, pt.y, SRCCOPY);
+            ReleaseDC(hParent, hParentDC);
+            return 1;
+        }
+        case WM_MOUSEMOVE: {
+            if (!g_labelHover[hWnd]) {
+                g_labelHover[hWnd] = true;
+                TRACKMOUSEEVENT tme = {};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hWnd;
+                TrackMouseEvent(&tme);
+                InvalidateRect(hWnd, NULL, TRUE);
+            }
+            break;
+        }
+        case WM_MOUSELEAVE: {
+            g_labelHover[hWnd] = false;
+            InvalidateRect(hWnd, NULL, TRUE);
+            break;
+        }
+        case WM_NCDESTROY: {
+            g_labelHover.erase(hWnd);
+            RemoveWindowSubclass(hWnd, ModernLabelProc, uIdSubclass);
+            break;
+        }
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+// Helper to apply modern label style with hover
+void ApplyModernLabelStyle(HWND hLabel) {
+    SetWindowSubclass(hLabel, ModernLabelProc, 0, 0);
+}
+
+// Helper to create a modern label with hover effect
+HWND CreateModernLabel(LPCWSTR text, int x, int y, int w, int h, HWND parent) {
+    HWND hLabel = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE,
+        x, y, w, h, parent, NULL, NULL, NULL);
+    if (hLabel) {
+        ApplyModernLabelStyle(hLabel);
+    }
+    return hLabel;
 }
 
 // No extra border drawing needed - use clean WS_BORDER styling
@@ -2758,8 +3220,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         const int IS = ITEM_SPACING;    // 6 - vertical item spacing
         const int IHS = ITEM_H_SPACING; // 8 - horizontal item spacing
 
-        // Window client area = WINDOW_WIDTH (555)
-        // Group box width = WINDOW_WIDTH - 2*MARGIN = 555 - 24 = 531
+        // Window client area = WINDOW_WIDTH (620)
+        // Group box width = WINDOW_WIDTH - 2*MARGIN = 620 - 24 = 596
         const int CW = WINDOW_WIDTH - M * 2;  // 531 = Content/Group width
         // Inner content width = CW - 2*GP = 531 - 20 = 511
         const int ICW = CW - GP * 2;  // 511 = usable width inside group
@@ -2773,76 +3235,79 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // GROUP 1: COLOR
         // ═══════════════════════════════════════════════════════════════
         int g1y = y;
-        gy = y + GTH + GP;
+        gy = y + GTH + GP;  // Content starts after title badge + padding
 
         // Row 1: Preview + Hex + Pick + Theme toggle
         g_state.hPreview = CreateWindowW(L"ColorPreview", L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER,
-            x + GP, gy, 70, 50, hWnd, (HMENU)ID_STATIC_PREVIEW, NULL, NULL);
+            x + GP, gy, 70, 60, hWnd, (HMENU)ID_STATIC_PREVIEW, NULL, NULL);
 
-        CreateWindowW(L"STATIC", g_str->hex, WS_CHILD | WS_VISIBLE,
-            x + GP + 78, gy + 2, 28, CTRL_H, hWnd, NULL, NULL, NULL);
+        CreateModernLabel(g_str->hex, x + GP + 80, gy + 6, 32, BTN_H, hWnd);
         g_state.hEditHex = CreateWindowW(L"EDIT", L"#0022FF",
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_UPPERCASE | ES_CENTER,
-            x + GP + 106, gy, 68, CTRL_H, hWnd, (HMENU)ID_EDIT_HEX, NULL, NULL);
+            x + GP + 112, gy + 4, 76, BTN_H, hWnd, (HMENU)ID_EDIT_HEX, NULL, NULL);
 
         CreateModernButton(g_str->pick, WS_CHILD | WS_VISIBLE,
-            x + GP + 180, gy, SMALL_BTN_W, CTRL_H, hWnd, ID_BTN_PICK_COLOR);
+            x + GP + 196, gy + 4, 60, BTN_H, hWnd, ID_BTN_PICK_COLOR);
 
-        // Right-aligned buttons: Theme (54px) + gap (4px) + Lang (32px) = 90px from right edge
+        // Right-aligned buttons with proper sizing
         int rightEdge = x + GP + ICW;  // right edge of content area
         CreateModernButton(g_str->theme, WS_CHILD | WS_VISIBLE,
-            rightEdge - 90, gy, 54, CTRL_H, hWnd, ID_BTN_THEME);
+            rightEdge - 106, gy + 4, 60, BTN_H, hWnd, ID_BTN_THEME);
 
         CreateModernButton(g_lang == LANG_EN ? L"DE" : L"EN", WS_CHILD | WS_VISIBLE,
-            rightEdge - 32, gy, 32, CTRL_H, hWnd, ID_BTN_LANG);
+            rightEdge - 42, gy + 4, 42, BTN_H, hWnd, ID_BTN_LANG);
 
-        // Row 2: 7 Color presets
-        int py = gy + 28;
-        int pw = COLOR_BTN_W;
-        int px = x + GP + 78;
-        CreateModernButton(g_str->presetBlue, WS_CHILD | WS_VISIBLE, px, py, pw, CTRL_H, hWnd, ID_BTN_PRESET_BLUE); px += pw + 2;
-        CreateModernButton(g_str->presetRed, WS_CHILD | WS_VISIBLE, px, py, pw - 6, CTRL_H, hWnd, ID_BTN_PRESET_RED); px += pw - 4;
-        CreateModernButton(g_str->presetGreen, WS_CHILD | WS_VISIBLE, px, py, pw + 4, CTRL_H, hWnd, ID_BTN_PRESET_GREEN); px += pw + 6;
-        CreateModernButton(g_str->presetCyan, WS_CHILD | WS_VISIBLE, px, py, pw, CTRL_H, hWnd, ID_BTN_PRESET_CYAN); px += pw + 2;
-        CreateModernButton(g_str->presetPurple, WS_CHILD | WS_VISIBLE, px, py, pw + 6, CTRL_H, hWnd, ID_BTN_PRESET_PURPLE); px += pw + 8;
-        CreateModernButton(g_str->presetWhite, WS_CHILD | WS_VISIBLE, px, py, pw + 2, CTRL_H, hWnd, ID_BTN_PRESET_WHITE); px += pw + 4;
-        CreateModernButton(g_str->presetOff, WS_CHILD | WS_VISIBLE, px, py, pw - 8, CTRL_H, hWnd, ID_BTN_PRESET_OFF);
+        // Row 2: 7 Color presets - uniform sizing with proper gaps
+        // Available width: ICW - 8 (margins) = 503px
+        // 7 buttons + 6 gaps: 7*pw + 6*gap = 503 -> pw = (503 - 6*5) / 7 = 67.5
+        int presetY = gy + 68;  // Push buttons further down
+        int pw = 66;            // Button width (fits 7 buttons with gaps)
+        int ph = 28;            // Button height
+        int gap = 5;            // Gap between buttons
+        int px = x + GP + 4;    // Left margin so border isn't clipped
+        CreateModernButton(g_str->presetBlue, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_BLUE); px += pw + gap;
+        CreateModernButton(g_str->presetRed, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_RED); px += pw + gap;
+        CreateModernButton(g_str->presetGreen, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_GREEN); px += pw + gap;
+        CreateModernButton(g_str->presetCyan, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_CYAN); px += pw + gap;
+        CreateModernButton(g_str->presetPurple, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_PURPLE); px += pw + gap;
+        CreateModernButton(g_str->presetWhite, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_WHITE); px += pw + gap;
+        CreateModernButton(g_str->presetOff, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_OFF);
 
-        // Row 3-5: RGB Sliders
-        // Slider starts after label: x + GP + LABEL_W
-        // Slider ends at: x + GP + ICW = x + CW - GP
-        // Slider width = ICW - LABEL_W
+        // Row 3-5: RGB Sliders - tighter vertical spacing
         int sliderX = x + GP + LABEL_W;
         int sliderW = ICW - LABEL_W;
-        int sy = gy + 56;
+        int sliderSpacing = SLIDER_H + 6;  // Less space between sliders
+        int sy = presetY + ph + 20;  // Space after preset buttons
 
-        CreateWindowW(L"STATIC", g_str->red, WS_CHILD | WS_VISIBLE, x + GP, sy + 2, LABEL_W - 4, CTRL_H, hWnd, NULL, NULL, NULL);
+        CreateModernLabel(g_str->red, x + GP, sy + 2, LABEL_W - 4, CTRL_H, hWnd);
         g_state.hSliderR = CreateWindowW(TRACKBAR_CLASSW, L"",
             WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
             sliderX, sy, sliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_R, NULL, NULL);
         SendMessage(g_state.hSliderR, TBM_SETRANGE, TRUE, MAKELONG(0, 255));
-                sy += SLIDER_H + IS;
+        SetWindowTheme(g_state.hSliderR, L"", L"");  // Remove theme for custom drawing
+        sy += sliderSpacing;
 
-        CreateWindowW(L"STATIC", g_str->green, WS_CHILD | WS_VISIBLE, x + GP, sy + 2, LABEL_W - 4, CTRL_H, hWnd, NULL, NULL, NULL);
+        CreateModernLabel(g_str->green, x + GP, sy + 2, LABEL_W - 4, CTRL_H, hWnd);
         g_state.hSliderG = CreateWindowW(TRACKBAR_CLASSW, L"",
             WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
             sliderX, sy, sliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_G, NULL, NULL);
         SendMessage(g_state.hSliderG, TBM_SETRANGE, TRUE, MAKELONG(0, 255));
-                sy += SLIDER_H + IS;
+        SetWindowTheme(g_state.hSliderG, L"", L"");  // Remove theme for custom drawing
+        sy += sliderSpacing;
 
-        CreateWindowW(L"STATIC", g_str->blue, WS_CHILD | WS_VISIBLE, x + GP, sy + 2, LABEL_W - 4, CTRL_H, hWnd, NULL, NULL, NULL);
+        CreateModernLabel(g_str->blue, x + GP, sy + 2, LABEL_W - 4, CTRL_H, hWnd);
         g_state.hSliderB = CreateWindowW(TRACKBAR_CLASSW, L"",
             WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
             sliderX, sy, sliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_B, NULL, NULL);
         SendMessage(g_state.hSliderB, TBM_SETRANGE, TRUE, MAKELONG(0, 255));
-        
+        SetWindowTheme(g_state.hSliderB, L"", L"");  // Remove theme for custom drawing
+
         // Initialize custom modern sliders (overlay on top of standard trackbars)
-        // These use the same positions but draw custom graphics
-        int sliderHeight = 28;  // Taller for modern look
-        g_sliderR.slider = {{}, {sliderX, sy - 2*(SLIDER_H + IS), sliderX + sliderW, sy - 2*(SLIDER_H + IS) + sliderHeight}, 0, 255, 'R', false, false, ID_SLIDER_R};
+        int sliderHeight = 28;
+        g_sliderR.slider = {{}, {sliderX, sy - 2*sliderSpacing, sliderX + sliderW, sy - 2*sliderSpacing + sliderHeight}, 0, 255, 'R', false, false, ID_SLIDER_R};
         g_sliderR.registered = true;
-        g_sliderG.slider = {{}, {sliderX, sy - (SLIDER_H + IS), sliderX + sliderW, sy - (SLIDER_H + IS) + sliderHeight}, 34, 255, 'G', false, false, ID_SLIDER_G};
+        g_sliderG.slider = {{}, {sliderX, sy - sliderSpacing, sliderX + sliderW, sy - sliderSpacing + sliderHeight}, 34, 255, 'G', false, false, ID_SLIDER_G};
         g_sliderG.registered = true;
         g_sliderB.slider = {{}, {sliderX, sy, sliderX + sliderW, sy + sliderHeight}, 255, 255, 'B', false, false, ID_SLIDER_B};
         g_sliderB.registered = true;
@@ -2850,7 +3315,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Color preview position
         g_colorPreview = {{x + GP, gy, x + GP + 70, gy + 70}, 0, 34, 255, false, 0};
 
-        int g1h = sy + SLIDER_H + GP - g1y;
+        int g1h = sy + SLIDER_H + GP - g1y + 20;  // +20px extra group height, no bottom margin
         g_groups[0] = {x, g1y, CW, g1h, g_str->colorSelection};
 
         // Initialize modern card for this group
@@ -2866,11 +3331,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         gy = y + GTH + GP;
 
         // Row 1: Keyboard + Edge mode
-        CreateWindowW(L"STATIC", g_str->keyboardEffect, WS_CHILD | WS_VISIBLE,
-            x + GP, gy + 2, 52, CTRL_H, hWnd, NULL, NULL, NULL);
+        CreateModernLabel(g_str->keyboardEffect, x + GP, gy + 2, 52, CTRL_H, hWnd);
         g_state.hComboKbMode = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
             x + GP + 56, gy, 130, 200, hWnd, (HMENU)ID_COMBO_KB_MODE, NULL, NULL);
+        SetWindowTheme(g_state.hComboKbMode, L"DarkMode_CFD", NULL);
+        ApplyModernComboStyle(g_state.hComboKbMode);
         SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Static");
         SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Breathing");
         SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Spectrum");
@@ -2884,11 +3350,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Hurricane");
         SendMessage(g_state.hComboKbMode, CB_SETCURSEL, 0, 0);
 
-        CreateWindowW(L"STATIC", g_str->edgeEffect, WS_CHILD | WS_VISIBLE,
-            x + GP + 200, gy + 2, 36, CTRL_H, hWnd, NULL, NULL, NULL);
+        CreateModernLabel(g_str->edgeEffect, x + GP + 200, gy + 2, 36, CTRL_H, hWnd);
         g_state.hComboEdgeMode = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
             x + GP + 240, gy, 120, 200, hWnd, (HMENU)ID_COMBO_EDGE_MODE, NULL, NULL);
+        SetWindowTheme(g_state.hComboEdgeMode, L"DarkMode_CFD", NULL);
+        ApplyModernComboStyle(g_state.hComboEdgeMode);
         SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)L"Freeze");
         SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)L"Wave");
         SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)L"Spectrum");
@@ -2899,21 +3366,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         gy += CTRL_H + IS;
 
         // Row 2: Brightness + Speed
-        CreateWindowW(L"STATIC", g_str->brightness, WS_CHILD | WS_VISIBLE,
-            x + GP, gy + 2, 60, CTRL_H, hWnd, NULL, NULL, NULL);
+        CreateModernLabel(g_str->brightness, x + GP, gy + 2, 80, CTRL_H, hWnd);
         g_state.hSliderBrightness = CreateWindowW(TRACKBAR_CLASSW, L"",
             WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-            x + GP + 64, gy, 120, SLIDER_H, hWnd, (HMENU)ID_SLIDER_BRIGHTNESS, NULL, NULL);
+            x + GP + 84, gy, 110, SLIDER_H, hWnd, (HMENU)ID_SLIDER_BRIGHTNESS, NULL, NULL);
         SendMessage(g_state.hSliderBrightness, TBM_SETRANGE, TRUE, MAKELONG(0, 4));
         SendMessage(g_state.hSliderBrightness, TBM_SETPOS, TRUE, 4);
+        SetWindowTheme(g_state.hSliderBrightness, L"", L"");
 
-        CreateWindowW(L"STATIC", g_str->speed, WS_CHILD | WS_VISIBLE,
-            x + GP + 200, gy + 2, 40, CTRL_H, hWnd, NULL, NULL, NULL);
+        CreateModernLabel(g_str->speed, x + GP + 210, gy + 2, 60, CTRL_H, hWnd);
         g_state.hSliderSpeed = CreateWindowW(TRACKBAR_CLASSW, L"",
             WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-            x + GP + 244, gy, 120, SLIDER_H, hWnd, (HMENU)ID_SLIDER_SPEED, NULL, NULL);
+            x + GP + 274, gy, 110, SLIDER_H, hWnd, (HMENU)ID_SLIDER_SPEED, NULL, NULL);
         SendMessage(g_state.hSliderSpeed, TBM_SETRANGE, TRUE, MAKELONG(0, 5));
         SendMessage(g_state.hSliderSpeed, TBM_SETPOS, TRUE, 2);
+        SetWindowTheme(g_state.hSliderSpeed, L"", L"");
 
         int g2h = gy + SLIDER_H + GP - g2y;
         g_groups[1] = {x, g2y, CW, g2h, g_str->effects};
@@ -2925,30 +3392,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int g3y = y;
         gy = y + GTH + GP;
 
-        // Row 1: Device checkboxes
-        g_state.hCheckAura = CreateWindowW(L"BUTTON", L"ASUS Aura",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP, gy, 85, CTRL_H, hWnd, (HMENU)ID_CHECK_AURA, NULL, NULL);
+        // Row 1: Device checkboxes (auto-width based on text)
+        int cbW = 0, cbX = x + GP;
+        int cbGap = 6;  // Gap between checkboxes
+
+        g_state.hCheckAura = CreateModernCheckbox(L"ASUS Aura", cbX, gy, CTRL_H, hWnd, ID_CHECK_AURA, &cbW);
         SendMessage(g_state.hCheckAura, BM_SETCHECK, BST_CHECKED, 0);
+        cbX += cbW + cbGap;
 
-        g_state.hCheckMouse = CreateWindowW(L"BUTTON", L"SteelSeries",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP + 90, gy, 85, CTRL_H, hWnd, (HMENU)ID_CHECK_MOUSE, NULL, NULL);
+        g_state.hCheckMouse = CreateModernCheckbox(L"SteelSeries", cbX, gy, CTRL_H, hWnd, ID_CHECK_MOUSE, &cbW);
         SendMessage(g_state.hCheckMouse, BM_SETCHECK, BST_CHECKED, 0);
+        cbX += cbW + cbGap;
 
-        g_state.hCheckKeyboard = CreateWindowW(L"BUTTON", L"Keyboard",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP + 180, gy, 80, CTRL_H, hWnd, (HMENU)ID_CHECK_KEYBOARD, NULL, NULL);
+        g_state.hCheckKeyboard = CreateModernCheckbox(L"Keyboard", cbX, gy, CTRL_H, hWnd, ID_CHECK_KEYBOARD, &cbW);
         SendMessage(g_state.hCheckKeyboard, BM_SETCHECK, BST_CHECKED, 0);
+        cbX += cbW + cbGap;
 
-        g_state.hCheckEdge = CreateWindowW(L"BUTTON", L"Edge",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP + 265, gy, 55, CTRL_H, hWnd, (HMENU)ID_CHECK_EDGE, NULL, NULL);
+        g_state.hCheckEdge = CreateModernCheckbox(L"Edge", cbX, gy, CTRL_H, hWnd, ID_CHECK_EDGE, &cbW);
         SendMessage(g_state.hCheckEdge, BM_SETCHECK, BST_CHECKED, 0);
+        cbX += cbW + cbGap;
 
-        g_state.hCheckRAM = CreateWindowW(L"BUTTON", L"RAM",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP + 325, gy, 50, CTRL_H, hWnd, (HMENU)ID_CHECK_RAM, NULL, NULL);
+        g_state.hCheckRAM = CreateModernCheckbox(L"RAM", cbX, gy, CTRL_H, hWnd, ID_CHECK_RAM, &cbW);
         SendMessage(g_state.hCheckRAM, BM_SETCHECK, BST_CHECKED, 0);
 
         // Row 2: Action buttons (right-aligned within group)
@@ -2974,29 +3438,28 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         gy = y + GTH + GP;
 
         // Row 1: Profile dropdown + Save/Load
-        CreateWindowW(L"STATIC", g_str->profile, WS_CHILD | WS_VISIBLE,
-            x + GP, gy + 2, 40, CTRL_H, hWnd, NULL, NULL, NULL);
+        CreateModernLabel(g_str->profile, x + GP, gy + 2, 40, CTRL_H, hWnd);
         g_state.hComboProfiles = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | WS_VSCROLL,
             x + GP + 44, gy, 110, 200, hWnd, (HMENU)ID_COMBO_PROFILES, NULL, NULL);
+        SetWindowTheme(g_state.hComboProfiles, L"DarkMode_CFD", NULL);
+        ApplyModernComboStyle(g_state.hComboProfiles);
 
         CreateModernButton(g_str->save, WS_CHILD | WS_VISIBLE,
             x + GP + 160, gy, 65, CTRL_H, hWnd, ID_BTN_SAVE_PROFILE);
         CreateModernButton(g_str->load, WS_CHILD | WS_VISIBLE,
             x + GP + 230, gy, 50, CTRL_H, hWnd, ID_BTN_LOAD_PROFILE);
 
-        // Settings checkboxes
-        g_state.hCheckAutostart = CreateWindowW(L"BUTTON", g_str->autostart,
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP + 285, gy, 75, CTRL_H, hWnd, (HMENU)ID_CHECK_AUTOSTART, NULL, NULL);
+        // Settings checkboxes (auto-width)
+        int settingsCbX = x + GP + 285;
+        g_state.hCheckAutostart = CreateModernCheckbox(g_str->autostart, settingsCbX, gy, CTRL_H, hWnd, ID_CHECK_AUTOSTART, &cbW);
         if (IsAutoStartEnabled()) {
             SendMessage(g_state.hCheckAutostart, BM_SETCHECK, BST_CHECKED, 0);
             g_state.autostart = true;
         }
+        settingsCbX += cbW + cbGap;
 
-        g_state.hCheckMinimizeTray = CreateWindowW(L"BUTTON", g_str->tray,
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + GP + 365, gy, 45, CTRL_H, hWnd, (HMENU)ID_CHECK_MINIMIZE_TRAY, NULL, NULL);
+        g_state.hCheckMinimizeTray = CreateModernCheckbox(g_str->tray, settingsCbX, gy, CTRL_H, hWnd, ID_CHECK_MINIMIZE_TRAY, &cbW);
         SendMessage(g_state.hCheckMinimizeTray, BM_SETCHECK, BST_CHECKED, 0);
 
         int g4h = gy + CTRL_H + GP - g4y;
@@ -3011,9 +3474,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         CreateModernButton(g_str->apply, WS_CHILD | WS_VISIBLE,
             x, y, applyBtnW, 32, hWnd, ID_BTN_APPLY);
 
-        g_state.hCheckAutoApply = CreateWindowW(L"BUTTON", g_str->autoApply,
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            x + applyBtnW + 12, y + 6, 50, CTRL_H, hWnd, (HMENU)ID_CHECK_AUTO_APPLY, NULL, NULL);
+        g_state.hCheckAutoApply = CreateModernCheckbox(g_str->autoApply, x + applyBtnW + 12, y + 4, CTRL_H, hWnd, ID_CHECK_AUTO_APPLY, NULL);
         SendMessage(g_state.hCheckAutoApply, BM_SETCHECK, g_state.autoApply ? BST_CHECKED : BST_UNCHECKED, 0);
 
         y += 36;
@@ -3024,10 +3485,40 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int g5y = y;
         gy = y + GTH + GP;
 
-        // Status log inside group (no border - group provides the frame)
+        // Logo dimensions and spacing
+        int logoSize = 64;
+        int logoMargin = 12;  // Margin from edges
+        int statusLogWidth = CW - GP * 2 - logoSize - logoMargin;  // Leave space for logo
+
+        // Status log container (owner-draw for rounded background)
+        int statusLogHeight = STATUS_H - GTH - GP * 2;
+        int borderInset = 6;  // Inset for border visibility (enough for rounded corners)
+
+        // Create container for rounded border effect (drawn first, behind edit)
+        g_state.hStatusBorder = CreateWindowW(L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+            x + GP, gy, statusLogWidth, statusLogHeight, hWnd, (HMENU)9998, NULL, NULL);
+
+        // Status log inside container (slightly inset for border)
         g_state.hStatus = CreateWindowW(L"EDIT", g_str->ready,
-            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-            x + GP, gy, CW - GP * 2, STATUS_H - GTH - GP * 2, hWnd, (HMENU)ID_STATIC_STATUS, NULL, NULL);
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
+            x + GP + borderInset, gy + borderInset,
+            statusLogWidth - borderInset * 2, statusLogHeight - borderInset * 2,
+            hWnd, (HMENU)ID_STATIC_STATUS, NULL, NULL);
+        // Apply dark theme to scrollbar
+        SetWindowTheme(g_state.hStatus, L"DarkMode_Explorer", NULL);
+        // Apply rounded corners to status log
+        int editW = statusLogWidth - borderInset * 2;
+        int editH = statusLogHeight - borderInset * 2;
+        HRGN hRgn = CreateRoundRectRgn(0, 0, editW + 1, editH + 1, 6, 6);
+        SetWindowRgn(g_state.hStatus, hRgn, TRUE);
+
+        // Logo control (owner-draw static, positioned in bottom-right of status group)
+        int logoX = x + CW - GP - logoSize;
+        int logoY = gy + (STATUS_H - GTH - GP * 2) / 2 - logoSize / 2;  // Vertically centered in status area
+        g_state.hLogo = CreateWindowW(L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+            logoX, logoY, logoSize, logoSize, hWnd, (HMENU)9999, NULL, NULL);
 
         int g5h = STATUS_H;
         g_groups[4] = {x, g5y, CW, g5h, g_str->statusTitle};
@@ -3136,28 +3627,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             DrawThemedGroupBox(hdc, g_groups[i]);
         }
 
-        // Draw logo watermark (bottom right)
-        if (g_pLogoImage && g_logoWidth > 0 && g_logoHeight > 0) {
-            int wLogoSize = 64;
-            int lx = clientRect.right - wLogoSize - MARGIN;
-            int ly = clientRect.bottom - wLogoSize - MARGIN;
-
-            Gdiplus::ColorMatrix colorMatrix = {
-                1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-                0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
-                0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
-                0.0f, 0.0f, 0.0f, 0.15f, 0.0f,
-                0.0f, 0.0f, 0.0f, 0.0f, 1.0f
-            };
-
-            Gdiplus::ImageAttributes imgAttr;
-            imgAttr.SetColorMatrix(&colorMatrix, Gdiplus::ColorMatrixFlagsDefault, Gdiplus::ColorAdjustTypeBitmap);
-
-            g.DrawImage(g_pLogoImage,
-                Gdiplus::Rect(lx, ly, wLogoSize, wLogoSize),
-                0, 0, g_logoWidth, g_logoHeight,
-                Gdiplus::UnitPixel, &imgAttr);
-        }
+        // Status log border is drawn via owner-draw control (WM_DRAWITEM, ID 9998)
+        // Logo is drawn in its own owner-draw control (WM_DRAWITEM, ID 9999)
 
         EndPaint(hWnd, &ps);
         return 0;
@@ -3206,6 +3677,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return (LRESULT)hEditBrush;
     }
 
+    case WM_CTLCOLORLISTBOX: {
+        // Style dropdown list (combobox popup)
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, RGB(220, 230, 245));
+        SetBkColor(hdc, RGB(35, 40, 55));
+        static HBRUSH hListBrush = CreateSolidBrush(RGB(35, 40, 55));
+        return (LRESULT)hListBrush;
+    }
+
     case WM_CTLCOLORBTN: {
         HDC hdc = (HDC)wParam;
         SetTextColor(hdc, RGB(220, 225, 235));
@@ -3226,6 +3706,63 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             DrawModernButton(dis->hDC, &dis->rcItem, text, isHovered, isPressed, isAccent);
             return TRUE;
         }
+        // Status log border (rounded container)
+        if (dis->CtlID == 9998) {
+            Gdiplus::Graphics g(dis->hDC);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+            int w = dis->rcItem.right - dis->rcItem.left;
+            int h = dis->rcItem.bottom - dis->rcItem.top;
+            float radius = 8.0f;
+
+            // Create rounded rect path
+            Gdiplus::GraphicsPath path;
+            float d = radius * 2;
+            path.AddArc(0.0f, 0.0f, d, d, 180, 90);
+            path.AddArc((float)w - d, 0.0f, d, d, 270, 90);
+            path.AddArc((float)w - d, (float)h - d, d, d, 0, 90);
+            path.AddArc(0.0f, (float)h - d, d, d, 90, 90);
+            path.CloseFigure();
+
+            // Fill with slightly lighter background
+            Gdiplus::SolidBrush fillBrush(Gdiplus::Color(255, 22, 26, 36));
+            g.FillPath(&fillBrush, &path);
+
+            // Draw border
+            Gdiplus::Pen borderPen(Gdiplus::Color(255, 60, 70, 90), 1.5f);
+            g.DrawPath(&borderPen, &path);
+
+            return TRUE;
+        }
+        // Logo owner-draw static
+        if (dis->CtlID == 9999 && g_pLogoImage && g_logoWidth > 0 && g_logoHeight > 0) {
+            Gdiplus::Graphics g(dis->hDC);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+
+            // Fill background with group color
+            Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 32, 36, 48));
+            g.FillRectangle(&bgBrush, 0, 0, dis->rcItem.right, dis->rcItem.bottom);
+
+            // Draw logo with slight transparency (watermark effect)
+            Gdiplus::ColorMatrix colorMatrix = {
+                1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+                0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                0.0f, 0.0f, 0.0f, 0.35f, 0.0f,  // 35% opacity
+                0.0f, 0.0f, 0.0f, 0.0f, 1.0f
+            };
+            Gdiplus::ImageAttributes imgAttr;
+            imgAttr.SetColorMatrix(&colorMatrix, Gdiplus::ColorMatrixFlagsDefault, Gdiplus::ColorAdjustTypeBitmap);
+
+            int w = dis->rcItem.right - dis->rcItem.left;
+            int h = dis->rcItem.bottom - dis->rcItem.top;
+            g.DrawImage(g_pLogoImage,
+                Gdiplus::Rect(0, 0, w, h),
+                0, 0, g_logoWidth, g_logoHeight,
+                Gdiplus::UnitPixel, &imgAttr);
+            return TRUE;
+        }
         break;
     }
 
@@ -3233,11 +3770,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 1;  // Prevent flicker, WM_PAINT handles background
 
     case WM_GETMINMAXINFO: {
-        // Set minimum window size
+        // Set minimum window size (for potential future resize support)
         MINMAXINFO* mmi = (MINMAXINFO*)lParam;
         mmi->ptMinTrackSize.x = 400;
         mmi->ptMinTrackSize.y = 500;
-        return 0;
+        break;  // Let DefWindowProc also handle this
     }
 
     case WM_HSCROLL: {
@@ -3449,12 +3986,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_POWERBROADCAST: {
-        // Handle resume from sleep/hibernate
-        if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
+        // Handle SUSPEND - turn off all devices before sleep
+        if (wParam == PBT_APMSUSPEND) {
+            ClearStatus();
+            AppendStatus(L"System entering standby...");
+            // Turn off all RGB devices for clean state
+            hid_init();
+            if (g_state.enableAura) SetAsusAura(0, 0, 0);
+            if (g_state.enableMouse) SetSteelSeries(0, 0, 0);
+            if (g_state.enableKeyboard) SetEVisionKeyboard(0, 0, 0, 0, 0, 0);
+            if (g_state.enableEdge) SetEVisionEdge(0, 0, 0, 0);
+            if (g_state.enableRAM) SetGSkillRAM(0, 0, 0);
+            hid_exit();
+            AppendStatus(L"Devices off - ready for standby");
+        }
+        // Handle RESUME from sleep/hibernate
+        else if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
             KillTimer(hWnd, ID_TIMER_RESUME);
             SetTimer(hWnd, ID_TIMER_RESUME, 3000, NULL);
         }
-        // Handle display power state change
+        // Handle display power state change (monitor on)
         else if (wParam == PBT_POWERSETTINGCHANGE) {
             POWERBROADCAST_SETTING* pbs = (POWERBROADCAST_SETTING*)lParam;
             if (pbs && pbs->DataLength >= 4) {
@@ -3515,9 +4066,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
 
     default:
-        return DefWindowProc(hWnd, msg, wParam, lParam);
+        break;
     }
-    return 0;
+    return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
 //=============================================================================
@@ -3528,6 +4079,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     // Check for command line flags
     bool startMinimized = (strstr(lpCmdLine, "--minimized") != nullptr);
     g_skipApplyOnStart = (strstr(lpCmdLine, "--no-apply") != nullptr);
+    g_state.dryRun = (strstr(lpCmdLine, "--dry-run") != nullptr);
 
     // Initialize GDI+ for PNG loading
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
@@ -3561,9 +4113,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     // Standard Windows window - fixed size (no resize handles)
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 
-    // Build window title with admin status
+    // Build window title with admin status and dry-run indicator
     bool isAdmin = IsRunningAsAdmin();
     swprintf_s(g_windowTitle, 256, g_str->windowTitle, isAdmin ? L"\x2705" : L"\x274C");
+    if (g_state.dryRun) {
+        wcscat_s(g_windowTitle, 256, L" [DRY RUN]");
+    }
 
     // Calculate window size to get exact client area
     RECT rc = {0, 0, WINDOW_WIDTH, WINDOW_HEIGHT - TITLEBAR_H};  // Subtract custom titlebar height we're not using
