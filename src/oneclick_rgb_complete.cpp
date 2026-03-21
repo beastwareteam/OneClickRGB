@@ -63,7 +63,8 @@
 //=============================================================================
 
 #define APP_NAME L"OneClickRGB"
-#define APP_VERSION L"3.4"
+#define APP_VERSION L"3.5.1"
+#define APP_VERSION_A "3.5.1"  // ANSI version for resources
 
 // Layout constants (responsive)
 #define WINDOW_WIDTH 640
@@ -366,8 +367,8 @@ Strings g_strEN = {
     L"APPLY", L"Theme",
     // Status
     L"Status", L"Ready - Select color and click Apply",
-    // Window title
-    L"OneClickRGB v3.5 - Complete RGB Control [Admin: %s]",
+    // Window title (version inserted at runtime via APP_VERSION)
+    L"Complete RGB Control [Admin: %s]",
     // Color presets
     L"Blue", L"Red", L"Green", L"Cyan", L"Purple", L"White", L"Off",
     // Keyboard modes
@@ -423,8 +424,8 @@ Strings g_strDE = {
     L"ANWENDEN", L"Design",
     // Status
     L"Status", L"Bereit - Farbe w\x00E4hlen und Anwenden klicken",
-    // Window title
-    L"OneClickRGB v3.5 - Komplette RGB-Steuerung [Admin: %s]",
+    // Window title (version inserted at runtime via APP_VERSION)
+    L"Komplette RGB-Steuerung [Admin: %s]",
     // Color presets
     L"Blau", L"Rot", L"Gr\x00FCn", L"Cyan", L"Lila", L"Wei\x00DF", L"Aus",
     // Keyboard modes
@@ -4492,9 +4493,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     // Standard Windows window - fixed size (no resize handles)
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 
-    // Build window title with admin status and dry-run indicator
+    // Build window title with version, admin status and dry-run indicator
+    // Format: "OneClickRGB v3.5.1 - Complete RGB Control [Admin: ✅]"
     bool isAdmin = IsRunningAsAdmin();
-    swprintf_s(g_windowTitle, 256, g_str->windowTitle, isAdmin ? L"\x2705" : L"\x274C");
+    wchar_t titleSuffix[128];
+    swprintf_s(titleSuffix, 128, g_str->windowTitle, isAdmin ? L"\x2705" : L"\x274C");
+    swprintf_s(g_windowTitle, 256, L"%s v%s - %s", APP_NAME, APP_VERSION, titleSuffix);
     if (g_state.dryRun) {
         wcscat_s(g_windowTitle, 256, L" [DRY RUN]");
     }
