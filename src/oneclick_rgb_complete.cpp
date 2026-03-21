@@ -46,6 +46,7 @@
 #include "hidapi.h"
 #include "channel_config.h"
 #include "modern_ui.h"
+#include "themes.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -319,6 +320,35 @@ struct Strings {
     const wchar_t* csSaveClose;
     const wchar_t* csResetAll;
     const wchar_t* csHint;
+    // Tooltips
+    const wchar_t* tipSliderR;
+    const wchar_t* tipSliderG;
+    const wchar_t* tipSliderB;
+    const wchar_t* tipColorPreview;
+    const wchar_t* tipHexInput;
+    const wchar_t* tipPickColor;
+    const wchar_t* tipPresetBlue;
+    const wchar_t* tipPresetRed;
+    const wchar_t* tipPresetGreen;
+    const wchar_t* tipPresetCyan;
+    const wchar_t* tipPresetPurple;
+    const wchar_t* tipPresetWhite;
+    const wchar_t* tipPresetOff;
+    const wchar_t* tipKeyboardMode;
+    const wchar_t* tipEdgeMode;
+    const wchar_t* tipBrightness;
+    const wchar_t* tipSpeed;
+    const wchar_t* tipChannels;
+    const wchar_t* tipProfile;
+    const wchar_t* tipSave;
+    const wchar_t* tipLoad;
+    const wchar_t* tipAutostart;
+    const wchar_t* tipTray;
+    const wchar_t* tipLive;
+    const wchar_t* tipApply;
+    const wchar_t* tipTheme;
+    const wchar_t* tipLang;
+    const wchar_t* tipStatus;
 };
 
 Strings g_strEN = {
@@ -346,7 +376,36 @@ Strings g_strEN = {
     L"Static", L"Breathing", L"Wave", L"Spectrum", L"Off",
     // Channel settings dialog
     L"Channel Color Correction", L"Save && Close", L"Reset All",
-    L"100% = no change. Adjust to correct color deviation."
+    L"100% = no change. Adjust to correct color deviation.",
+    // Tooltips
+    L"Red channel (0-255)\nAdjust the red color intensity",
+    L"Green channel (0-255)\nAdjust the green color intensity",
+    L"Blue channel (0-255)\nAdjust the blue color intensity",
+    L"Color preview\nShows the current selected color",
+    L"Hex color input\nEnter color as #RRGGBB (e.g. #FF0000 for red)",
+    L"Open color picker dialog\nSelect any color visually",
+    L"Quick preset: Blue\nASUS Aura standard color",
+    L"Quick preset: Red\nIntense red color",
+    L"Quick preset: Green\nIntense green color",
+    L"Quick preset: Cyan\nTurquoise/Aqua color",
+    L"Quick preset: Purple\nMagenta/Violet color",
+    L"Quick preset: White\nAll channels at maximum",
+    L"Turn off all LEDs\nSets color to black (0,0,0)",
+    L"Keyboard lighting effect\nStatic, Breathing, Wave, Reactive, Rainbow",
+    L"Edge LED effect (laptop keyboard edges)\nControls the side lighting strips",
+    L"Overall brightness (0-100%)\nAffects all connected devices",
+    L"Animation speed\nControls breathing/wave effect timing",
+    L"Per-channel color correction\nFine-tune individual device colors",
+    L"Select saved profile\nQuickly switch between color configurations",
+    L"Save current settings\nStore color, effects and device settings",
+    L"Load selected profile\nRestore previously saved settings",
+    L"Start with Windows\nLaunch minimized when Windows starts",
+    L"Minimize to system tray\nHide window but keep running",
+    L"Live preview\nApply changes automatically while adjusting",
+    L"Apply settings to all devices\nSend current color to all RGB hardware",
+    L"Switch color theme\nDark / Light / Colorblind modes",
+    L"Switch language\nEnglish / Deutsch",
+    L"Application log\nShows device status and applied settings"
 };
 
 Strings g_strDE = {
@@ -374,7 +433,36 @@ Strings g_strDE = {
     L"Statisch", L"Atmend", L"Welle", L"Spektrum", L"Aus",
     // Channel settings dialog
     L"Kanal-Farbkorrektur", L"Speichern && Schlie\x00DFen", L"Alle zur\x00FCcksetzen",
-    L"100% = keine \x00C4nderung. Anpassen um Farbabweichungen zu korrigieren."
+    L"100% = keine \x00C4nderung. Anpassen um Farbabweichungen zu korrigieren.",
+    // Tooltips
+    L"Rotkanal (0-255)\nRote Farbintensit\x00E4t einstellen",
+    L"Gr\x00FCnkanal (0-255)\nGr\x00FCne Farbintensit\x00E4t einstellen",
+    L"Blaukanal (0-255)\nBlaue Farbintensit\x00E4t einstellen",
+    L"Farbvorschau\nZeigt die aktuell gew\x00E4hlte Farbe",
+    L"Hex-Farbeingabe\nFarbe als #RRGGBB eingeben (z.B. #FF0000 f\x00FCr Rot)",
+    L"Farbauswahl \x00F6ffnen\nBelibige Farbe visuell ausw\x00E4hlen",
+    L"Schnellauswahl: Blau\nASUS Aura Standardfarbe",
+    L"Schnellauswahl: Rot\nIntensives Rot",
+    L"Schnellauswahl: Gr\x00FCn\nIntensives Gr\x00FCn",
+    L"Schnellauswahl: Cyan\nT\x00FCrkis/Aqua-Farbe",
+    L"Schnellauswahl: Lila\nMagenta/Violett-Farbe",
+    L"Schnellauswahl: Wei\x00DF\nAlle Kan\x00E4le auf Maximum",
+    L"Alle LEDs ausschalten\nSetzt Farbe auf Schwarz (0,0,0)",
+    L"Tastatur-Lichteffekt\nStatisch, Atmend, Welle, Reaktiv, Regenbogen",
+    L"Rand-LED Effekt (Laptop-Tastaturr\x00E4nder)\nSteuert die seitlichen Lichtleisten",
+    L"Gesamthelligkeit (0-100%)\nBeeinflusst alle verbundenen Ger\x00E4te",
+    L"Animationsgeschwindigkeit\nSteuert Atmen/Wellen-Effekt Timing",
+    L"Kanal-Farbkorrektur\nEinzelne Ger\x00E4tefarben fein abstimmen",
+    L"Gespeichertes Profil ausw\x00E4hlen\nSchnell zwischen Farbkonfigurationen wechseln",
+    L"Aktuelle Einstellungen speichern\nFarbe, Effekte und Ger\x00E4teeinstellungen sichern",
+    L"Ausgew\x00E4hltes Profil laden\nGespeicherte Einstellungen wiederherstellen",
+    L"Mit Windows starten\nMinimiert starten wenn Windows hochf\x00E4hrt",
+    L"In System-Tray minimieren\nFenster verstecken aber weiterlaufen",
+    L"Live-Vorschau\n\x00C4nderungen automatisch beim Anpassen anwenden",
+    L"Einstellungen auf alle Ger\x00E4te anwenden\nAktuelle Farbe an alle RGB-Hardware senden",
+    L"Farbschema wechseln\nDunkel / Hell / Farbenblind Modi",
+    L"Sprache wechseln\nEnglish / Deutsch",
+    L"Anwendungsprotokoll\nZeigt Ger\x00E4testatus und angewandte Einstellungen"
 };
 
 Strings* g_str = &g_strEN;
@@ -453,6 +541,7 @@ struct AppState {
     HWND hWnd = NULL;
     HWND hPreview = NULL;
     HWND hSliderR = NULL, hSliderG = NULL, hSliderB = NULL;
+    HWND hLabelRVal = NULL, hLabelGVal = NULL, hLabelBVal = NULL;  // Live value labels
     HWND hSliderBrightness = NULL, hSliderSpeed = NULL;
     HWND hEditHex = NULL;
     HWND hComboKbMode = NULL, hComboEdgeMode = NULL;
@@ -465,6 +554,9 @@ struct AppState {
     HWND hCheckAutostart = NULL, hCheckMinimizeTray = NULL, hCheckAutoApply = NULL;
     // Titlebar buttons
     HWND hBtnClose = NULL, hBtnMaximize = NULL, hBtnMinimize = NULL;
+
+    // Tooltip
+    HWND hTooltip = NULL;
 
     // Tray
     NOTIFYICONDATAW nid = {};
@@ -524,7 +616,7 @@ void SaveAppSettings() {
     std::ofstream file(path);
     if (file.is_open()) {
         file << "lang=" << (g_lang == LANG_DE ? "de" : "en") << "\n";
-        file << "dark=" << (g_theme->isDark ? 1 : 0) << "\n";
+        file << "theme=" << GetThemeId() << "\n";  // 0=Dark, 1=Light, 2=Colorblind
         // Save last profile
         if (!g_state.lastProfile.empty()) {
             std::string profileName(g_state.lastProfile.begin(), g_state.lastProfile.end());
@@ -551,10 +643,16 @@ void LoadAppSettings() {
                 g_lang = LANG_DE;
                 g_str = &g_strDE;
             }
-            if (line.find("dark=1") != std::string::npos) {
-                g_theme = &g_darkTheme;
+            // Load theme (0=Dark, 1=Light, 2=Colorblind)
+            if (line.find("theme=") == 0) {
+                int themeId = std::stoi(line.substr(6));
+                SetTheme(themeId);
+            }
+            // Legacy support for old dark= setting
+            else if (line.find("dark=1") != std::string::npos) {
+                SetTheme(0);  // Dark
             } else if (line.find("dark=0") != std::string::npos) {
-                g_theme = &g_lightTheme;
+                SetTheme(1);  // Light
             }
             // Load last profile name
             if (line.find("lastProfile=") == 0) {
@@ -1274,6 +1372,9 @@ static std::string GetExeDirA() {
     size_t pos = dir.find_last_of("\\/");
     return pos != std::string::npos ? dir.substr(0, pos) : ".";
 }
+
+// Forward declaration
+bool SetGSkillRAM(uint8_t r, uint8_t g, uint8_t b);
 
 // Reset G.Skill RAM to a known state (turn off LEDs)
 bool ResetGSkillRAM() {
@@ -2409,9 +2510,28 @@ void UpdatePreview() {
 }
 
 void UpdateSliders() {
-    if (g_state.hSliderR) SendMessage(g_state.hSliderR, TBM_SETPOS, TRUE, g_state.red);
-    if (g_state.hSliderG) SendMessage(g_state.hSliderG, TBM_SETPOS, TRUE, g_state.green);
-    if (g_state.hSliderB) SendMessage(g_state.hSliderB, TBM_SETPOS, TRUE, g_state.blue);
+    wchar_t valBuf[8];
+    if (g_state.hSliderR) {
+        SendMessage(g_state.hSliderR, TBM_SETPOS, TRUE, g_state.red);
+        if (g_state.hLabelRVal) {
+            swprintf(valBuf, 8, L"%d", g_state.red);
+            SetWindowTextW(g_state.hLabelRVal, valBuf);
+        }
+    }
+    if (g_state.hSliderG) {
+        SendMessage(g_state.hSliderG, TBM_SETPOS, TRUE, g_state.green);
+        if (g_state.hLabelGVal) {
+            swprintf(valBuf, 8, L"%d", g_state.green);
+            SetWindowTextW(g_state.hLabelGVal, valBuf);
+        }
+    }
+    if (g_state.hSliderB) {
+        SendMessage(g_state.hSliderB, TBM_SETPOS, TRUE, g_state.blue);
+        if (g_state.hLabelBVal) {
+            swprintf(valBuf, 8, L"%d", g_state.blue);
+            SetWindowTextW(g_state.hLabelBVal, valBuf);
+        }
+    }
     if (g_state.hSliderBrightness) SendMessage(g_state.hSliderBrightness, TBM_SETPOS, TRUE, g_state.brightness);
     if (g_state.hSliderSpeed) SendMessage(g_state.hSliderSpeed, TBM_SETPOS, TRUE, g_state.speed);
 }
@@ -2563,6 +2683,24 @@ struct GroupRect { int x, y, w, h; const wchar_t* title; };
 GroupRect g_groups[5];
 int g_numGroups = 0;
 
+// Shadow offset for text (1px right, 1px down)
+const float SHADOW_OFFSET_X = 1.0f;
+const float SHADOW_OFFSET_Y = 1.0f;
+
+// Helper to draw text with shadow
+void DrawTextWithShadow(Gdiplus::Graphics& gfx, const wchar_t* text, Gdiplus::Font* font,
+                        Gdiplus::RectF& rect, Gdiplus::StringFormat* format,
+                        Gdiplus::Color textColor, Gdiplus::Color shadowColor = Gdiplus::Color(128, 0, 0, 0)) {
+    // Draw shadow first (offset by 2px)
+    Gdiplus::RectF shadowRect(rect.X + SHADOW_OFFSET_X, rect.Y + SHADOW_OFFSET_Y, rect.Width, rect.Height);
+    Gdiplus::SolidBrush shadowBrush(shadowColor);
+    gfx.DrawString(text, -1, font, shadowRect, format, &shadowBrush);
+
+    // Draw text on top
+    Gdiplus::SolidBrush textBrush(textColor);
+    gfx.DrawString(text, -1, font, rect, format, &textBrush);
+}
+
 // Helper to draw modern group box
 void DrawThemedGroupBox(HDC hdc, const GroupRect& g) {
     Gdiplus::Graphics gfx(hdc);
@@ -2626,17 +2764,17 @@ void DrawThemedGroupBox(HDC hdc, const GroupRect& g) {
     Gdiplus::Pen badgeBorderPen(Gdiplus::Color(255, 60, 120, 200), 1.0f);
     gfx.DrawPath(&badgeBorderPen, &badgePath);
 
-    // Title text (centered in badge)
-    Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 180, 220, 255));
+    // Title text (centered in badge) with shadow
     Gdiplus::StringFormat format;
     format.SetAlignment(Gdiplus::StringAlignmentCenter);
     format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
     Gdiplus::RectF badgeRect(badgeX, badgeY, badgeW, badgeH);
-    gfx.DrawString(g.title, -1, &font, badgeRect, &format, &textBrush);
+    DrawTextWithShadow(gfx, g.title, &font, badgeRect, &format,
+                       ToGdipColor(g_currentTheme->groupTitle));
 }
 
 // Modern button drawing helper
-void DrawModernButton(HDC hdc, RECT* rc, const wchar_t* text, bool isHovered, bool isPressed, bool isAccent = false) {
+void DrawModernButton(HDC hdc, RECT* rc, const wchar_t* text, bool isHovered, bool isPressed, bool isAccent = false, bool isFocused = false) {
     Gdiplus::Graphics gfx(hdc);
     gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
@@ -2658,7 +2796,7 @@ void DrawModernButton(HDC hdc, RECT* rc, const wchar_t* text, bool isHovered, bo
     path.AddArc(x, y + h - d, d, d, 90, 90);
     path.CloseFigure();
 
-    // Background color based on state
+    // Background color based on state (from theme)
     Gdiplus::Color bgColor;
     Gdiplus::Color borderColor;
     Gdiplus::Color textColor;
@@ -2666,29 +2804,29 @@ void DrawModernButton(HDC hdc, RECT* rc, const wchar_t* text, bool isHovered, bo
     if (isAccent) {
         // Accent button (Apply, etc.)
         if (isPressed) {
-            bgColor = Gdiplus::Color(255, 30, 100, 180);
-            borderColor = Gdiplus::Color(255, 50, 130, 220);
+            bgColor = ToGdipColor(g_currentTheme->bgAccentPressed);
+            borderColor = ToGdipColor(g_currentTheme->bgAccentHover);
         } else if (isHovered) {
-            bgColor = Gdiplus::Color(255, 50, 130, 220);
-            borderColor = Gdiplus::Color(255, 80, 160, 255);
+            bgColor = ToGdipColor(g_currentTheme->bgAccentHover);
+            borderColor = ToGdipColor(g_currentTheme->borderHover);
         } else {
-            bgColor = Gdiplus::Color(255, 40, 110, 200);
-            borderColor = Gdiplus::Color(255, 60, 140, 230);
+            bgColor = ToGdipColor(g_currentTheme->bgAccent);
+            borderColor = ToGdipColor(g_currentTheme->bgAccentHover);
         }
-        textColor = Gdiplus::Color(255, 255, 255, 255);
+        textColor = ToGdipColor(g_currentTheme->textOnAccent);
     } else {
         // Normal button
         if (isPressed) {
-            bgColor = Gdiplus::Color(255, 50, 55, 70);
-            borderColor = Gdiplus::Color(255, 80, 140, 200);
+            bgColor = ToGdipColor(g_currentTheme->bgButtonPressed);
+            borderColor = ToGdipColor(g_currentTheme->borderHover);
         } else if (isHovered) {
-            bgColor = Gdiplus::Color(255, 55, 60, 80);
-            borderColor = Gdiplus::Color(255, 100, 160, 220);
+            bgColor = ToGdipColor(g_currentTheme->bgButtonHover);
+            borderColor = ToGdipColor(g_currentTheme->borderHover);
         } else {
-            bgColor = Gdiplus::Color(255, 40, 45, 60);
-            borderColor = Gdiplus::Color(255, 70, 80, 100);
+            bgColor = ToGdipColor(g_currentTheme->bgButton);
+            borderColor = ToGdipColor(g_currentTheme->border);
         }
-        textColor = Gdiplus::Color(255, 220, 225, 235);
+        textColor = ToGdipColor(g_currentTheme->textPrimary);
     }
 
     // Fill
@@ -2699,20 +2837,37 @@ void DrawModernButton(HDC hdc, RECT* rc, const wchar_t* text, bool isHovered, bo
     Gdiplus::Pen borderPen(borderColor, 1.0f);
     gfx.DrawPath(&borderPen, &path);
 
-    // Text
+    // Focus indicator - dotted inner border
+    if (isFocused) {
+        Gdiplus::GraphicsPath focusPath;
+        float fi = 4.0f;  // Focus inset
+        float fx = x + fi, fy = y + fi;
+        float fw = w - fi * 2, fh = h - fi * 2;
+        float fr = radius - 2;
+        float fd = fr * 2;
+        focusPath.AddArc(fx, fy, fd, fd, 180, 90);
+        focusPath.AddArc(fx + fw - fd, fy, fd, fd, 270, 90);
+        focusPath.AddArc(fx + fw - fd, fy + fh - fd, fd, fd, 0, 90);
+        focusPath.AddArc(fx, fy + fh - fd, fd, fd, 90, 90);
+        focusPath.CloseFigure();
+        Gdiplus::Pen focusPen(Gdiplus::Color(255, 150, 200, 255), 1.0f);
+        focusPen.SetDashStyle(Gdiplus::DashStyleDot);
+        gfx.DrawPath(&focusPen, &focusPath);
+    }
+
+    // Text with shadow
     Gdiplus::FontFamily fontFamily(L"Segoe UI");
     Gdiplus::Font font(&fontFamily, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
-    Gdiplus::SolidBrush textBrush(textColor);
 
     Gdiplus::RectF textRect(x, y, w, h);
     Gdiplus::StringFormat format;
     format.SetAlignment(Gdiplus::StringAlignmentCenter);
     format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-    gfx.DrawString(text, -1, &font, textRect, &format, &textBrush);
+    DrawTextWithShadow(gfx, text, &font, textRect, &format, textColor);
 }
 
 // Draw modern checkbox with badge-style background
-void DrawModernCheckbox(HDC hdc, RECT* rc, const wchar_t* text, bool isChecked, bool isHovered) {
+void DrawModernCheckbox(HDC hdc, RECT* rc, const wchar_t* text, bool isChecked, bool isHovered, bool isFocused = false) {
     Gdiplus::Graphics gfx(hdc);
     gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
@@ -2731,17 +2886,17 @@ void DrawModernCheckbox(HDC hdc, RECT* rc, const wchar_t* text, bool isChecked, 
     badgePath.AddArc((float)padding, (float)(h - padding) - bd, bd, bd, 90, 90);
     badgePath.CloseFigure();
 
-    // Badge fill - same colors as buttons
+    // Badge fill - from theme
     Gdiplus::Color badgeBg = isHovered ?
-        Gdiplus::Color(255, 55, 60, 80) :   // Hover: same as button bg hover
-        Gdiplus::Color(255, 40, 45, 60);    // Normal: same as button bg
+        ToGdipColor(g_currentTheme->bgButtonHover) :
+        ToGdipColor(g_currentTheme->bgButton);
     Gdiplus::SolidBrush badgeBrush(badgeBg);
     gfx.FillPath(&badgeBrush, &badgePath);
 
-    // Badge border - same colors as buttons
+    // Badge border - from theme
     Gdiplus::Color badgeBorderColor = isHovered ?
-        Gdiplus::Color(255, 100, 160, 220) :  // Hover: same as button border hover
-        Gdiplus::Color(255, 70, 80, 100);     // Normal: same as button border
+        ToGdipColor(g_currentTheme->borderHover) :
+        ToGdipColor(g_currentTheme->border);
     Gdiplus::Pen badgeBorder(badgeBorderColor, 1.0f);
     gfx.DrawPath(&badgeBorder, &badgePath);
 
@@ -2759,21 +2914,23 @@ void DrawModernCheckbox(HDC hdc, RECT* rc, const wchar_t* text, bool isChecked, 
     boxPath.AddArc((float)boxX, (float)boxY + boxSize - d, d, d, 90, 90);
     boxPath.CloseFigure();
 
-    // Checkbox background
+    // Checkbox background - from theme
     Gdiplus::Color boxBg = isChecked ?
-        Gdiplus::Color(255, 50, 130, 210) : Gdiplus::Color(255, 30, 35, 48);
+        ToGdipColor(g_currentTheme->checkboxBgChecked) :
+        ToGdipColor(g_currentTheme->checkboxBg);
     Gdiplus::SolidBrush boxBrush(boxBg);
     gfx.FillPath(&boxBrush, &boxPath);
 
-    // Checkbox border
+    // Checkbox border - from theme
     Gdiplus::Color boxBorder = isChecked ?
-        Gdiplus::Color(255, 80, 160, 240) : Gdiplus::Color(255, 70, 80, 100);
+        ToGdipColor(g_currentTheme->checkboxBorderChecked) :
+        ToGdipColor(g_currentTheme->checkboxBorder);
     Gdiplus::Pen boxPen(boxBorder, 1.0f);
     gfx.DrawPath(&boxPen, &boxPath);
 
-    // Checkmark
+    // Checkmark - from theme
     if (isChecked) {
-        Gdiplus::Pen checkPen(Gdiplus::Color(255, 255, 255, 255), 2.0f);
+        Gdiplus::Pen checkPen(ToGdipColor(g_currentTheme->checkboxCheck), 2.0f);
         checkPen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
         int cx = boxX + boxSize / 2;
         int cy = boxY + boxSize / 2;
@@ -2785,17 +2942,31 @@ void DrawModernCheckbox(HDC hdc, RECT* rc, const wchar_t* text, bool isChecked, 
         gfx.DrawLines(&checkPen, pts, 3);
     }
 
-    // Text with more padding
+    // Focus indicator - dotted border around entire badge
+    if (isFocused) {
+        Gdiplus::GraphicsPath focusPath;
+        float fi = 1.0f;  // Focus inset
+        focusPath.AddArc((float)padding + fi, (float)padding + fi, bd, bd, 180, 90);
+        focusPath.AddArc((float)(w - padding) - bd - fi, (float)padding + fi, bd, bd, 270, 90);
+        focusPath.AddArc((float)(w - padding) - bd - fi, (float)(h - padding) - bd - fi, bd, bd, 0, 90);
+        focusPath.AddArc((float)padding + fi, (float)(h - padding) - bd - fi, bd, bd, 90, 90);
+        focusPath.CloseFigure();
+        Gdiplus::Pen focusPen(Gdiplus::Color(255, 150, 200, 255), 1.0f);
+        focusPen.SetDashStyle(Gdiplus::DashStyleDot);
+        gfx.DrawPath(&focusPen, &focusPath);
+    }
+
+    // Text with shadow
     int textX = boxX + boxSize + 10;
     Gdiplus::FontFamily fontFamily(L"Segoe UI");
     Gdiplus::Font font(&fontFamily, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
-    Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 220, 225, 235));
     Gdiplus::RectF textRect((float)textX, 0.0f, (float)(w - textX - 6), (float)h);
     Gdiplus::StringFormat format;
     format.SetAlignment(Gdiplus::StringAlignmentNear);
     format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
     format.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);  // Prevent text wrapping
-    gfx.DrawString(text, -1, &font, textRect, &format, &textBrush);
+    DrawTextWithShadow(gfx, text, &font, textRect, &format,
+                       ToGdipColor(g_currentTheme->textPrimary));
 }
 
 // Track button hover states
@@ -2827,6 +2998,31 @@ LRESULT CALLBACK ModernButtonProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
             InvalidateRect(hWnd, NULL, FALSE);
             break;
         }
+        // Keyboard accessibility: Space/Enter activates button
+        case WM_KEYDOWN: {
+            if (wParam == VK_SPACE || wParam == VK_RETURN) {
+                g_buttonPressed[hWnd] = true;
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            break;
+        }
+        case WM_KEYUP: {
+            if (wParam == VK_SPACE || wParam == VK_RETURN) {
+                g_buttonPressed[hWnd] = false;
+                InvalidateRect(hWnd, NULL, FALSE);
+                // Send click notification to parent
+                HWND parent = GetParent(hWnd);
+                int id = GetDlgCtrlID(hWnd);
+                SendMessage(parent, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), (LPARAM)hWnd);
+            }
+            break;
+        }
+        // Visual feedback for focus
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS: {
+            InvalidateRect(hWnd, NULL, FALSE);
+            break;
+        }
         case WM_NCDESTROY: {
             g_buttonHover.erase(hWnd);
             g_buttonPressed.erase(hWnd);
@@ -2843,7 +3039,7 @@ void ApplyModernCheckboxStyle(HWND hCheck);
 // Helper to create a modern owner-draw button with hover tracking
 HWND CreateModernButton(LPCWSTR text, DWORD style, int x, int y, int w, int h, HWND parent, int id) {
     HWND hBtn = CreateWindowW(L"BUTTON", text,
-        style | BS_OWNERDRAW,
+        style | BS_OWNERDRAW | WS_TABSTOP,
         x, y, w, h, parent, (HMENU)(INT_PTR)id, NULL, NULL);
     if (hBtn) {
         SetWindowSubclass(hBtn, ModernButtonProc, 0, 0);
@@ -2873,7 +3069,7 @@ HWND CreateModernCheckbox(LPCWSTR text, int x, int y, int h, HWND parent, int id
     if (outWidth) *outWidth = width;
 
     HWND hCheck = CreateWindowW(L"BUTTON", text,
-        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
         x, y, width, h, parent, (HMENU)(INT_PTR)id, NULL, NULL);
 
     if (hCheck) {
@@ -2923,8 +3119,9 @@ LRESULT CALLBACK ModernCheckboxProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
             GetWindowTextW(hWnd, text, 64);
             bool isChecked = g_checkboxChecked[hWnd];
             bool isHovered = g_checkboxHover[hWnd];
+            bool isFocused = (GetFocus() == hWnd);
 
-            DrawModernCheckbox(hdc, &rc, text, isChecked, isHovered);
+            DrawModernCheckbox(hdc, &rc, text, isChecked, isHovered, isFocused);
 
             EndPaint(hWnd, &ps);
             return 0;
@@ -2964,6 +3161,24 @@ LRESULT CALLBACK ModernCheckboxProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
                 SendMessage(GetParent(hWnd), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(hWnd), BN_CLICKED), (LPARAM)hWnd);
             }
             return 0;
+        }
+        // Keyboard accessibility: Space toggles checkbox
+        case WM_KEYDOWN: {
+            if (wParam == VK_SPACE) {
+                // Toggle state on Space
+                g_checkboxChecked[hWnd] = !g_checkboxChecked[hWnd];
+                InvalidateRect(hWnd, NULL, TRUE);
+                // Notify parent
+                SendMessage(GetParent(hWnd), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(hWnd), BN_CLICKED), (LPARAM)hWnd);
+                return 0;
+            }
+            break;
+        }
+        // Visual feedback for focus
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS: {
+            InvalidateRect(hWnd, NULL, FALSE);
+            break;
         }
         case WM_NCDESTROY: {
             g_checkboxHover.erase(hWnd);
@@ -3072,20 +3287,19 @@ LRESULT CALLBACK ModernLabelProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
             gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-            // Text color changes on hover (same colors as buttons)
+            // Text color changes on hover (from theme)
             Gdiplus::Color textColor = isHovered ?
-                Gdiplus::Color(255, 100, 160, 220) :  // Hover: same as button border hover
-                Gdiplus::Color(255, 220, 225, 235);   // Normal: same as button text
+                ToGdipColor(g_currentTheme->borderHover) :
+                ToGdipColor(g_currentTheme->textPrimary);
 
             Gdiplus::FontFamily fontFamily(L"Segoe UI");
             Gdiplus::Font font(&fontFamily, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
-            Gdiplus::SolidBrush textBrush(textColor);
             Gdiplus::StringFormat format;
             format.SetAlignment(Gdiplus::StringAlignmentNear);
             format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
 
             Gdiplus::RectF textRect((float)rc.left, (float)rc.top, (float)(rc.right - rc.left), (float)(rc.bottom - rc.top));
-            gfx.DrawString(text, -1, &font, textRect, &format, &textBrush);
+            DrawTextWithShadow(gfx, text, &font, textRect, &format, textColor);
 
             EndPaint(hWnd, &ps);
             return 0;
@@ -3192,6 +3406,49 @@ void LoadLogoBitmap() {
     g_logoHeight = g_pLogoImage->GetHeight();
 }
 
+//=============================================================================
+// TOOLTIP SYSTEM
+//=============================================================================
+
+// Create main tooltip control
+void CreateTooltipControl(HWND hWndParent) {
+    g_state.hTooltip = CreateWindowExW(
+        WS_EX_TOPMOST,
+        TOOLTIPS_CLASSW,
+        NULL,
+        WS_POPUP | TTS_ALWAYSTIP | TTS_BALLOON | TTS_NOPREFIX,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        hWndParent,
+        NULL,
+        GetModuleHandle(NULL),
+        NULL
+    );
+
+    if (g_state.hTooltip) {
+        // Set maximum width for multi-line tooltips
+        SendMessage(g_state.hTooltip, TTM_SETMAXTIPWIDTH, 0, 300);
+        // Set delay times (ms)
+        SendMessage(g_state.hTooltip, TTM_SETDELAYTIME, TTDT_AUTOPOP, 15000);  // Show for 15s
+        SendMessage(g_state.hTooltip, TTM_SETDELAYTIME, TTDT_INITIAL, 400);    // Show after 400ms
+        SendMessage(g_state.hTooltip, TTM_SETDELAYTIME, TTDT_RESHOW, 100);     // Reshow quickly
+    }
+}
+
+// Add tooltip to a control
+void AddTooltip(HWND hControl, const wchar_t* text) {
+    if (!g_state.hTooltip || !hControl || !text) return;
+
+    TOOLINFOW ti = {0};
+    ti.cbSize = sizeof(TOOLINFOW);
+    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd = GetParent(hControl);
+    ti.uId = (UINT_PTR)hControl;
+    ti.lpszText = (LPWSTR)text;
+
+    SendMessage(g_state.hTooltip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
@@ -3252,11 +3509,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         // Right-aligned buttons with proper sizing
         int rightEdge = x + GP + ICW;  // right edge of content area
-        CreateModernButton(g_str->theme, WS_CHILD | WS_VISIBLE,
-            rightEdge - 106, gy + 4, 60, BTN_H, hWnd, ID_BTN_THEME);
+        // Theme button shows current theme name (wider for "Colorblind")
+        CreateModernButton(g_currentTheme->name, WS_CHILD | WS_VISIBLE,
+            rightEdge - 120, gy + 4, 74, BTN_H, hWnd, ID_BTN_THEME);
 
         CreateModernButton(g_lang == LANG_EN ? L"DE" : L"EN", WS_CHILD | WS_VISIBLE,
-            rightEdge - 42, gy + 4, 42, BTN_H, hWnd, ID_BTN_LANG);
+            rightEdge - 42, gy + 4, 38, BTN_H, hWnd, ID_BTN_LANG);
 
         // Row 2: 7 Color presets - uniform sizing with proper gaps
         // Available width: ICW - 8 (margins) = 503px
@@ -3280,28 +3538,41 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int sliderSpacing = SLIDER_H + 6;  // Less space between sliders
         int sy = presetY + ph + 20;  // Space after preset buttons
 
+        // RGB Sliders with live value display
+        int valLabelW = 32;  // Width for "255" text
+        int actualSliderW = sliderW - valLabelW - 4;
+
         CreateModernLabel(g_str->red, x + GP, sy + 2, LABEL_W - 4, CTRL_H, hWnd);
         g_state.hSliderR = CreateWindowW(TRACKBAR_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-            sliderX, sy, sliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_R, NULL, NULL);
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
+            sliderX, sy, actualSliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_R, NULL, NULL);
         SendMessage(g_state.hSliderR, TBM_SETRANGE, TRUE, MAKELONG(0, 255));
-        SetWindowTheme(g_state.hSliderR, L"", L"");  // Remove theme for custom drawing
+        SetWindowTheme(g_state.hSliderR, L"", L"");
+        g_state.hLabelRVal = CreateWindowW(L"STATIC", L"0",
+            WS_CHILD | WS_VISIBLE | SS_RIGHT,
+            sliderX + actualSliderW + 4, sy + 2, valLabelW, SLIDER_H, hWnd, NULL, NULL, NULL);
         sy += sliderSpacing;
 
         CreateModernLabel(g_str->green, x + GP, sy + 2, LABEL_W - 4, CTRL_H, hWnd);
         g_state.hSliderG = CreateWindowW(TRACKBAR_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-            sliderX, sy, sliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_G, NULL, NULL);
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
+            sliderX, sy, actualSliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_G, NULL, NULL);
         SendMessage(g_state.hSliderG, TBM_SETRANGE, TRUE, MAKELONG(0, 255));
-        SetWindowTheme(g_state.hSliderG, L"", L"");  // Remove theme for custom drawing
+        SetWindowTheme(g_state.hSliderG, L"", L"");
+        g_state.hLabelGVal = CreateWindowW(L"STATIC", L"0",
+            WS_CHILD | WS_VISIBLE | SS_RIGHT,
+            sliderX + actualSliderW + 4, sy + 2, valLabelW, SLIDER_H, hWnd, NULL, NULL, NULL);
         sy += sliderSpacing;
 
         CreateModernLabel(g_str->blue, x + GP, sy + 2, LABEL_W - 4, CTRL_H, hWnd);
         g_state.hSliderB = CreateWindowW(TRACKBAR_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-            sliderX, sy, sliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_B, NULL, NULL);
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
+            sliderX, sy, actualSliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_B, NULL, NULL);
         SendMessage(g_state.hSliderB, TBM_SETRANGE, TRUE, MAKELONG(0, 255));
-        SetWindowTheme(g_state.hSliderB, L"", L"");  // Remove theme for custom drawing
+        SetWindowTheme(g_state.hSliderB, L"", L"");
+        g_state.hLabelBVal = CreateWindowW(L"STATIC", L"0",
+            WS_CHILD | WS_VISIBLE | SS_RIGHT,
+            sliderX + actualSliderW + 4, sy + 2, valLabelW, SLIDER_H, hWnd, NULL, NULL, NULL);
 
         // Initialize custom modern sliders (overlay on top of standard trackbars)
         int sliderHeight = 28;
@@ -3333,7 +3604,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Row 1: Keyboard + Edge mode
         CreateModernLabel(g_str->keyboardEffect, x + GP, gy + 2, 52, CTRL_H, hWnd);
         g_state.hComboKbMode = CreateWindowW(L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
             x + GP + 56, gy, 130, 200, hWnd, (HMENU)ID_COMBO_KB_MODE, NULL, NULL);
         SetWindowTheme(g_state.hComboKbMode, L"DarkMode_CFD", NULL);
         ApplyModernComboStyle(g_state.hComboKbMode);
@@ -3352,7 +3623,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         CreateModernLabel(g_str->edgeEffect, x + GP + 200, gy + 2, 36, CTRL_H, hWnd);
         g_state.hComboEdgeMode = CreateWindowW(L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
             x + GP + 240, gy, 120, 200, hWnd, (HMENU)ID_COMBO_EDGE_MODE, NULL, NULL);
         SetWindowTheme(g_state.hComboEdgeMode, L"DarkMode_CFD", NULL);
         ApplyModernComboStyle(g_state.hComboEdgeMode);
@@ -3368,7 +3639,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Row 2: Brightness + Speed
         CreateModernLabel(g_str->brightness, x + GP, gy + 2, 80, CTRL_H, hWnd);
         g_state.hSliderBrightness = CreateWindowW(TRACKBAR_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
             x + GP + 84, gy, 110, SLIDER_H, hWnd, (HMENU)ID_SLIDER_BRIGHTNESS, NULL, NULL);
         SendMessage(g_state.hSliderBrightness, TBM_SETRANGE, TRUE, MAKELONG(0, 4));
         SendMessage(g_state.hSliderBrightness, TBM_SETPOS, TRUE, 4);
@@ -3376,7 +3647,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         CreateModernLabel(g_str->speed, x + GP + 210, gy + 2, 60, CTRL_H, hWnd);
         g_state.hSliderSpeed = CreateWindowW(TRACKBAR_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
             x + GP + 274, gy, 110, SLIDER_H, hWnd, (HMENU)ID_SLIDER_SPEED, NULL, NULL);
         SendMessage(g_state.hSliderSpeed, TBM_SETRANGE, TRUE, MAKELONG(0, 5));
         SendMessage(g_state.hSliderSpeed, TBM_SETPOS, TRUE, 2);
@@ -3440,7 +3711,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Row 1: Profile dropdown + Save/Load
         CreateModernLabel(g_str->profile, x + GP, gy + 2, 40, CTRL_H, hWnd);
         g_state.hComboProfiles = CreateWindowW(L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | WS_VSCROLL,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWN | WS_VSCROLL,
             x + GP + 44, gy, 110, 200, hWnd, (HMENU)ID_COMBO_PROFILES, NULL, NULL);
         SetWindowTheme(g_state.hComboProfiles, L"DarkMode_CFD", NULL);
         ApplyModernComboStyle(g_state.hComboProfiles);
@@ -3501,7 +3772,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         // Status log inside container (slightly inset for border)
         g_state.hStatus = CreateWindowW(L"EDIT", g_str->ready,
-            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
             x + GP + borderInset, gy + borderInset,
             statusLogWidth - borderInset * 2, statusLogHeight - borderInset * 2,
             hWnd, (HMENU)ID_STATIC_STATUS, NULL, NULL);
@@ -3558,6 +3829,55 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         RegisterHotKey(hWnd, ID_HOTKEY_WHITE, MOD_CONTROL | MOD_ALT, '4');
         RegisterHotKey(hWnd, ID_HOTKEY_OFF, MOD_CONTROL | MOD_ALT, '0');
         RegisterHotKey(hWnd, ID_HOTKEY_TOGGLE, MOD_CONTROL | MOD_ALT, VK_SPACE);
+
+        // ═══════════════════════════════════════════════════════════════
+        // TOOLTIPS - Add info bubbles to all controls
+        // ═══════════════════════════════════════════════════════════════
+        CreateTooltipControl(hWnd);
+
+        // Color section - Sliders and preview
+        AddTooltip(g_state.hSliderR, g_str->tipSliderR);
+        AddTooltip(g_state.hSliderG, g_str->tipSliderG);
+        AddTooltip(g_state.hSliderB, g_str->tipSliderB);
+        AddTooltip(g_state.hPreview, g_str->tipColorPreview);
+        AddTooltip(g_state.hEditHex, g_str->tipHexInput);
+
+        // Color section - Buttons (via control ID)
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_PICK_COLOR), g_str->tipPickColor);
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_THEME), g_str->tipTheme);
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_LANG), g_str->tipLang);
+
+        // Color presets
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_BLUE), g_str->tipPresetBlue);
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_RED), g_str->tipPresetRed);
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_GREEN), g_str->tipPresetGreen);
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_CYAN), g_str->tipPresetCyan);
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_PURPLE), g_str->tipPresetPurple);
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_WHITE), g_str->tipPresetWhite);
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_OFF), g_str->tipPresetOff);
+
+        // Effects section
+        AddTooltip(g_state.hComboKbMode, g_str->tipKeyboardMode);
+        AddTooltip(g_state.hComboEdgeMode, g_str->tipEdgeMode);
+        AddTooltip(g_state.hSliderBrightness, g_str->tipBrightness);
+        AddTooltip(g_state.hSliderSpeed, g_str->tipSpeed);
+
+        // Devices section
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_CHANNEL_SETTINGS), g_str->tipChannels);
+
+        // Profile section
+        AddTooltip(g_state.hComboProfiles, g_str->tipProfile);
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_SAVE_PROFILE), g_str->tipSave);
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_LOAD_PROFILE), g_str->tipLoad);
+        AddTooltip(g_state.hCheckAutostart, g_str->tipAutostart);
+        AddTooltip(g_state.hCheckMinimizeTray, g_str->tipTray);
+        AddTooltip(g_state.hCheckAutoApply, g_str->tipLive);
+
+        // Apply button
+        AddTooltip(GetDlgItem(hWnd, ID_BTN_APPLY), g_str->tipApply);
+
+        // Status log
+        AddTooltip(g_state.hStatus, g_str->tipStatus);
 
         break;
     }
@@ -3640,21 +3960,37 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         // Status log (readonly edit) - needs solid background to prevent ghosting
         if (ctrl == g_state.hStatus) {
-            SetTextColor(hdc, RGB(200, 210, 220));
+            SetTextColor(hdc, g_currentTheme->statusText);
             SetBkMode(hdc, OPAQUE);
-            SetBkColor(hdc, RGB(28, 32, 42));
-            static HBRUSH hStatusBrush = CreateSolidBrush(RGB(28, 32, 42));
+            SetBkColor(hdc, g_currentTheme->statusBg);
+            static HBRUSH hStatusBrush = NULL;
+            static COLORREF lastStatusBg = 0;
+            if (!hStatusBrush || lastStatusBg != g_currentTheme->statusBg) {
+                if (hStatusBrush) DeleteObject(hStatusBrush);
+                hStatusBrush = CreateSolidBrush(g_currentTheme->statusBg);
+                lastStatusBg = g_currentTheme->statusBg;
+            }
             return (LRESULT)hStatusBrush;
         }
 
-        SetTextColor(hdc, RGB(220, 225, 235));
+        SetTextColor(hdc, g_currentTheme->textPrimary);
         SetBkMode(hdc, TRANSPARENT);
 
-        // Check if it's a trackbar - use a nice dark blue-gray background
+        // Check if it's a trackbar or slider value label - use group body background
         if (ctrl == g_state.hSliderR || ctrl == g_state.hSliderG ||
             ctrl == g_state.hSliderB || ctrl == g_state.hSliderBrightness ||
-            ctrl == g_state.hSliderSpeed) {
-            static HBRUSH hSliderBrush = CreateSolidBrush(RGB(28, 32, 42));
+            ctrl == g_state.hSliderSpeed ||
+            ctrl == g_state.hLabelRVal || ctrl == g_state.hLabelGVal ||
+            ctrl == g_state.hLabelBVal) {
+            SetBkMode(hdc, OPAQUE);
+            SetBkColor(hdc, g_currentTheme->groupBodyBg);
+            static HBRUSH hSliderBrush = NULL;
+            static COLORREF lastSliderBg = 0;
+            if (!hSliderBrush || lastSliderBg != g_currentTheme->groupBodyBg) {
+                if (hSliderBrush) DeleteObject(hSliderBrush);
+                hSliderBrush = CreateSolidBrush(g_currentTheme->groupBodyBg);
+                lastSliderBg = g_currentTheme->groupBodyBg;
+            }
             return (LRESULT)hSliderBrush;
         }
 
@@ -3665,14 +4001,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CTLCOLOREDIT: {
         HDC hdc = (HDC)wParam;
         HWND hCtrl = (HWND)lParam;
-        SetTextColor(hdc, RGB(230, 235, 245));
+        SetTextColor(hdc, g_currentTheme->textPrimary);
         SetBkMode(hdc, OPAQUE);  // IMPORTANT: Use OPAQUE to prevent text ghosting
-        SetBkColor(hdc, RGB(35, 40, 50));
+        SetBkColor(hdc, g_currentTheme->bgControl);
 
         // Use a solid brush that matches the background
         static HBRUSH hEditBrush = NULL;
-        if (!hEditBrush) {
-            hEditBrush = CreateSolidBrush(RGB(35, 40, 50));
+        static COLORREF lastEditBg = 0;
+        if (!hEditBrush || lastEditBg != g_currentTheme->bgControl) {
+            if (hEditBrush) DeleteObject(hEditBrush);
+            hEditBrush = CreateSolidBrush(g_currentTheme->bgControl);
+            lastEditBg = g_currentTheme->bgControl;
         }
         return (LRESULT)hEditBrush;
     }
@@ -3680,9 +4019,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CTLCOLORLISTBOX: {
         // Style dropdown list (combobox popup)
         HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, RGB(220, 230, 245));
-        SetBkColor(hdc, RGB(35, 40, 55));
-        static HBRUSH hListBrush = CreateSolidBrush(RGB(35, 40, 55));
+        SetTextColor(hdc, g_currentTheme->textPrimary);
+        SetBkColor(hdc, g_currentTheme->bgControl);
+        static HBRUSH hListBrush = NULL;
+        static COLORREF lastListBg = 0;
+        if (!hListBrush || lastListBg != g_currentTheme->bgControl) {
+            if (hListBrush) DeleteObject(hListBrush);
+            hListBrush = CreateSolidBrush(g_currentTheme->bgControl);
+            lastListBg = g_currentTheme->bgControl;
+        }
         return (LRESULT)hListBrush;
     }
 
@@ -3702,8 +4047,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             bool isHovered = g_buttonHover[dis->hwndItem];
             bool isPressed = (dis->itemState & ODS_SELECTED) != 0;
             bool isAccent = (dis->CtlID == ID_BTN_APPLY);
+            bool isFocused = (dis->itemState & ODS_FOCUS) != 0;
 
-            DrawModernButton(dis->hDC, &dis->rcItem, text, isHovered, isPressed, isAccent);
+            DrawModernButton(dis->hDC, &dis->rcItem, text, isHovered, isPressed, isAccent, isFocused);
             return TRUE;
         }
         // Status log border (rounded container)
@@ -3781,17 +4127,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         HWND slider = (HWND)lParam;
         int pos = (int)SendMessage(slider, TBM_GETPOS, 0, 0);
         bool colorChanged = false;
+        wchar_t valBuf[8];
 
         if (slider == g_state.hSliderR) {
             g_state.red = pos;
+            swprintf(valBuf, 8, L"%d", pos);
+            SetWindowTextW(g_state.hLabelRVal, valBuf);
             UpdatePreview(); UpdateHexEdit(); colorChanged = true;
         }
         else if (slider == g_state.hSliderG) {
             g_state.green = pos;
+            swprintf(valBuf, 8, L"%d", pos);
+            SetWindowTextW(g_state.hLabelGVal, valBuf);
             UpdatePreview(); UpdateHexEdit(); colorChanged = true;
         }
         else if (slider == g_state.hSliderB) {
             g_state.blue = pos;
+            swprintf(valBuf, 8, L"%d", pos);
+            SetWindowTextW(g_state.hLabelBVal, valBuf);
             UpdatePreview(); UpdateHexEdit(); colorChanged = true;
         }
         else if (slider == g_state.hSliderBrightness) {
@@ -3897,15 +4250,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         else if (id == ID_BTN_PRESET_WHITE) SetPresetColor(255, 255, 255);
         else if (id == ID_BTN_PRESET_OFF) SetPresetColor(0, 0, 0);
         else if (id == ID_BTN_THEME) {
-            // Toggle theme and restart (only way to fully update trackbar backgrounds)
-            g_theme = g_theme->isDark ? &g_lightTheme : &g_darkTheme;
+            // Cycle through themes: Dark -> Light -> Colorblind -> Dark
+            int nextTheme = (GetThemeId() + 1) % 3;
+            SetTheme(nextTheme);
             SaveAppSettings();
 
-            // Restart application to apply theme fully (without re-applying colors)
+            // Restart application with focus using CreateProcess
             wchar_t exePath[MAX_PATH];
             GetModuleFileNameW(NULL, exePath, MAX_PATH);
+            wchar_t cmdLine[MAX_PATH + 64];
+            swprintf(cmdLine, MAX_PATH + 64, L"\"%s\" --no-apply --foreground", exePath);
+
+            STARTUPINFOW si = { sizeof(si) };
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_SHOWNORMAL;
+            PROCESS_INFORMATION pi;
+
             RemoveTrayIcon();
-            ShellExecuteW(NULL, L"open", exePath, L"--no-apply", NULL, SW_SHOW);
+            CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
             PostQuitMessage(0);
         }
         else if (id == ID_BTN_LANG) {
@@ -3914,11 +4278,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_str = (g_lang == LANG_EN) ? &g_strEN : &g_strDE;
             SaveAppSettings();
 
-            // Restart application
+            // Restart application with focus using CreateProcess
             wchar_t exePath[MAX_PATH];
             GetModuleFileNameW(NULL, exePath, MAX_PATH);
+            wchar_t cmdLine[MAX_PATH + 64];
+            swprintf(cmdLine, MAX_PATH + 64, L"\"%s\" --no-apply --foreground", exePath);
+
+            STARTUPINFOW si = { sizeof(si) };
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_SHOWNORMAL;
+            PROCESS_INFORMATION pi;
+
             RemoveTrayIcon();
-            ShellExecuteW(NULL, L"open", exePath, L"--no-apply", NULL, SW_SHOW);
+            CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
             PostQuitMessage(0);
         }
         // Tray menu
@@ -4080,6 +4454,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     bool startMinimized = (strstr(lpCmdLine, "--minimized") != nullptr);
     g_skipApplyOnStart = (strstr(lpCmdLine, "--no-apply") != nullptr);
     g_state.dryRun = (strstr(lpCmdLine, "--dry-run") != nullptr);
+    bool forceForeground = (strstr(lpCmdLine, "--foreground") != nullptr);
 
     // Initialize GDI+ for PNG loading
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
@@ -4146,14 +4521,33 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         MinimizeToTray();
     } else {
         ShowWindow(g_state.hWnd, nCmdShow);
+
+        // Force foreground when restarting from theme/language change
+        if (forceForeground) {
+            // Allow SetForegroundWindow to work by attaching to foreground thread
+            DWORD foreThread = GetWindowThreadProcessId(GetForegroundWindow(), NULL);
+            DWORD appThread = GetCurrentThreadId();
+            if (foreThread != appThread) {
+                AttachThreadInput(foreThread, appThread, TRUE);
+                BringWindowToTop(g_state.hWnd);
+                SetForegroundWindow(g_state.hWnd);
+                AttachThreadInput(foreThread, appThread, FALSE);
+            } else {
+                BringWindowToTop(g_state.hWnd);
+                SetForegroundWindow(g_state.hWnd);
+            }
+        }
     }
     UpdateWindow(g_state.hWnd);
 
-    // Message loop
+    // Message loop with keyboard navigation support
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        // Enable Tab/Arrow key navigation and Enter to activate buttons
+        if (!IsDialogMessage(g_state.hWnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
     }
 
     // Cleanup GDI+

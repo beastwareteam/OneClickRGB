@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -Command \"Get-Process | Where-Object {$_MainWindowTitle -like ''*OneClick*'' -or $_ProcessName -like ''*OneClick*''} | Select-Object ProcessName, MainWindowTitle\")",
+      "Bash(taskkill /IM OneClickRGB.exe /F)",
+      "Bash(taskkill //IM OneClickRGB.exe //F)",
+      "Bash(taskkill /F /PID 18152)",
+      "Bash(cmd.exe /c \"taskkill /F /PID 18152\")",
+      "Bash(powershell -Command \"Stop-Process -Name OneClickRGB -Force -ErrorAction SilentlyContinue\")",
+      "Bash(./dryrun.bat)",
+      "Bash(cmd.exe /c \"cd /d d:\\\\xampp\\\\htdocs\\\\RGB\\\\OneClickRGB && dryrun.bat\")",
+      "Bash(powershell -Command \"& ./dryrun.bat\")",
+      "Bash(cmd //c \"dryrun.bat\")",
+      "Bash(cmd //c \".\\\\dryrun.bat\")"
+    ]
+  }
+}

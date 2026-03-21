@@ -16,8 +16,11 @@
 - **System Tray** - Quick access to presets and power controls
 - **Global Hotkeys** - Change colors without switching windows
 - **Standby Recovery** - Automatic RGB restore after Windows sleep/resume
+- **Themes** - Dark, Light, and Colorblind-friendly modes
+- **Tooltips** - Hover over any control for help
+- **Accessibility** - Full keyboard navigation (Tab, Enter, Arrow keys)
 - **No Dependencies** - Single executable, no runtime installation needed
-- **Modern UI** - Dark theme with rounded buttons and hover effects
+- **Modern UI** - GDI+ rendered with shadows and rounded corners
 
 ---
 
@@ -25,28 +28,28 @@
 
 | Device | Status | Protocol |
 |--------|--------|----------|
-| **ASUS Aura Mainboard** | ✅ Working | USB HID (0x0B05:0x19AF) |
-| **ASUS Aura Addressable** | ✅ Working | 8 channels, 60 LEDs each |
-| **SteelSeries Rival 600** | ✅ Working | USB HID |
-| **EVision Keyboard** | ✅ Working | Effects: Static, Breathing, Wave, Rainbow |
-| **G.Skill Trident Z5 RGB** | ✅ Working | SMBus via PawnIO |
-| **G.Skill Trident Z5 Neo** | ✅ Working | SMBus via PawnIO |
+| **ASUS Aura Mainboard** | Working | USB HID (0x0B05:0x19AF) |
+| **ASUS Aura Addressable** | Working | 8 channels, 60 LEDs each |
+| **SteelSeries Rival 600** | Working | USB HID |
+| **EVision Keyboard** | Working | Effects: Static, Breathing, Wave, Rainbow |
+| **G.Skill Trident Z5 RGB** | Working | SMBus via PawnIO |
+| **G.Skill Trident Z5 Neo** | Working | SMBus via PawnIO |
 
 ### Compatibility
 
 - **OS**: Windows 10 (1809+), Windows 11
 - **Architecture**: x64 only
-- **Privileges**: Administrator recommended (required for some devices)
+- **Privileges**: Administrator recommended
 
 ---
 
-## Quick Start
+## Installation
 
-### Option 1: Download Release
+### Option 1: Portable Package
 
-1. Download latest release from [Releases](https://github.com/beastwareteam/OneClickRGB/releases)
+1. Download `OneClickRGB_v1.0_Portable.zip` from [Releases](https://github.com/beastwareteam/OneClickRGB/releases)
 2. Extract to any folder
-3. Run `OneClickRGB.exe`
+3. Run `install.bat` as Administrator (or just run `OneClickRGB.exe` directly)
 
 ### Option 2: Build from Source
 
@@ -56,9 +59,27 @@ cd OneClickRGB
 build_native.bat
 ```
 
-**Requirements**: Visual Studio 2019/2022 Build Tools (free)
+**Requirements**: Visual Studio 2019/2022 Build Tools
 
 See [BUILD.md](BUILD.md) for detailed instructions.
+
+---
+
+## Portable Package Contents
+
+```
+OneClickRGB/
+├── OneClickRGB.exe     165 KB   Main application
+├── hidapi.dll          159 KB   USB HID library
+├── PawnIOLib.dll         4 KB   SMBus interface (G.Skill RAM)
+├── SmbusI801.bin        40 KB   Intel SMBus module
+├── icon.png            193 KB   Application icon
+├── PawnIO_setup.exe    3.1 MB   Driver installer (run once)
+├── install.bat                  Automatic installation
+├── install_manual.bat           Interactive installation
+├── uninstall.bat                Clean removal
+└── README.txt                   Quick reference
+```
 
 ---
 
@@ -75,6 +96,14 @@ See [BUILD.md](BUILD.md) for detailed instructions.
 | `Ctrl+Alt+0` | Off (Black) |
 | `Ctrl+Alt+Space` | Toggle On/Off |
 
+### Keyboard Navigation
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Move between controls |
+| `Enter` / `Space` | Activate button/checkbox |
+| `Arrow Keys` | Adjust sliders |
+
 ### System Tray
 
 Right-click the tray icon for quick access to:
@@ -85,21 +114,15 @@ Right-click the tray icon for quick access to:
 
 ---
 
-## Installation Files
+## Themes
 
-For distribution, include these files:
+Switch between themes using the Theme button:
 
-```
-OneClickRGB/
-├── OneClickRGB.exe      # Main application (required)
-├── hidapi.dll           # USB HID library (required)
-├── PawnIOLib.dll        # RAM control (optional)
-├── SmbusI801.bin        # SMBus module (optional, for RAM)
-└── config/
-    └── devices.json     # Device database (optional)
-```
-
-**Minimum**: Just `OneClickRGB.exe` + `hidapi.dll` (~400 KB total)
+| Theme | Description |
+|-------|-------------|
+| **Dark** | Default dark mode with blue accent |
+| **Light** | Bright mode with clean appearance |
+| **Colorblind** | Warm cream tones, Orange/Blue palette |
 
 ---
 
@@ -116,10 +139,17 @@ Settings are stored in `%APPDATA%\OneClickRGB\`:
 
 ## Version History
 
-### v3.4 (Current)
+### v3.5 (Current)
+- Info tooltips on all controls
+- Theme system (Dark/Light/Colorblind)
+- Keyboard accessibility
+- Live RGB value display
+- Portable package with installers
+- Repository cleanup
+
+### v3.4
 - Production-ready build system
 - Fixed RAM control (relative paths)
-- Repository cleanup
 - One-click build script
 
 ### v3.3
@@ -131,11 +161,6 @@ Settings are stored in `%APPDATA%\OneClickRGB\`:
 - Standby/resume detection
 - HID reset on wake
 - Power menu in tray
-
-### v3.1
-- Modern dark UI
-- Custom titlebar
-- Channel configuration
 
 See [ROADMAP.md](ROADMAP.md) for planned features.
 
@@ -149,24 +174,32 @@ See [ROADMAP.md](ROADMAP.md) for planned features.
 - Some devices need specific USB ports
 
 ### "RAM not detected"
-- PawnIO driver required for G.Skill RAM
-- Run as Administrator
+- Run `PawnIO_setup.exe` once as Administrator
+- Restart PC after driver installation
 - Check `PawnIOLib.dll` and `SmbusI801.bin` are present
 
 ### "Colors don't persist after sleep"
-- Enable "Standby Recovery" in settings
+- Enable "Autostart" in settings
 - App must be running (system tray)
+
+---
+
+## Source Structure
+
+```
+src/
+├── oneclick_rgb_complete.cpp   Main application (all-in-one)
+├── themes.h                    Theme definitions
+├── channel_config.h            Channel configuration
+├── modern_ui.h                 UI components
+└── OneClickRGB.ico/rc/res      Resources
+```
 
 ---
 
 ## Contributing
 
 Contributions welcome! See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
-
-To add a new device:
-1. Add VID/PID to `config/devices.json`
-2. Implement controller in `src/controllers/`
-3. Test and submit PR
 
 ---
 

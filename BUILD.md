@@ -24,7 +24,6 @@ Output: `build\OneClickRGB.exe`
 No manual installation needed:
 - HIDAPI (`dependencies/hidapi/`)
 - PawnIO (`dependencies/PawnIO/`)
-- nlohmann/json (`dependencies/nlohmann/`)
 
 ---
 
@@ -43,31 +42,23 @@ This script:
 
 ### Option 2: Manual Build
 
-Open **x64 Native Tools Command Prompt** (from Start Menu → Visual Studio):
+Open **x64 Native Tools Command Prompt** (from Start Menu -> Visual Studio):
 
 ```batch
 cd OneClickRGB
 
 cl /nologo /EHsc /MD /O2 /std:c++17 /DUNICODE /D_UNICODE ^
-   /I"src" /I"dependencies/hidapi" /I"dependencies" ^
+   /I"src" /I"dependencies/hidapi" ^
    src/oneclick_rgb_complete.cpp ^
    /Fe"build/OneClickRGB.exe" ^
    /link /LIBPATH:"dependencies/hidapi" ^
    hidapi.lib shell32.lib comctl32.lib user32.lib gdi32.lib ^
-   comdlg32.lib advapi32.lib setupapi.lib gdiplus.lib ^
-   dwmapi.lib uxtheme.lib wtsapi32.lib powrprof.lib
+   comdlg32.lib advapi32.lib gdiplus.lib wtsapi32.lib
 
 copy dependencies\hidapi\hidapi.dll build\
 copy dependencies\PawnIO\PawnIOLib.dll build\
 copy dependencies\PawnIO\modules\SmbusI801.bin build\
-```
-
-### Option 3: CMake (for IDE integration)
-
-```batch
-mkdir build && cd build
-cmake .. -G "Visual Studio 17 2022" -A x64
-cmake --build . --config Release
+copy src\icon.png build\
 ```
 
 ---
@@ -78,16 +69,11 @@ After successful build:
 
 ```
 build/
-├── OneClickRGB.exe      # Main application (~240 KB)
-├── hidapi.dll           # USB HID library (~160 KB)
-├── PawnIOLib.dll        # RAM control (~4 KB)
-├── SmbusI801.bin        # SMBus module (~40 KB)
-├── config/
-│   └── devices.json     # Device database
-└── modules/
-    ├── SmbusI801.bin
-    ├── SmbusNCT6793.bin
-    └── SmbusPIIX4.bin
+├── OneClickRGB.exe      Main application (~170 KB)
+├── hidapi.dll           USB HID library (~160 KB)
+├── PawnIOLib.dll        RAM control (~4 KB)
+├── SmbusI801.bin        SMBus module (~40 KB)
+└── icon.png             Application icon
 ```
 
 ---
@@ -97,44 +83,48 @@ build/
 ```
 OneClickRGB/
 ├── src/
-│   ├── oneclick_rgb_complete.cpp   # Main GUI (all features)
-│   ├── oneclick_gui.cpp            # Simplified version
-│   ├── oneclick_rgb.cpp            # CLI version
-│   ├── core/                       # Core library
-│   ├── controllers/                # Device controllers
-│   ├── scanner/                    # Hardware detection
-│   └── ui/                         # Qt UI components
+│   ├── oneclick_rgb_complete.cpp   Main application
+│   ├── themes.h                    Theme definitions
+│   ├── channel_config.h            Channel config
+│   ├── modern_ui.h                 UI components
+│   ├── OneClickRGB.ico             Icon resource
+│   └── icon.png                    PNG icon for tray
 ├── dependencies/
-│   ├── hidapi/                     # USB HID (bundled)
-│   ├── PawnIO/                     # SMBus access (bundled)
-│   └── nlohmann/                   # JSON library (bundled)
-├── config/
-│   ├── devices.json                # Device database
-│   └── controller_database.json    # Controller mappings
+│   ├── hidapi/                     USB HID (bundled)
+│   └── PawnIO/                     SMBus access (bundled)
+├── portable/                       Distribution package
+├── docs/                           Documentation
 ├── installer/
-│   └── OneClickRGB.iss             # Inno Setup script
-└── build_native.bat                # Build script
+│   └── OneClickRGB.iss             Inno Setup script
+└── build_native.bat                Build script
 ```
 
 ---
 
-## Creating an Installer
+## Creating Distribution Package
 
-### Using Inno Setup
+### Using install scripts
 
-1. Install [Inno Setup 6](https://jrsoftware.org/isinfo.php)
-2. Open `installer/OneClickRGB.iss`
-3. Press Ctrl+F9 to compile
-4. Output: `dist/OneClickRGB_Setup_x.x.x.exe`
+The `portable/` folder contains ready-to-distribute files:
 
-### Manual ZIP Distribution
+```
+portable/
+├── OneClickRGB.exe
+├── hidapi.dll
+├── PawnIOLib.dll
+├── SmbusI801.bin
+├── icon.png
+├── PawnIO_setup.exe
+├── install.bat           Auto-install
+├── install_manual.bat    Interactive install
+├── uninstall.bat         Clean removal
+└── README.txt
+```
+
+### Creating ZIP
 
 ```batch
-mkdir OneClickRGB_v3.4
-copy build\OneClickRGB.exe OneClickRGB_v3.4\
-copy build\hidapi.dll OneClickRGB_v3.4\
-copy build\PawnIOLib.dll OneClickRGB_v3.4\
-copy build\SmbusI801.bin OneClickRGB_v3.4\
+powershell Compress-Archive -Path portable\* -DestinationPath OneClickRGB_v1.0_Portable.zip
 ```
 
 ---
@@ -142,16 +132,16 @@ copy build\SmbusI801.bin OneClickRGB_v3.4\
 ## Troubleshooting
 
 ### "cl is not recognized"
-→ Run from **x64 Native Tools Command Prompt**, not regular cmd
+Run from **x64 Native Tools Command Prompt**, not regular cmd
 
 ### "Cannot find hidapi.lib"
-→ Check `dependencies/hidapi/hidapi.lib` exists
+Check `dependencies/hidapi/hidapi.lib` exists
 
 ### "LNK2019: unresolved external"
-→ Make sure all libraries are linked (see manual build command)
+Make sure all libraries are linked (see manual build command)
 
 ### Build works but app crashes
-→ Ensure `hidapi.dll` is next to the exe
+Ensure `hidapi.dll` is next to the exe
 
 ---
 
@@ -167,25 +157,18 @@ The following warnings are expected and harmless:
 
 ## Development
 
-### Adding a New Device
+### Source Files
 
-1. Add VID/PID to `config/devices.json`:
-```json
-{
-  "vendorId": "0x1234",
-  "productId": "0x5678",
-  "name": "My Device",
-  "controller": "MyDeviceController"
-}
-```
-
-2. Create controller in `src/controllers/MyDeviceController.cpp`
-
-3. Register in device detection code
+| File | Description |
+|------|-------------|
+| `oneclick_rgb_complete.cpp` | Main application, all features |
+| `themes.h` | Dark/Light/Colorblind themes |
+| `channel_config.h` | Per-channel color correction |
+| `modern_ui.h` | Custom UI components |
 
 ### Building Debug Version
 
 ```batch
-cl /nologo /EHsc /MDd /Od /Zi /std:c++17 /DUNICODE /D_UNICODE /DDEBUG ^
-   ... (same as release)
+cl /nologo /EHsc /MDd /Od /Zi /std:c++17 /DUNICODE /D_UNICODE ^
+   ... (same as release, add /Zi for debug symbols)
 ```

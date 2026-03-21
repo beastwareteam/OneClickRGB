@@ -1,9 +1,0 @@
-Compiling OneClickRGB GUI...
-oneclick_gui.cpp
-D:\xampp\htdocs\RGB\OneClickRGB\src\oneclick_gui.cpp(14): warning C4005: "UNICODE": Makro-Neudefinition
-D:\xampp\htdocs\RGB\OneClickRGB\src\oneclick_gui.cpp: note: Siehe vorherige Definition von "UNICODE"
-D:\xampp\htdocs\RGB\OneClickRGB\src\oneclick_gui.cpp(15): warning C4005: "_UNICODE": Makro-Neudefinition
-D:\xampp\htdocs\RGB\OneClickRGB\src\oneclick_gui.cpp: note: Siehe vorherige Definition von "_UNICODE"
-D:\xampp\htdocs\RGB\OneClickRGB\src\oneclick_gui.cpp(696): warning C4244: "Initialisierung": Konvertierung von "LRESULT" in "int", m”glicher Datenverlust
-
-SUCCESS! oneclick_gui.exe created.
