@@ -62,7 +62,7 @@
 //=============================================================================
 
 #define APP_NAME L"OneClickRGB"
-#define APP_VERSION L"3.1"
+#define APP_VERSION L"3.4"
 
 // Layout constants (responsive)
 #define WINDOW_WIDTH 555
@@ -288,6 +288,7 @@ struct Strings {
     const wchar_t* apply;
     const wchar_t* theme;
     // Status
+    const wchar_t* statusTitle;
     const wchar_t* ready;
     // Window title
     const wchar_t* windowTitle;
@@ -332,9 +333,9 @@ Strings g_strEN = {
     // Buttons
     L"APPLY", L"Theme",
     // Status
-    L"Ready - Select color and click Apply",
+    L"Status", L"Ready - Select color and click Apply",
     // Window title
-    L"OneClickRGB v2.0 - Complete RGB Control [Admin: %s]",
+    L"OneClickRGB v3.4 - Complete RGB Control [Admin: %s]",
     // Color presets
     L"Blue", L"Red", L"Green", L"Cyan", L"Purple", L"White", L"Off",
     // Keyboard modes
@@ -360,9 +361,9 @@ Strings g_strDE = {
     // Buttons
     L"ANWENDEN", L"Design",
     // Status
-    L"Bereit - Farbe w\x00E4hlen und Anwenden klicken",
+    L"Status", L"Bereit - Farbe w\x00E4hlen und Anwenden klicken",
     // Window title
-    L"OneClickRGB v2.0 - Komplette RGB-Steuerung [Admin: %s]",
+    L"OneClickRGB v3.4 - Komplette RGB-Steuerung [Admin: %s]",
     // Color presets
     L"Blau", L"Rot", L"Gr\x00FCn", L"Cyan", L"Lila", L"Wei\x00DF", L"Aus",
     // Keyboard modes
@@ -2519,7 +2520,7 @@ LRESULT CALLBACK PreviewProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
 // Group box positions (calculated once, used for painting)
 struct GroupRect { int x, y, w, h; const wchar_t* title; };
-GroupRect g_groups[4];
+GroupRect g_groups[5];
 int g_numGroups = 0;
 
 // Helper to draw modern group box
@@ -2527,11 +2528,13 @@ void DrawThemedGroupBox(HDC hdc, const GroupRect& g) {
     Gdiplus::Graphics gfx(hdc);
     gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+    gfx.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);  // Crisp lines
 
-    float x = (float)g.x;
-    float y = (float)g.y;
-    float w = (float)g.w;
-    float h = (float)g.h;
+    // Use 0.5f offset for crisp 1px lines
+    float x = (float)g.x + 0.5f;
+    float y = (float)g.y + 0.5f;
+    float w = (float)g.w - 1.0f;
+    float h = (float)g.h - 1.0f;
     float radius = 8.0f;
 
     // Rounded rectangle path
@@ -2544,19 +2547,142 @@ void DrawThemedGroupBox(HDC hdc, const GroupRect& g) {
     path.CloseFigure();
 
     // Semi-transparent fill
-    Gdiplus::SolidBrush fillBrush(Gdiplus::Color(25, 255, 255, 255));
+    Gdiplus::SolidBrush fillBrush(Gdiplus::Color(20, 255, 255, 255));
     gfx.FillPath(&fillBrush, &path);
 
-    // Border
-    Gdiplus::Pen borderPen(Gdiplus::Color(60, 100, 180, 255), 1.0f);
+    // Border - consistent 1px line
+    Gdiplus::Pen borderPen(Gdiplus::Color(80, 100, 160, 220), 1.0f);
+    borderPen.SetAlignment(Gdiplus::PenAlignmentCenter);
     gfx.DrawPath(&borderPen, &path);
 
     // Title
     Gdiplus::FontFamily fontFamily(L"Segoe UI");
     Gdiplus::Font font(&fontFamily, 10, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
     Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 80, 180, 255));
-    gfx.DrawString(g.title, -1, &font, Gdiplus::PointF(x + 12, y + 2), &textBrush);
+    gfx.DrawString(g.title, -1, &font, Gdiplus::PointF((float)g.x + 12, (float)g.y + 2), &textBrush);
 }
+
+// Modern button drawing helper
+void DrawModernButton(HDC hdc, RECT* rc, const wchar_t* text, bool isHovered, bool isPressed, bool isAccent = false) {
+    Gdiplus::Graphics gfx(hdc);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+    float x = (float)rc->left;
+    float y = (float)rc->top;
+    float w = (float)(rc->right - rc->left);
+    float h = (float)(rc->bottom - rc->top);
+    float radius = 6.0f;
+
+    // Rounded rectangle path
+    Gdiplus::GraphicsPath path;
+    float d = radius * 2;
+    path.AddArc(x, y, d, d, 180, 90);
+    path.AddArc(x + w - d, y, d, d, 270, 90);
+    path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+    path.AddArc(x, y + h - d, d, d, 90, 90);
+    path.CloseFigure();
+
+    // Background color based on state
+    Gdiplus::Color bgColor;
+    Gdiplus::Color borderColor;
+    Gdiplus::Color textColor;
+
+    if (isAccent) {
+        // Accent button (Apply, etc.)
+        if (isPressed) {
+            bgColor = Gdiplus::Color(255, 30, 100, 180);
+            borderColor = Gdiplus::Color(255, 50, 130, 220);
+        } else if (isHovered) {
+            bgColor = Gdiplus::Color(255, 50, 130, 220);
+            borderColor = Gdiplus::Color(255, 80, 160, 255);
+        } else {
+            bgColor = Gdiplus::Color(255, 40, 110, 200);
+            borderColor = Gdiplus::Color(255, 60, 140, 230);
+        }
+        textColor = Gdiplus::Color(255, 255, 255, 255);
+    } else {
+        // Normal button
+        if (isPressed) {
+            bgColor = Gdiplus::Color(255, 50, 55, 70);
+            borderColor = Gdiplus::Color(255, 80, 140, 200);
+        } else if (isHovered) {
+            bgColor = Gdiplus::Color(255, 55, 60, 80);
+            borderColor = Gdiplus::Color(255, 100, 160, 220);
+        } else {
+            bgColor = Gdiplus::Color(255, 40, 45, 60);
+            borderColor = Gdiplus::Color(255, 70, 80, 100);
+        }
+        textColor = Gdiplus::Color(255, 220, 225, 235);
+    }
+
+    // Fill
+    Gdiplus::SolidBrush fillBrush(bgColor);
+    gfx.FillPath(&fillBrush, &path);
+
+    // Border
+    Gdiplus::Pen borderPen(borderColor, 1.0f);
+    gfx.DrawPath(&borderPen, &path);
+
+    // Text
+    Gdiplus::FontFamily fontFamily(L"Segoe UI");
+    Gdiplus::Font font(&fontFamily, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+    Gdiplus::SolidBrush textBrush(textColor);
+
+    Gdiplus::RectF textRect(x, y, w, h);
+    Gdiplus::StringFormat format;
+    format.SetAlignment(Gdiplus::StringAlignmentCenter);
+    format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+    gfx.DrawString(text, -1, &font, textRect, &format, &textBrush);
+}
+
+// Track button hover states
+std::map<HWND, bool> g_buttonHover;
+std::map<HWND, bool> g_buttonPressed;
+
+// Button subclass procedure for hover tracking
+LRESULT CALLBACK ModernButtonProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    switch (uMsg) {
+        case WM_MOUSEMOVE: {
+            if (!g_buttonHover[hWnd]) {
+                g_buttonHover[hWnd] = true;
+                // Request mouse leave tracking
+                TRACKMOUSEEVENT tme = {};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hWnd;
+                TrackMouseEvent(&tme);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            break;
+        }
+        case WM_MOUSELEAVE: {
+            g_buttonHover[hWnd] = false;
+            InvalidateRect(hWnd, NULL, FALSE);
+            break;
+        }
+        case WM_NCDESTROY: {
+            g_buttonHover.erase(hWnd);
+            g_buttonPressed.erase(hWnd);
+            RemoveWindowSubclass(hWnd, ModernButtonProc, uIdSubclass);
+            break;
+        }
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+// Helper to create a modern owner-draw button with hover tracking
+HWND CreateModernButton(LPCWSTR text, DWORD style, int x, int y, int w, int h, HWND parent, int id) {
+    HWND hBtn = CreateWindowW(L"BUTTON", text,
+        style | BS_OWNERDRAW,
+        x, y, w, h, parent, (HMENU)(INT_PTR)id, NULL, NULL);
+    if (hBtn) {
+        SetWindowSubclass(hBtn, ModernButtonProc, 0, 0);
+    }
+    return hBtn;
+}
+
+// No extra border drawing needed - use clean WS_BORDER styling
 
 // GDI+ token
 ULONG_PTR g_gdiplusToken = 0;
@@ -2660,31 +2786,28 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_UPPERCASE | ES_CENTER,
             x + GP + 106, gy, 68, CTRL_H, hWnd, (HMENU)ID_EDIT_HEX, NULL, NULL);
 
-        CreateWindowW(L"BUTTON", g_str->pick,
-            WS_CHILD | WS_VISIBLE,
-            x + GP + 180, gy, SMALL_BTN_W, CTRL_H, hWnd, (HMENU)ID_BTN_PICK_COLOR, NULL, NULL);
+        CreateModernButton(g_str->pick, WS_CHILD | WS_VISIBLE,
+            x + GP + 180, gy, SMALL_BTN_W, CTRL_H, hWnd, ID_BTN_PICK_COLOR);
 
         // Right-aligned buttons: Theme (54px) + gap (4px) + Lang (32px) = 90px from right edge
         int rightEdge = x + GP + ICW;  // right edge of content area
-        CreateWindowW(L"BUTTON", g_str->theme,
-            WS_CHILD | WS_VISIBLE,
-            rightEdge - 90, gy, 54, CTRL_H, hWnd, (HMENU)ID_BTN_THEME, NULL, NULL);
+        CreateModernButton(g_str->theme, WS_CHILD | WS_VISIBLE,
+            rightEdge - 90, gy, 54, CTRL_H, hWnd, ID_BTN_THEME);
 
-        CreateWindowW(L"BUTTON", g_lang == LANG_EN ? L"DE" : L"EN",
-            WS_CHILD | WS_VISIBLE,
-            rightEdge - 32, gy, 32, CTRL_H, hWnd, (HMENU)ID_BTN_LANG, NULL, NULL);
+        CreateModernButton(g_lang == LANG_EN ? L"DE" : L"EN", WS_CHILD | WS_VISIBLE,
+            rightEdge - 32, gy, 32, CTRL_H, hWnd, ID_BTN_LANG);
 
         // Row 2: 7 Color presets
         int py = gy + 28;
         int pw = COLOR_BTN_W;
         int px = x + GP + 78;
-        CreateWindowW(L"BUTTON", g_str->presetBlue, WS_CHILD | WS_VISIBLE, px, py, pw, CTRL_H, hWnd, (HMENU)ID_BTN_PRESET_BLUE, NULL, NULL); px += pw + 2;
-        CreateWindowW(L"BUTTON", g_str->presetRed, WS_CHILD | WS_VISIBLE, px, py, pw - 6, CTRL_H, hWnd, (HMENU)ID_BTN_PRESET_RED, NULL, NULL); px += pw - 4;
-        CreateWindowW(L"BUTTON", g_str->presetGreen, WS_CHILD | WS_VISIBLE, px, py, pw + 4, CTRL_H, hWnd, (HMENU)ID_BTN_PRESET_GREEN, NULL, NULL); px += pw + 6;
-        CreateWindowW(L"BUTTON", g_str->presetCyan, WS_CHILD | WS_VISIBLE, px, py, pw, CTRL_H, hWnd, (HMENU)ID_BTN_PRESET_CYAN, NULL, NULL); px += pw + 2;
-        CreateWindowW(L"BUTTON", g_str->presetPurple, WS_CHILD | WS_VISIBLE, px, py, pw + 6, CTRL_H, hWnd, (HMENU)ID_BTN_PRESET_PURPLE, NULL, NULL); px += pw + 8;
-        CreateWindowW(L"BUTTON", g_str->presetWhite, WS_CHILD | WS_VISIBLE, px, py, pw + 2, CTRL_H, hWnd, (HMENU)ID_BTN_PRESET_WHITE, NULL, NULL); px += pw + 4;
-        CreateWindowW(L"BUTTON", g_str->presetOff, WS_CHILD | WS_VISIBLE, px, py, pw - 8, CTRL_H, hWnd, (HMENU)ID_BTN_PRESET_OFF, NULL, NULL);
+        CreateModernButton(g_str->presetBlue, WS_CHILD | WS_VISIBLE, px, py, pw, CTRL_H, hWnd, ID_BTN_PRESET_BLUE); px += pw + 2;
+        CreateModernButton(g_str->presetRed, WS_CHILD | WS_VISIBLE, px, py, pw - 6, CTRL_H, hWnd, ID_BTN_PRESET_RED); px += pw - 4;
+        CreateModernButton(g_str->presetGreen, WS_CHILD | WS_VISIBLE, px, py, pw + 4, CTRL_H, hWnd, ID_BTN_PRESET_GREEN); px += pw + 6;
+        CreateModernButton(g_str->presetCyan, WS_CHILD | WS_VISIBLE, px, py, pw, CTRL_H, hWnd, ID_BTN_PRESET_CYAN); px += pw + 2;
+        CreateModernButton(g_str->presetPurple, WS_CHILD | WS_VISIBLE, px, py, pw + 6, CTRL_H, hWnd, ID_BTN_PRESET_PURPLE); px += pw + 8;
+        CreateModernButton(g_str->presetWhite, WS_CHILD | WS_VISIBLE, px, py, pw + 2, CTRL_H, hWnd, ID_BTN_PRESET_WHITE); px += pw + 4;
+        CreateModernButton(g_str->presetOff, WS_CHILD | WS_VISIBLE, px, py, pw - 8, CTRL_H, hWnd, ID_BTN_PRESET_OFF);
 
         // Row 3-5: RGB Sliders
         // Slider starts after label: x + GP + LABEL_W
@@ -2831,17 +2954,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Row 2: Action buttons (right-aligned within group)
         gy += CTRL_H + IS;
 
-        CreateWindowW(L"BUTTON", g_str->channelCorrection,
-            WS_CHILD | WS_VISIBLE,
-            x + GP, gy, 70, CTRL_H, hWnd, (HMENU)ID_BTN_CHANNEL_SETTINGS, NULL, NULL);
+        CreateModernButton(g_str->channelCorrection, WS_CHILD | WS_VISIBLE,
+            x + GP, gy, 70, CTRL_H, hWnd, ID_BTN_CHANNEL_SETTINGS);
 
-        CreateWindowW(L"BUTTON", L"ASUS",
-            WS_CHILD | WS_VISIBLE,
-            x + GP + 75, gy, 50, CTRL_H, hWnd, (HMENU)ID_BTN_ASUS_TEST, NULL, NULL);
+        CreateModernButton(L"ASUS", WS_CHILD | WS_VISIBLE,
+            x + GP + 75, gy, 50, CTRL_H, hWnd, ID_BTN_ASUS_TEST);
 
-        CreateWindowW(L"BUTTON", L"HID Reset",
-            WS_CHILD | WS_VISIBLE,
-            x + GP + 130, gy, 70, CTRL_H, hWnd, (HMENU)ID_BTN_HID_RESET, NULL, NULL);
+        CreateModernButton(L"HID Reset", WS_CHILD | WS_VISIBLE,
+            x + GP + 130, gy, 70, CTRL_H, hWnd, ID_BTN_HID_RESET);
 
         int g3h = gy + CTRL_H + GP - g3y;
         g_groups[2] = {x, g3y, CW, g3h, g_str->devices};
@@ -2860,10 +2980,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | WS_VSCROLL,
             x + GP + 44, gy, 110, 200, hWnd, (HMENU)ID_COMBO_PROFILES, NULL, NULL);
 
-        CreateWindowW(L"BUTTON", g_str->save, WS_CHILD | WS_VISIBLE,
-            x + GP + 160, gy, 65, CTRL_H, hWnd, (HMENU)ID_BTN_SAVE_PROFILE, NULL, NULL);
-        CreateWindowW(L"BUTTON", g_str->load, WS_CHILD | WS_VISIBLE,
-            x + GP + 230, gy, 50, CTRL_H, hWnd, (HMENU)ID_BTN_LOAD_PROFILE, NULL, NULL);
+        CreateModernButton(g_str->save, WS_CHILD | WS_VISIBLE,
+            x + GP + 160, gy, 65, CTRL_H, hWnd, ID_BTN_SAVE_PROFILE);
+        CreateModernButton(g_str->load, WS_CHILD | WS_VISIBLE,
+            x + GP + 230, gy, 50, CTRL_H, hWnd, ID_BTN_LOAD_PROFILE);
 
         // Settings checkboxes
         g_state.hCheckAutostart = CreateWindowW(L"BUTTON", g_str->autostart,
@@ -2888,9 +3008,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // APPLY BUTTON + AUTO-APPLY CHECKBOX
         // ═══════════════════════════════════════════════════════════════
         int applyBtnW = 120;
-        CreateWindowW(L"BUTTON", g_str->apply,
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            x, y, applyBtnW, 32, hWnd, (HMENU)ID_BTN_APPLY, NULL, NULL);
+        CreateModernButton(g_str->apply, WS_CHILD | WS_VISIBLE,
+            x, y, applyBtnW, 32, hWnd, ID_BTN_APPLY);
 
         g_state.hCheckAutoApply = CreateWindowW(L"BUTTON", g_str->autoApply,
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
@@ -2900,11 +3019,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         y += 36;
 
         // ═══════════════════════════════════════════════════════════════
-        // STATUS
+        // GROUP 5: STATUS
         // ═══════════════════════════════════════════════════════════════
+        int g5y = y;
+        gy = y + GTH + GP;
+
+        // Status log inside group (no border - group provides the frame)
         g_state.hStatus = CreateWindowW(L"EDIT", g_str->ready,
-            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
-            x, y, CW, STATUS_H, hWnd, (HMENU)ID_STATIC_STATUS, NULL, NULL);
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+            x + GP, gy, CW - GP * 2, STATUS_H - GTH - GP * 2, hWnd, (HMENU)ID_STATIC_STATUS, NULL, NULL);
+
+        int g5h = STATUS_H;
+        g_groups[4] = {x, g5y, CW, g5h, g_str->statusTitle};
+        g_numGroups = 5;
 
         // Initialize
         UpdateSliders();
@@ -3039,6 +3166,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CTLCOLORSTATIC: {
         HDC hdc = (HDC)wParam;
         HWND ctrl = (HWND)lParam;
+
+        // Status log (readonly edit) - needs solid background to prevent ghosting
+        if (ctrl == g_state.hStatus) {
+            SetTextColor(hdc, RGB(200, 210, 220));
+            SetBkMode(hdc, OPAQUE);
+            SetBkColor(hdc, RGB(28, 32, 42));
+            static HBRUSH hStatusBrush = CreateSolidBrush(RGB(28, 32, 42));
+            return (LRESULT)hStatusBrush;
+        }
+
         SetTextColor(hdc, RGB(220, 225, 235));
         SetBkMode(hdc, TRANSPARENT);
 
@@ -3056,12 +3193,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_CTLCOLOREDIT: {
         HDC hdc = (HDC)wParam;
+        HWND hCtrl = (HWND)lParam;
         SetTextColor(hdc, RGB(230, 235, 245));
+        SetBkMode(hdc, OPAQUE);  // IMPORTANT: Use OPAQUE to prevent text ghosting
         SetBkColor(hdc, RGB(35, 40, 50));
-        if (!g_hTransparentBrush) {
-            g_hTransparentBrush = CreateSolidBrush(RGB(35, 40, 50));
+
+        // Use a solid brush that matches the background
+        static HBRUSH hEditBrush = NULL;
+        if (!hEditBrush) {
+            hEditBrush = CreateSolidBrush(RGB(35, 40, 50));
         }
-        return (LRESULT)g_hTransparentBrush;
+        return (LRESULT)hEditBrush;
     }
 
     case WM_CTLCOLORBTN: {
@@ -3069,6 +3211,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SetTextColor(hdc, RGB(220, 225, 235));
         SetBkMode(hdc, TRANSPARENT);
         return (LRESULT)GetStockObject(HOLLOW_BRUSH);
+    }
+
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lParam;
+        if (dis->CtlType == ODT_BUTTON) {
+            wchar_t text[64] = {0};
+            GetWindowTextW(dis->hwndItem, text, 64);
+
+            bool isHovered = g_buttonHover[dis->hwndItem];
+            bool isPressed = (dis->itemState & ODS_SELECTED) != 0;
+            bool isAccent = (dis->CtlID == ID_BTN_APPLY);
+
+            DrawModernButton(dis->hDC, &dis->rcItem, text, isHovered, isPressed, isAccent);
+            return TRUE;
+        }
+        break;
     }
 
     case WM_ERASEBKGND:
@@ -3260,18 +3418,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
 
     case WM_SYSCOMMAND:
+        // Handle minimize button -> minimize to tray if enabled
         if (wParam == SC_MINIMIZE && g_state.minimizeToTray) {
             MinimizeToTray();
             return 0;
         }
-        break;
+        // Handle close button (X) -> minimize to tray if enabled
+        if (wParam == SC_CLOSE && g_state.minimizeToTray) {
+            MinimizeToTray();
+            return 0;
+        }
+        // All other syscommands go to DefWindowProc
+        return DefWindowProc(hWnd, msg, wParam, lParam);
 
     case WM_CLOSE:
+        // This handles programmatic close (not from X button)
         if (g_state.minimizeToTray) {
             MinimizeToTray();
             return 0;
         }
-        break;
+        return DefWindowProc(hWnd, msg, wParam, lParam);
 
     // Custom message from resume watcher thread
     // Resume detected by watchdog thread (time jump)
@@ -3392,8 +3558,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));  // Custom icon from resource
     RegisterClassW(&wc);
 
-    // Standard Windows window with normal titlebar
-    DWORD style = WS_OVERLAPPEDWINDOW;  // Full window controls including move/resize
+    // Standard Windows window - fixed size (no resize handles)
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 
     // Build window title with admin status
     bool isAdmin = IsRunningAsAdmin();

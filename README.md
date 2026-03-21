@@ -17,7 +17,7 @@
 - **Global Hotkeys** - Change colors without switching windows
 - **Standby Recovery** - Automatic RGB restore after Windows sleep/resume
 - **No Dependencies** - Single executable, no runtime installation needed
-- **Dark Theme** - Modern dark interface
+- **Modern UI** - Dark theme with rounded buttons and hover effects
 
 ---
 

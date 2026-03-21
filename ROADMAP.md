@@ -18,6 +18,9 @@
 - [x] Dark theme
 - [x] One-click build system
 - [x] Bundled dependencies (no installation needed)
+- [x] Modern UI with rounded buttons (GDI+ rendered)
+- [x] Button hover effects with mouse tracking
+- [x] Accent styling for primary actions
 
 ---
 
