@@ -1,136 +1,191 @@
-# OneClickRGB - Build Instructions
+# Building OneClickRGB
 
-## Prerequisites
+## Quick Build (Recommended)
 
-### Required
-- **CMake** 3.16 or higher ([Download](https://cmake.org/download/))
-- **Visual Studio 2019/2022** with C++ Desktop Development workload
-  - Or **Visual Studio Build Tools** with MSVC compiler
-
-### Optional (for GUI)
-- **Qt 5.15+** or **Qt 6.x** ([Download](https://www.qt.io/download-qt-installer))
-  - Components needed: `Qt Core`, `Qt Widgets`
-
-### Bundled Dependencies (no installation required)
-- HIDAPI (in `dependencies/hidapi/`)
-- nlohmann/json (in `dependencies/nlohmann/`)
-- PawnIO (in `dependencies/PawnIO/`)
-
-## Quick Build
-
-### Using Build Script (Recommended)
 ```batch
+git clone https://github.com/beastwareteam/OneClickRGB.git
 cd OneClickRGB
-scripts\build.bat
+build_native.bat
 ```
 
-### Manual Build
-```batch
-cd OneClickRGB
-mkdir build
-cd build
+Output: `build\OneClickRGB.exe`
 
-# Configure (adjust Qt path as needed)
-cmake .. -G "Visual Studio 17 2022" -A x64 ^
-    -DCMAKE_PREFIX_PATH="C:\Qt\6.6.0\msvc2019_64" ^
-    -DBUILD_GUI=ON
+---
 
-# Build
-cmake --build . --config Release
+## Requirements
 
-# Copy dependencies
-copy ..\dependencies\hidapi\hidapi.dll Release\
-copy ..\dependencies\PawnIO\PawnIOLib.dll Release\
-mkdir Release\modules
-copy ..\dependencies\PawnIO\modules\*.bin Release\modules\
-mkdir Release\config
-copy ..\config\*.json Release\config\
-```
+### Minimum
+- **Windows 10/11** (x64)
+- **Visual Studio Build Tools 2019 or 2022**
+  - Download: https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022
+  - Select: "Desktop development with C++"
+
+### All Dependencies Bundled
+No manual installation needed:
+- HIDAPI (`dependencies/hidapi/`)
+- PawnIO (`dependencies/PawnIO/`)
+- nlohmann/json (`dependencies/nlohmann/`)
+
+---
 
 ## Build Options
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `BUILD_GUI` | ON | Build Qt GUI application |
-| `BUILD_CLI` | ON | Build command-line interface |
-| `USE_OPENRGB_CONTROLLERS` | OFF | Use OpenRGB controller implementations |
+### Option 1: Automated Script (Recommended)
 
-## Output Files
+```batch
+build_native.bat
+```
 
-After building, the `build/Release/` folder contains:
+This script:
+1. Finds Visual Studio automatically (2019 or 2022)
+2. Compiles `oneclick_rgb_complete.cpp`
+3. Copies all dependencies to `build/`
+
+### Option 2: Manual Build
+
+Open **x64 Native Tools Command Prompt** (from Start Menu → Visual Studio):
+
+```batch
+cd OneClickRGB
+
+cl /nologo /EHsc /MD /O2 /std:c++17 /DUNICODE /D_UNICODE ^
+   /I"src" /I"dependencies/hidapi" /I"dependencies" ^
+   src/oneclick_rgb_complete.cpp ^
+   /Fe"build/OneClickRGB.exe" ^
+   /link /LIBPATH:"dependencies/hidapi" ^
+   hidapi.lib shell32.lib comctl32.lib user32.lib gdi32.lib ^
+   comdlg32.lib advapi32.lib setupapi.lib gdiplus.lib ^
+   dwmapi.lib uxtheme.lib wtsapi32.lib powrprof.lib
+
+copy dependencies\hidapi\hidapi.dll build\
+copy dependencies\PawnIO\PawnIOLib.dll build\
+copy dependencies\PawnIO\modules\SmbusI801.bin build\
 ```
-Release/
-├── OneClickRGB.exe      # Main GUI application
-├── oneclickrgb.exe      # CLI tool
-├── hidapi.dll           # HID device communication
-├── PawnIOLib.dll        # SMBus/RAM control
-├── Qt6Core.dll          # Qt runtime (after windeployqt)
-├── Qt6Gui.dll
-├── Qt6Widgets.dll
-├── platforms/           # Qt platform plugins
-├── modules/
-│   └── SmbusI801.bin    # SMBus driver module
-└── config/
-    └── devices.json     # Device database
+
+### Option 3: CMake (for IDE integration)
+
+```batch
+mkdir build && cd build
+cmake .. -G "Visual Studio 17 2022" -A x64
+cmake --build . --config Release
 ```
+
+---
+
+## Build Output
+
+After successful build:
+
+```
+build/
+├── OneClickRGB.exe      # Main application (~240 KB)
+├── hidapi.dll           # USB HID library (~160 KB)
+├── PawnIOLib.dll        # RAM control (~4 KB)
+├── SmbusI801.bin        # SMBus module (~40 KB)
+├── config/
+│   └── devices.json     # Device database
+└── modules/
+    ├── SmbusI801.bin
+    ├── SmbusNCT6793.bin
+    └── SmbusPIIX4.bin
+```
+
+---
+
+## Project Structure
+
+```
+OneClickRGB/
+├── src/
+│   ├── oneclick_rgb_complete.cpp   # Main GUI (all features)
+│   ├── oneclick_gui.cpp            # Simplified version
+│   ├── oneclick_rgb.cpp            # CLI version
+│   ├── core/                       # Core library
+│   ├── controllers/                # Device controllers
+│   ├── scanner/                    # Hardware detection
+│   └── ui/                         # Qt UI components
+├── dependencies/
+│   ├── hidapi/                     # USB HID (bundled)
+│   ├── PawnIO/                     # SMBus access (bundled)
+│   └── nlohmann/                   # JSON library (bundled)
+├── config/
+│   ├── devices.json                # Device database
+│   └── controller_database.json    # Controller mappings
+├── installer/
+│   └── OneClickRGB.iss             # Inno Setup script
+└── build_native.bat                # Build script
+```
+
+---
 
 ## Creating an Installer
 
 ### Using Inno Setup
-1. Install [Inno Setup](https://jrsoftware.org/isinfo.php)
+
+1. Install [Inno Setup 6](https://jrsoftware.org/isinfo.php)
 2. Open `installer/OneClickRGB.iss`
-3. Adjust paths if needed
-4. Compile (Ctrl+F9)
-5. Find installer in `dist/OneClickRGB_Setup_x.x.x.exe`
+3. Press Ctrl+F9 to compile
+4. Output: `dist/OneClickRGB_Setup_x.x.x.exe`
 
-### Manual Packaging
+### Manual ZIP Distribution
+
 ```batch
-# Run windeployqt to gather Qt dependencies
-windeployqt --release --no-translations build\Release\OneClickRGB.exe
-
-# Create a zip of the Release folder
+mkdir OneClickRGB_v3.4
+copy build\OneClickRGB.exe OneClickRGB_v3.4\
+copy build\hidapi.dll OneClickRGB_v3.4\
+copy build\PawnIOLib.dll OneClickRGB_v3.4\
+copy build\SmbusI801.bin OneClickRGB_v3.4\
 ```
+
+---
 
 ## Troubleshooting
 
-### "Qt not found"
-Set the `CMAKE_PREFIX_PATH` environment variable:
-```batch
-set CMAKE_PREFIX_PATH=C:\Qt\6.6.0\msvc2019_64
-```
+### "cl is not recognized"
+→ Run from **x64 Native Tools Command Prompt**, not regular cmd
 
-### "HIDAPI not found"
-The bundled HIDAPI should work automatically. If not:
-1. Check that `dependencies/hidapi/hidapi.dll` exists
-2. Copy it to your `build/Release/` folder
+### "Cannot find hidapi.lib"
+→ Check `dependencies/hidapi/hidapi.lib` exists
 
-### "PawnIO driver not found" (at runtime)
-PawnIO is only needed for G.Skill RAM control. The app will:
-1. First try to load `PawnIOLib.dll` from the app directory
-2. Offer to download and install PawnIO driver if needed
+### "LNK2019: unresolved external"
+→ Make sure all libraries are linked (see manual build command)
 
-### Build fails with "cannot find -lQt6..."
-Ensure Qt is properly installed and `CMAKE_PREFIX_PATH` is set correctly.
+### Build works but app crashes
+→ Ensure `hidapi.dll` is next to the exe
+
+---
+
+## Compiler Warnings
+
+The following warnings are expected and harmless:
+
+- `C4005: UNICODE macro redefinition` - Intentional, ensures Unicode build
+- `C4996: sprintf unsafe` - Legacy code, works correctly
+- `C4244: conversion from LRESULT to int` - Windows API quirk
+
+---
 
 ## Development
 
-### Adding New Device Support
-1. Add device to `config/devices.json`
-2. Create controller in `src/controllers/`
-3. Register in `src/core/ControllerFactory.cpp`
+### Adding a New Device
 
-### Project Structure
+1. Add VID/PID to `config/devices.json`:
+```json
+{
+  "vendorId": "0x1234",
+  "productId": "0x5678",
+  "name": "My Device",
+  "controller": "MyDeviceController"
+}
 ```
-OneClickRGB/
-├── src/
-│   ├── core/           # Core library (DeviceManager, Profiles)
-│   ├── controllers/    # Device-specific controllers
-│   ├── scanner/        # Hardware detection
-│   ├── ui/             # Qt GUI components
-│   └── modules/        # Plugin modules
-├── config/             # Device database, profiles
-├── dependencies/       # Bundled third-party libs
-├── resources/          # Icons, Qt resources
-├── installer/          # Inno Setup script
-└── scripts/            # Build scripts
+
+2. Create controller in `src/controllers/MyDeviceController.cpp`
+
+3. Register in device detection code
+
+### Building Debug Version
+
+```batch
+cl /nologo /EHsc /MDd /Od /Zi /std:c++17 /DUNICODE /D_UNICODE /DDEBUG ^
+   ... (same as release)
 ```

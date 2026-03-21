@@ -64,6 +64,9 @@ Thumbs.db
 # Experimental/debug code (not for production)
 src/experimental/
 
+# Old planning documents (archived)
+docs/planning/
+
 # Legacy builds
 legacy/
 

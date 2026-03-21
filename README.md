@@ -1,108 +1,105 @@
 # OneClickRGB
 
-Lightweight RGB controller for Windows. Control multiple RGB devices with one unified interface.
+**Lightweight RGB controller for Windows** - Control all your RGB devices with one unified interface.
+
+[![Build Status](https://github.com/beastwareteam/OneClickRGB/workflows/Build/badge.svg)](https://github.com/beastwareteam/OneClickRGB/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue.svg)]()
 
 ---
 
 ## Features
 
 - **Multi-Device Support** - ASUS Aura, SteelSeries, EVision Keyboard, G.Skill RAM
-- **Unified Control** - One app for all your RGB devices
+- **One-Click Colors** - Set all devices to one color instantly
 - **Profile System** - Save and load color configurations
 - **System Tray** - Quick access to presets and power controls
 - **Global Hotkeys** - Change colors without switching windows
-- **Standby Recovery** - Automatic HID reset after Windows resume
-- **Bilingual UI** - English and German interface
-- **Dark Theme** - Modern dark interface with light theme option
+- **Standby Recovery** - Automatic RGB restore after Windows sleep/resume
+- **No Dependencies** - Single executable, no runtime installation needed
+- **Dark Theme** - Modern dark interface
 
 ---
 
 ## Supported Devices
 
-| Device | Status | Notes |
-|--------|--------|-------|
-| ASUS Aura Mainboard | Working | OpenRGB protocol, Direct Mode |
-| ASUS Aura GPU | Untested | Should work with same protocol |
-| SteelSeries Mouse | Working | Full color control |
-| EVision Keyboard | Working | Static, Breathing, Wave, Rainbow effects |
-| G.Skill Trident Z RGB | Working | Per-module color control |
+| Device | Status | Protocol |
+|--------|--------|----------|
+| **ASUS Aura Mainboard** | ✅ Working | USB HID (0x0B05:0x19AF) |
+| **ASUS Aura Addressable** | ✅ Working | 8 channels, 60 LEDs each |
+| **SteelSeries Rival 600** | ✅ Working | USB HID |
+| **EVision Keyboard** | ✅ Working | Effects: Static, Breathing, Wave, Rainbow |
+| **G.Skill Trident Z5 RGB** | ✅ Working | SMBus via PawnIO |
+| **G.Skill Trident Z5 Neo** | ✅ Working | SMBus via PawnIO |
+
+### Compatibility
+
+- **OS**: Windows 10 (1809+), Windows 11
+- **Architecture**: x64 only
+- **Privileges**: Administrator recommended (required for some devices)
 
 ---
 
 ## Quick Start
 
-### Download
+### Option 1: Download Release
 
-Get the latest release from the [Releases](https://github.com/anthropics/RGB/releases) page.
+1. Download latest release from [Releases](https://github.com/beastwareteam/OneClickRGB/releases)
+2. Extract to any folder
+3. Run `OneClickRGB.exe`
 
-### Run
+### Option 2: Build from Source
 
-1. Extract `OneClickRGB.exe` and `hidapi.dll` to the same folder
-2. Run `OneClickRGB.exe` as Administrator (required for HID access)
-3. Select your devices and set colors
+```batch
+git clone https://github.com/beastwareteam/OneClickRGB.git
+cd OneClickRGB
+build_native.bat
+```
+
+**Requirements**: Visual Studio 2019/2022 Build Tools (free)
+
+See [BUILD.md](BUILD.md) for detailed instructions.
+
+---
+
+## Usage
 
 ### Global Hotkeys
 
 | Hotkey | Action |
 |--------|--------|
-| Ctrl+Alt+1 | Blue |
-| Ctrl+Alt+2 | Red |
-| Ctrl+Alt+3 | Green |
-| Ctrl+Alt+4 | White |
-| Ctrl+Alt+0 | Off (Black) |
-| Ctrl+Alt+Space | Toggle LEDs On/Off |
+| `Ctrl+Alt+1` | Blue |
+| `Ctrl+Alt+2` | Red |
+| `Ctrl+Alt+3` | Green |
+| `Ctrl+Alt+4` | White |
+| `Ctrl+Alt+0` | Off (Black) |
+| `Ctrl+Alt+Space` | Toggle On/Off |
+
+### System Tray
+
+Right-click the tray icon for quick access to:
+- Color presets
+- Profiles
+- Power controls (Standby, Shutdown, Restart)
+- Settings
 
 ---
 
-## Building from Source
+## Installation Files
 
-### Requirements
-
-- **Visual Studio 2019 or 2022** with C++ Desktop Development workload
-  - Or just [Build Tools for Visual Studio](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
-- No other dependencies needed (HIDAPI is bundled)
-
-### Quick Build (Recommended)
-
-```batch
-git clone https://github.com/anthropics/OneClickRGB.git
-cd OneClickRGB
-build_native.bat
-```
-
-The executable will be in `build\OneClickRGB.exe`.
-
-### Manual Build
-
-```batch
-# Open "x64 Native Tools Command Prompt for VS 2022"
-cd OneClickRGB
-
-cl /nologo /EHsc /MD /O2 /std:c++17 /DUNICODE /D_UNICODE ^
-   /I"src" /I"dependencies\hidapi" ^
-   src\oneclick_gui.cpp ^
-   /Fe"build\OneClickRGB.exe" ^
-   /link /LIBPATH:"dependencies\hidapi" ^
-   hidapi.lib shell32.lib comctl32.lib user32.lib gdi32.lib comdlg32.lib advapi32.lib setupapi.lib
-
-copy dependencies\hidapi\hidapi.dll build\
-```
-
-### Project Structure
+For distribution, include these files:
 
 ```
 OneClickRGB/
-├── src/
-│   ├── oneclick_rgb_complete.cpp  # Full GUI (native Win32, all features)
-│   ├── oneclick_gui.cpp           # Simplified GUI
-│   └── oneclick_rgb.cpp           # CLI version
-├── dependencies/
-│   ├── hidapi/                    # USB HID library (bundled)
-│   └── PawnIO/                    # SMBus driver for RAM (optional)
-├── config/
-│   └── devices.json               # Device database
-└── build/                         # Output directory
+├── OneClickRGB.exe      # Main application (required)
+├── hidapi.dll           # USB HID library (required)
+├── PawnIOLib.dll        # RAM control (optional)
+├── SmbusI801.bin        # SMBus module (optional, for RAM)
+└── config/
+    └── devices.json     # Device database (optional)
 ```
+
+**Minimum**: Just `OneClickRGB.exe` + `hidapi.dll` (~400 KB total)
 
 ---
 
@@ -110,51 +107,77 @@ OneClickRGB/
 
 Settings are stored in `%APPDATA%\OneClickRGB\`:
 
-- `app_settings.cfg` - Window position, language, theme, last profile
-- `profiles/` - Saved color profiles
+| File | Description |
+|------|-------------|
+| `app_settings.cfg` | Window position, language, theme |
+| `profiles/*.json` | Saved color profiles |
 
 ---
 
 ## Version History
 
-### v3.1 (Current)
-- Custom titlebar with dark theme
-- HID reset on startup/resume
-- Power menu in tray (Standby, Shutdown, Restart)
-- Global hotkeys for color presets
-- Window position saving
-- Slider debouncing for smooth control
+### v3.4 (Current)
+- Production-ready build system
+- Fixed RAM control (relative paths)
+- Repository cleanup
+- One-click build script
 
-### v3.0
-- Complete rewrite with GDI+ graphics
+### v3.3
+- Global hotkeys
+- Window position memory
+- System tray improvements
+
+### v3.2
+- Standby/resume detection
+- HID reset on wake
+- Power menu in tray
+
+### v3.1
 - Modern dark UI
-- Channel configuration system
+- Custom titlebar
+- Channel configuration
 
-### v2.0
-- Multi-device support
-- Profile system
-- System tray integration
-
-### v1.0
-- Initial release
-- Basic ASUS Aura control
+See [ROADMAP.md](ROADMAP.md) for planned features.
 
 ---
 
-## Roadmap
+## Troubleshooting
 
-See [ROADMAP.md](ROADMAP.md) for planned features and known issues.
+### "Device not found"
+- Run as Administrator
+- Check if device is connected
+- Some devices need specific USB ports
+
+### "RAM not detected"
+- PawnIO driver required for G.Skill RAM
+- Run as Administrator
+- Check `PawnIOLib.dll` and `SmbusI801.bin` are present
+
+### "Colors don't persist after sleep"
+- Enable "Standby Recovery" in settings
+- App must be running (system tray)
+
+---
+
+## Contributing
+
+Contributions welcome! See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+To add a new device:
+1. Add VID/PID to `config/devices.json`
+2. Implement controller in `src/controllers/`
+3. Test and submit PR
 
 ---
 
 ## License
 
-MIT License
+MIT License - see [LICENSE](LICENSE)
 
 ---
 
 ## Credits
 
-- **HIDAPI** - USB HID device communication
-- **OpenRGB** - Protocol documentation and inspiration
-
+- **HIDAPI** - Cross-platform HID library
+- **PawnIO** - SMBus access for RAM control
+- **OpenRGB** - Protocol documentation

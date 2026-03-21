@@ -1,143 +1,134 @@
 # OneClickRGB Roadmap
 
-## Current Version: 3.1
+## Current Version: 3.4
 
-### What's Working
-- [x] Custom frameless window with dark titlebar
-- [x] ASUS Aura Mainboard control (OpenRGB protocol)
+### Completed Features ✅
+
+- [x] Native Win32 GUI (no Qt dependency)
+- [x] ASUS Aura Mainboard control (8 channels, 60 LEDs each)
 - [x] SteelSeries mouse support
 - [x] EVision keyboard with effects (Static, Breathing, Wave, Rainbow, etc.)
-- [x] G.Skill RAM RGB control
-- [x] Edge LED modes
-- [x] Profile save/load
+- [x] G.Skill RAM RGB control via SMBus
+- [x] Profile save/load system
 - [x] System tray with quick color presets
-- [x] HID reset on startup and after standby/resume
+- [x] Global hotkeys (Ctrl+Alt+1-4, 0, Space)
+- [x] Standby/resume detection with auto-reset
 - [x] Power menu (Standby, Shutdown, Restart)
 - [x] Bilingual UI (EN/DE)
-- [x] Dark/Light theme toggle
+- [x] Dark theme
+- [x] One-click build system
+- [x] Bundled dependencies (no installation needed)
 
 ---
 
-## Phase 1: Bug Fixes (Priority: High)
+## Next Release: v3.5
 
-### UI Issues
-- [ ] **Titlebar button hover effects** - Implement WM_MOUSEMOVE tracking for proper hover state
-- [ ] **Window resize edge detection** - Fix WM_NCHITTEST for all edges
-- [ ] **Control responsiveness** - Verify all buttons and sliders respond to clicks
+### Planned Features
 
-### Stability
-- [ ] **Error handling for missing devices** - Graceful degradation when hardware not found
-- [ ] **HID device reconnection** - Auto-reconnect after USB replug
+- [ ] **Installer** - Inno Setup based installer with uninstall support
+- [ ] **Autostart toggle** - Easy enable/disable in settings
+- [ ] **Tray icon tooltip** - Show current color/profile
+- [ ] **Custom hotkey configuration** - User-definable shortcuts
 
----
+### Bug Fixes
 
-## Phase 2: Quick Wins (1-2 hours each)
-
-### Hotkey Support
-- [x] Global hotkeys for preset colors (Ctrl+Alt+1-4, 0)
-- [x] Hotkey to toggle all LEDs on/off (Ctrl+Alt+Space)
-- [ ] Custom hotkey configuration UI
-
-### Profile System
-- [ ] Export profiles to JSON file
-- [ ] Import profiles from file
-- [ ] Profile sharing format specification
-
-### UX Improvements
-- [x] Save/restore window position
-- [x] Remember last used profile on startup
-- [ ] Tray icon tooltip showing current color
-- [ ] Minimize on startup option
+- [ ] Window resize edge detection improvement
+- [ ] Better error messages when devices not found
+- [ ] USB reconnection handling
 
 ---
 
-## Phase 3: New Features (Medium Effort)
+## Future Versions
 
-### Hardware Support
-- [ ] **Corsair devices** - iCUE protocol research
-- [ ] **Razer devices** - Chroma SDK integration
-- [ ] **NZXT devices** - CAM protocol
-- [ ] **Gigabyte RGB Fusion** - USB HID protocol
-- [ ] **MSI Mystic Light** - USB HID protocol
+### Hardware Support (v4.0)
+- [ ] Corsair devices (iCUE protocol)
+- [ ] Razer devices (Chroma SDK)
+- [ ] NZXT devices (HUE 2, Kraken)
+- [ ] Gigabyte RGB Fusion 2.0
+- [ ] MSI Mystic Light
+- [ ] More RAM vendors (Corsair, Kingston)
 
-### Advanced Effects
-- [ ] Color breathing with custom speed
-- [ ] Rainbow wave direction control
-- [ ] Audio-reactive mode (beat detection)
+### Advanced Effects (v4.1)
+- [ ] Audio-reactive mode
 - [ ] Screen color sync (ambient light)
-- [ ] Temperature-based colors (CPU/GPU temp)
+- [ ] Temperature-based colors
+- [ ] Custom effect editor
 
-### Sync & Automation
-- [ ] Sync all devices to same color
-- [ ] Time-based color schedules
-- [ ] Application-specific profiles (auto-switch when game starts)
-- [ ] Multi-monitor ambient sync
-
----
-
-## Phase 4: Architecture (Larger Effort)
-
-### Code Quality
-- [ ] Modularize device drivers into separate DLLs
-- [ ] Implement proper logging system
-- [ ] Add unit tests for protocol handlers
-- [ ] Configuration file instead of registry
-
-### Platform
+### Platform Support (v5.0)
 - [ ] Linux support (libusb)
 - [ ] macOS support (IOKit)
-- [ ] CLI-only mode for headless systems
-
-### Community
-- [ ] Plugin API for third-party device support
-- [ ] Web-based remote control
-- [ ] Mobile app companion
+- [ ] CLI-only mode
 
 ---
 
-## Known Hardware Compatibility
+## Device Compatibility
 
-| Device | Status | Notes |
-|--------|--------|-------|
-| ASUS Aura Mainboard | ✅ Working | OpenRGB protocol, Direct Mode |
-| ASUS Aura GPU | ⚠️ Untested | Should work with same protocol |
-| SteelSeries Rival 3 | ✅ Working | Full color control |
-| EVision Keyboard | ✅ Working | All effects supported |
-| G.Skill Trident Z RGB | ✅ Working | Per-module color |
-| Corsair RAM | ❌ Not yet | Needs iCUE protocol |
-| Razer devices | ❌ Not yet | Needs Chroma SDK |
+| Device | Status | VID:PID | Notes |
+|--------|--------|---------|-------|
+| **ASUS Aura Mainboard** | ✅ Working | 0B05:19AF | OpenRGB protocol |
+| **ASUS Aura Addressable** | ✅ Working | 0B05:19AF | 8 channels |
+| **SteelSeries Rival 600** | ✅ Working | 1038:1724 | Full RGB |
+| **EVision Keyboard** | ✅ Working | 3299:4E9F | All effects |
+| **G.Skill Trident Z5** | ✅ Working | SMBus | Via PawnIO |
+| **G.Skill Trident Z5 Neo** | ✅ Working | SMBus | Via PawnIO |
+| Corsair RAM | ❌ Planned | - | iCUE protocol |
+| Razer devices | ❌ Planned | - | Chroma SDK |
+| NZXT HUE 2 | ❌ Planned | 1E71:2006 | USB HID |
+
+---
+
+## System Requirements
+
+| Requirement | Minimum | Recommended |
+|-------------|---------|-------------|
+| OS | Windows 10 1809 | Windows 11 |
+| Architecture | x64 | x64 |
+| RAM | 50 MB | 100 MB |
+| Disk | 5 MB | 10 MB |
+| Privileges | User | Administrator |
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to help with:
-- Testing on your hardware
-- Reverse-engineering new device protocols
-- Code contributions
-- Documentation
+Help wanted for:
+
+1. **Hardware Testing** - Test on your RGB devices
+2. **Protocol Research** - Reverse-engineer new devices
+3. **Code** - Bug fixes and new features
+4. **Documentation** - Improve guides and translations
+
+See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for guidelines.
 
 ---
 
 ## Version History
 
-### v3.1 (Current)
-- Custom titlebar with dark theme
-- HID reset on startup/resume
-- Power menu in tray
-- Slider debouncing
-- ASUS Aura OpenRGB protocol fix
+### v3.4 (Current)
+- Production-ready build system
+- Fixed RAM control paths
+- Repository cleanup
+- One-click build script
+
+### v3.3
+- Global hotkeys
+- Window position memory
+
+### v3.2
+- Standby/resume detection
+- HID reset on wake
+
+### v3.1
+- Modern dark UI
+- Custom titlebar
 
 ### v3.0
-- Complete rewrite with GDI+ graphics
-- Modern dark UI
-- Channel configuration system
+- GDI+ graphics rewrite
+- Channel configuration
 
 ### v2.0
 - Multi-device support
 - Profile system
-- System tray integration
 
 ### v1.0
 - Initial release
-- Basic ASUS Aura control
