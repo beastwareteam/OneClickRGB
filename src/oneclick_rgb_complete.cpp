@@ -367,7 +367,7 @@ Strings g_strEN = {
     // Status
     L"Status", L"Ready - Select color and click Apply",
     // Window title
-    L"OneClickRGB v3.4 - Complete RGB Control [Admin: %s]",
+    L"OneClickRGB v3.5 - Complete RGB Control [Admin: %s]",
     // Color presets
     L"Blue", L"Red", L"Green", L"Cyan", L"Purple", L"White", L"Off",
     // Keyboard modes
@@ -424,7 +424,7 @@ Strings g_strDE = {
     // Status
     L"Status", L"Bereit - Farbe w\x00E4hlen und Anwenden klicken",
     // Window title
-    L"OneClickRGB v3.4 - Komplette RGB-Steuerung [Admin: %s]",
+    L"OneClickRGB v3.5 - Komplette RGB-Steuerung [Admin: %s]",
     // Color presets
     L"Blau", L"Rot", L"Gr\x00FCn", L"Cyan", L"Lila", L"Wei\x00DF", L"Aus",
     // Keyboard modes
@@ -3435,18 +3435,18 @@ void CreateTooltipControl(HWND hWndParent) {
     }
 }
 
-// Add tooltip to a control
-void AddTooltip(HWND hControl, const wchar_t* text) {
-    if (!g_state.hTooltip || !hControl || !text) return;
+// Add tooltip to a control (hParent must be passed explicitly during WM_CREATE)
+void AddTooltip(HWND hParent, HWND hControl, const wchar_t* text) {
+    if (!g_state.hTooltip || !hControl || !hParent || !text || !text[0]) return;
 
     TOOLINFOW ti = {0};
-    ti.cbSize = sizeof(TOOLINFOW);
+    ti.cbSize = TTTOOLINFOW_V1_SIZE;  // Use V1 size for compatibility
     ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
-    ti.hwnd = GetParent(hControl);
+    ti.hwnd = hParent;
     ti.uId = (UINT_PTR)hControl;
     ti.lpszText = (LPWSTR)text;
 
-    SendMessage(g_state.hTooltip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+    SendMessageW(g_state.hTooltip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
 }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -3507,14 +3507,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         CreateModernButton(g_str->pick, WS_CHILD | WS_VISIBLE,
             x + GP + 196, gy + 4, 60, BTN_H, hWnd, ID_BTN_PICK_COLOR);
 
-        // Right-aligned buttons with proper sizing
-        int rightEdge = x + GP + ICW;  // right edge of content area
-        // Theme button shows current theme name (wider for "Colorblind")
-        CreateModernButton(g_currentTheme->name, WS_CHILD | WS_VISIBLE,
-            rightEdge - 120, gy + 4, 74, BTN_H, hWnd, ID_BTN_THEME);
+        // Theme and Language buttons - right side of preview row with clear labels
+        int rightEdge = x + GP + ICW;
 
-        CreateModernButton(g_lang == LANG_EN ? L"DE" : L"EN", WS_CHILD | WS_VISIBLE,
-            rightEdge - 42, gy + 4, 38, BTN_H, hWnd, ID_BTN_LANG);
+        // Theme button with clear label showing current theme
+        wchar_t themeLabel[32];
+        swprintf_s(themeLabel, 32, L"%s", g_currentTheme->name);
+        CreateModernButton(themeLabel, WS_CHILD | WS_VISIBLE,
+            rightEdge - 140, gy + 4, 85, BTN_H, hWnd, ID_BTN_THEME);
+
+        // Language button - shows target language to switch to
+        CreateModernButton(g_lang == LANG_EN ? L"Deutsch" : L"English", WS_CHILD | WS_VISIBLE,
+            rightEdge - 52, gy + 4, 52, BTN_H, hWnd, ID_BTN_LANG);
 
         // Row 2: 7 Color presets - uniform sizing with proper gaps
         // Available width: ICW - 8 (margins) = 503px
@@ -3836,48 +3840,48 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         CreateTooltipControl(hWnd);
 
         // Color section - Sliders and preview
-        AddTooltip(g_state.hSliderR, g_str->tipSliderR);
-        AddTooltip(g_state.hSliderG, g_str->tipSliderG);
-        AddTooltip(g_state.hSliderB, g_str->tipSliderB);
-        AddTooltip(g_state.hPreview, g_str->tipColorPreview);
-        AddTooltip(g_state.hEditHex, g_str->tipHexInput);
+        AddTooltip(hWnd, g_state.hSliderR, g_str->tipSliderR);
+        AddTooltip(hWnd, g_state.hSliderG, g_str->tipSliderG);
+        AddTooltip(hWnd, g_state.hSliderB, g_str->tipSliderB);
+        AddTooltip(hWnd, g_state.hPreview, g_str->tipColorPreview);
+        AddTooltip(hWnd, g_state.hEditHex, g_str->tipHexInput);
 
         // Color section - Buttons (via control ID)
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_PICK_COLOR), g_str->tipPickColor);
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_THEME), g_str->tipTheme);
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_LANG), g_str->tipLang);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PICK_COLOR), g_str->tipPickColor);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_THEME), g_str->tipTheme);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_LANG), g_str->tipLang);
 
         // Color presets
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_BLUE), g_str->tipPresetBlue);
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_RED), g_str->tipPresetRed);
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_GREEN), g_str->tipPresetGreen);
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_CYAN), g_str->tipPresetCyan);
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_PURPLE), g_str->tipPresetPurple);
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_WHITE), g_str->tipPresetWhite);
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_PRESET_OFF), g_str->tipPresetOff);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_BLUE), g_str->tipPresetBlue);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_RED), g_str->tipPresetRed);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_GREEN), g_str->tipPresetGreen);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_CYAN), g_str->tipPresetCyan);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_PURPLE), g_str->tipPresetPurple);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_WHITE), g_str->tipPresetWhite);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_OFF), g_str->tipPresetOff);
 
         // Effects section
-        AddTooltip(g_state.hComboKbMode, g_str->tipKeyboardMode);
-        AddTooltip(g_state.hComboEdgeMode, g_str->tipEdgeMode);
-        AddTooltip(g_state.hSliderBrightness, g_str->tipBrightness);
-        AddTooltip(g_state.hSliderSpeed, g_str->tipSpeed);
+        AddTooltip(hWnd, g_state.hComboKbMode, g_str->tipKeyboardMode);
+        AddTooltip(hWnd, g_state.hComboEdgeMode, g_str->tipEdgeMode);
+        AddTooltip(hWnd, g_state.hSliderBrightness, g_str->tipBrightness);
+        AddTooltip(hWnd, g_state.hSliderSpeed, g_str->tipSpeed);
 
         // Devices section
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_CHANNEL_SETTINGS), g_str->tipChannels);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_CHANNEL_SETTINGS), g_str->tipChannels);
 
         // Profile section
-        AddTooltip(g_state.hComboProfiles, g_str->tipProfile);
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_SAVE_PROFILE), g_str->tipSave);
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_LOAD_PROFILE), g_str->tipLoad);
-        AddTooltip(g_state.hCheckAutostart, g_str->tipAutostart);
-        AddTooltip(g_state.hCheckMinimizeTray, g_str->tipTray);
-        AddTooltip(g_state.hCheckAutoApply, g_str->tipLive);
+        AddTooltip(hWnd, g_state.hComboProfiles, g_str->tipProfile);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_SAVE_PROFILE), g_str->tipSave);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_LOAD_PROFILE), g_str->tipLoad);
+        AddTooltip(hWnd, g_state.hCheckAutostart, g_str->tipAutostart);
+        AddTooltip(hWnd, g_state.hCheckMinimizeTray, g_str->tipTray);
+        AddTooltip(hWnd, g_state.hCheckAutoApply, g_str->tipLive);
 
         // Apply button
-        AddTooltip(GetDlgItem(hWnd, ID_BTN_APPLY), g_str->tipApply);
+        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_APPLY), g_str->tipApply);
 
         // Status log
-        AddTooltip(g_state.hStatus, g_str->tipStatus);
+        AddTooltip(hWnd, g_state.hStatus, g_str->tipStatus);
 
         break;
     }
@@ -4471,8 +4475,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         FullHIDReset();
     }
 
-    // Init common controls
-    INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_BAR_CLASSES};
+    // Init common controls (including tooltips)
+    INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_BAR_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&icc);
 
     // Register window class
