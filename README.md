@@ -58,31 +58,51 @@ Get the latest release from the [Releases](https://github.com/anthropics/RGB/rel
 
 ### Requirements
 
-- Visual Studio 2019+ (MSVC with C++17)
-- HIDAPI library
+- **Visual Studio 2019 or 2022** with C++ Desktop Development workload
+  - Or just [Build Tools for Visual Studio](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
+- No other dependencies needed (HIDAPI is bundled)
 
-### Compile
+### Quick Build (Recommended)
 
-```powershell
-cd OneClickRGB/build
-
-# Set up Visual Studio environment
-"D:\Community\VC\Auxiliary\Build\vcvars64.bat"
-
-# Compile
-cl /nologo /EHsc /MD /O2 /W3 /std:c++17 /DUNICODE /D_UNICODE ^
-   /I..\src /I..\dependencies\hidapi ^
-   ..\src\oneclick_rgb_complete.cpp ^
-   /FeOneClickRGB.exe ^
-   /link /LIBPATH:..\dependencies\hidapi ^
-   hidapi.lib shell32.lib comctl32.lib user32.lib gdi32.lib comdlg32.lib advapi32.lib
+```batch
+git clone https://github.com/anthropics/OneClickRGB.git
+cd OneClickRGB
+build_native.bat
 ```
 
-### Files
+The executable will be in `build\OneClickRGB.exe`.
 
-- `src/oneclick_rgb_complete.cpp` - Main source file
-- `dependencies/hidapi/` - HIDAPI headers and library
-- `build/` - Output directory
+### Manual Build
+
+```batch
+# Open "x64 Native Tools Command Prompt for VS 2022"
+cd OneClickRGB
+
+cl /nologo /EHsc /MD /O2 /std:c++17 /DUNICODE /D_UNICODE ^
+   /I"src" /I"dependencies\hidapi" ^
+   src\oneclick_gui.cpp ^
+   /Fe"build\OneClickRGB.exe" ^
+   /link /LIBPATH:"dependencies\hidapi" ^
+   hidapi.lib shell32.lib comctl32.lib user32.lib gdi32.lib comdlg32.lib advapi32.lib setupapi.lib
+
+copy dependencies\hidapi\hidapi.dll build\
+```
+
+### Project Structure
+
+```
+OneClickRGB/
+├── src/
+│   ├── oneclick_rgb_complete.cpp  # Full GUI (native Win32, all features)
+│   ├── oneclick_gui.cpp           # Simplified GUI
+│   └── oneclick_rgb.cpp           # CLI version
+├── dependencies/
+│   ├── hidapi/                    # USB HID library (bundled)
+│   └── PawnIO/                    # SMBus driver for RAM (optional)
+├── config/
+│   └── devices.json               # Device database
+└── build/                         # Output directory
+```
 
 ---
 

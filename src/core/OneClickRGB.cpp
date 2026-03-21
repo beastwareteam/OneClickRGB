@@ -79,12 +79,27 @@ bool Application::Initialize(const AppConfig& cfg)
         config.profile_directory = config.config_directory + "/profiles";
     }
 
-    // Initialize module system
+    // Initialize module system - try exe directory first, then config directory
     auto& moduleManager = ModuleManager::getInstance();
-    std::string modulePath = config.config_directory + "/modules";
-    if (!moduleManager.Initialize(modulePath)) {
-        std::cerr << "[OneClickRGB] Failed to initialize module system" << std::endl;
-        return false;
+
+    // Get executable directory for portable mode
+    std::string exeModulePath;
+#ifdef _WIN32
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string exeDir = std::string(exePath);
+    exeDir = exeDir.substr(0, exeDir.find_last_of("\\/"));
+    exeModulePath = exeDir + "\\modules";
+#endif
+
+    // Try exe directory first (portable mode), then config directory (installed mode)
+    std::string modulePath = exeModulePath;
+    if (modulePath.empty() || !moduleManager.Initialize(modulePath)) {
+        modulePath = config.config_directory + "/modules";
+        if (!moduleManager.Initialize(modulePath)) {
+            std::cerr << "[OneClickRGB] Failed to initialize module system" << std::endl;
+            // Continue anyway - some functionality may still work
+        }
     }
 
     // Register built-in modules (will be loaded from DLLs or built-in factories)

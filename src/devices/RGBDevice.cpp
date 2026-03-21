@@ -16,7 +16,7 @@ namespace OneClickRGB {
 /*---------------------------------------------------------*\
 | RGBDevice Implementation                                  |
 \*---------------------------------------------------------*/
-RGBDevice::RGBDevice(const DetectedHardware& hw, const ControllerEntry& entry)
+RGBDevice::RGBDevice(const DetectedHardware& hw, const DeviceInfo& entry)
     : display_name(entry.display_name)
     , vendor_name(hw.manufacturer)
     , controller_name(entry.controller_name)

@@ -20,7 +20,6 @@
 # Compiled Dynamic libraries
 *.so
 *.dylib
-*.dll
 
 # Fortran module files
 *.mod
@@ -30,12 +29,44 @@
 *.lai
 *.la
 *.a
-*.lib
 
 # Executables
-*.exe
 *.out
 *.app
 
 # debug information files
 *.dwo
+
+# Build output
+build/
+!build/.gitkeep
+production/build/
+
+# IDE
+.vs/
+.vscode/
+*.vcxproj*
+*.sln
+
+# Debug/temp files
+*.log
+*.txt
+!README.txt
+*.res
+
+# Generated resources
+resources/*_rc.py
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Experimental/debug code (not for production)
+src/experimental/
+
+# Legacy builds
+legacy/
+
+# Root-level duplicate DLLs (originals are in dependencies/hidapi/ and dependencies/PawnIO/)
+dependencies/hidapi.dll
+dependencies/PawnIOLib.dll

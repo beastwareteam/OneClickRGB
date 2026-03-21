@@ -76,14 +76,43 @@ std::string DetectedHardware::GetHardwareId() const
 /*---------------------------------------------------------*\
 | HardwareScanner Implementation                            |
 \*---------------------------------------------------------*/
+// Helper to get executable directory
+static std::string GetExeDir()
+{
+#ifdef _WIN32
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string dir = std::string(exePath);
+    return dir.substr(0, dir.find_last_of("\\/"));
+#else
+    return ".";
+#endif
+}
+
 HardwareScanner::HardwareScanner()
 {
-    // Load device registry from JSON file
+    // Load device registry from JSON file - try multiple locations
     auto& registry = DeviceRegistry::getInstance();
-    if (!registry.loadFromFile("config/devices.json")) {
-        std::cerr << "[SCANNER] Failed to load device registry!\n";
-    } else {
-        std::cout << "[SCANNER] Loaded " << registry.getDeviceCount() << " devices from registry\n";
+    std::string exeDir = GetExeDir();
+
+    // Try paths relative to executable first, then working directory
+    std::vector<std::string> configPaths = {
+        exeDir + "/config/devices.json",
+        exeDir + "/../config/devices.json",  // If exe is in bin/
+        "config/devices.json"
+    };
+
+    bool loaded = false;
+    for (const auto& path : configPaths) {
+        if (registry.loadFromFile(path)) {
+            std::cout << "[SCANNER] Loaded " << registry.getDeviceCount() << " devices from: " << path << "\n";
+            loaded = true;
+            break;
+        }
+    }
+
+    if (!loaded) {
+        std::cerr << "[SCANNER] Failed to load device registry from any location!\n";
     }
 }
 

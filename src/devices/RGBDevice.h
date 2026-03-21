@@ -19,6 +19,8 @@
 
 namespace OneClickRGB {
 
+struct DeviceInfo; // Forward declaration for registry device info
+
 /*---------------------------------------------------------*\
 | Simple RGB Color                                          |
 \*---------------------------------------------------------*/
@@ -110,7 +112,7 @@ struct DeviceZone
 class RGBDevice
 {
 public:
-    RGBDevice(const DetectedHardware& hw, const ControllerEntry& entry);
+    RGBDevice(const DetectedHardware& hw, const DeviceInfo& entry);
     ~RGBDevice();
 
     /*-----------------------------------------------------*\

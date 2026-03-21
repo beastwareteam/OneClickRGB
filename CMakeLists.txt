@@ -9,18 +9,32 @@ option(BUILD_GUI "Build Qt GUI application" ON)
 option(BUILD_CLI "Build command-line interface" ON)
 option(USE_OPENRGB_CONTROLLERS "Use OpenRGB controller implementations" OFF)
 
-# Find dependencies
-find_package(hidapi QUIET)
-find_package(nlohmann_json QUIET)
+# ==================== BUNDLED DEPENDENCIES ====================
+# Always use bundled dependencies for portability
 
-# If not found, we'll use bundled versions
-if(NOT nlohmann_json_FOUND)
-    message(STATUS "Using bundled nlohmann_json")
-    # Add as header-only
-    add_library(nlohmann_json INTERFACE)
-    target_include_directories(nlohmann_json INTERFACE
-        ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/json/include)
+# HIDAPI - bundled in dependencies/hidapi/
+set(HIDAPI_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/hidapi")
+set(HIDAPI_LIBRARY "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/hidapi/hidapi.lib")
+
+if(EXISTS "${HIDAPI_LIBRARY}")
+    message(STATUS "Using bundled HIDAPI from: ${HIDAPI_INCLUDE_DIR}")
+    add_library(hidapi INTERFACE)
+    target_include_directories(hidapi INTERFACE ${HIDAPI_INCLUDE_DIR})
+    target_link_libraries(hidapi INTERFACE ${HIDAPI_LIBRARY})
+    set(HIDAPI_FOUND TRUE)
+else()
+    find_package(hidapi QUIET)
+    if(NOT hidapi_FOUND)
+        message(WARNING "HIDAPI not found - device detection will not work")
+    endif()
 endif()
+
+# nlohmann_json - bundled in dependencies/nlohmann/
+message(STATUS "Using bundled nlohmann_json")
+add_library(nlohmann_json INTERFACE)
+target_include_directories(nlohmann_json INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/dependencies/nlohmann
+    ${CMAKE_CURRENT_SOURCE_DIR}/dependencies)
 
 # Source files
 set(CORE_SOURCES
@@ -54,20 +68,19 @@ target_include_directories(oneclickrgb_core PUBLIC
 )
 
 # Link dependencies
-if(hidapi_FOUND)
+if(HIDAPI_FOUND)
+    target_link_libraries(oneclickrgb_core PUBLIC hidapi)
+    target_include_directories(oneclickrgb_core PUBLIC ${HIDAPI_INCLUDE_DIR})
+elseif(hidapi_FOUND)
     target_link_libraries(oneclickrgb_core PUBLIC hidapi::hidapi)
 else()
-    # Manual HIDAPI linking
+    message(WARNING "HIDAPI not available - using setupapi only")
     if(WIN32)
         target_link_libraries(oneclickrgb_core PUBLIC setupapi)
     endif()
 endif()
 
-if(nlohmann_json_FOUND)
-    target_link_libraries(oneclickrgb_core PUBLIC nlohmann_json::nlohmann_json)
-else()
-    target_link_libraries(oneclickrgb_core PUBLIC nlohmann_json)
-endif()
+target_link_libraries(oneclickrgb_core PUBLIC nlohmann_json)
 
 # Platform-specific libraries
 if(WIN32)
@@ -116,31 +129,56 @@ endif()
 
 # GUI Application (Qt)
 if(BUILD_GUI)
-    find_package(Qt6 COMPONENTS Widgets QUIET)
+    find_package(Qt6 COMPONENTS Widgets Core QUIET)
     if(NOT Qt6_FOUND)
-        find_package(Qt5 COMPONENTS Widgets QUIET)
+        find_package(Qt5 COMPONENTS Widgets Core QUIET)
+        if(Qt5_FOUND)
+            set(QT_VERSION 5)
+            message(STATUS "Using Qt5 (Qt6 not found)")
+        else()
+            message(WARNING "Qt not found - GUI will not be built")
+            set(BUILD_GUI OFF)
+        endif()
+    else()
+        set(QT_VERSION 6)
+        message(STATUS "Using Qt6")
     endif()
 
-    if(Qt6_FOUND OR Qt5_FOUND)
+    if(BUILD_GUI)
         set(CMAKE_AUTOMOC ON)
         set(CMAKE_AUTOUIC ON)
         set(CMAKE_AUTORCC ON)
+
+        # Qt resources
+        set(QT_RESOURCES
+            resources/resources.qrc
+        )
 
         set(GUI_SOURCES
             src/ui/MainWindow.cpp
             src/ui/DeviceCard.cpp
             src/ui/QuickActions.cpp
+            src/ui/ColorPicker.cpp
+            src/ui/ProfileWidget.cpp
+            src/ui/SettingsDialog.cpp
+            ${QT_RESOURCES}
         )
 
-        add_executable(oneclickrgb_gui ${GUI_SOURCES})
-        target_link_libraries(oneclickrgb_gui PRIVATE
-            oneclickrgb_core
-            $<IF:$<TARGET_EXISTS:Qt6::Widgets>,Qt6::Widgets,Qt5::Widgets>
+        if(QT_VERSION EQUAL 6)
+            qt6_add_executable(oneclickrgb_gui src/main_gui.cpp ${GUI_SOURCES})
+            target_link_libraries(oneclickrgb_gui PRIVATE oneclickrgb_core Qt6::Widgets Qt6::Core)
+        else()
+            add_executable(oneclickrgb_gui src/main_gui.cpp ${GUI_SOURCES})
+            target_link_libraries(oneclickrgb_gui PRIVATE oneclickrgb_core Qt5::Widgets Qt5::Core)
+        endif()
+
+        # Set executable properties
+        set_target_properties(oneclickrgb_gui PROPERTIES
+            OUTPUT_NAME "OneClickRGB"
+            WIN32_EXECUTABLE TRUE
         )
 
         install(TARGETS oneclickrgb_gui DESTINATION bin)
-    else()
-        message(WARNING "Qt not found, GUI will not be built")
     endif()
 endif()
 

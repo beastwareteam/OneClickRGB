@@ -1260,8 +1260,31 @@ typedef HRESULT (__stdcall *pawnio_close_t)(HANDLE);
 
 union i2c_smbus_data { uint8_t byte; uint16_t word; uint8_t block[34]; };
 
+// Helper to get exe directory as narrow string
+static std::string GetExeDirA() {
+    char path[MAX_PATH];
+    GetModuleFileNameA(NULL, path, MAX_PATH);
+    std::string dir(path);
+    size_t pos = dir.find_last_of("\\/");
+    return pos != std::string::npos ? dir.substr(0, pos) : ".";
+}
+
 bool SetGSkillRAM(uint8_t r, uint8_t g, uint8_t b) {
-    HMODULE dll = LoadLibraryA("PawnIOLib.dll");
+    std::string exeDir = GetExeDirA();
+
+    // Try multiple paths for PawnIOLib.dll
+    HMODULE dll = NULL;
+    std::string dllPaths[] = {
+        exeDir + "\\PawnIOLib.dll",
+        exeDir + "\\dependencies\\PawnIO\\PawnIOLib.dll",
+        "PawnIOLib.dll"
+    };
+
+    for (const auto& path : dllPaths) {
+        dll = LoadLibraryA(path.c_str());
+        if (dll) break;
+    }
+
     if (!dll) {
         AppendStatus(L"[G.Skill] PawnIOLib.dll not found");
         return false;
@@ -1284,8 +1307,22 @@ bool SetGSkillRAM(uint8_t r, uint8_t g, uint8_t b) {
         return false;
     }
 
-    HANDLE hFile = CreateFileA("SmbusI801.bin", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    // Try multiple paths for SmbusI801.bin
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+    std::string binPaths[] = {
+        exeDir + "\\SmbusI801.bin",
+        exeDir + "\\modules\\SmbusI801.bin",
+        exeDir + "\\dependencies\\PawnIO\\modules\\SmbusI801.bin",
+        "SmbusI801.bin"
+    };
+
+    for (const auto& path : binPaths) {
+        hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (hFile != INVALID_HANDLE_VALUE) break;
+    }
+
     if (hFile == INVALID_HANDLE_VALUE) {
+        AppendStatus(L"[G.Skill] SmbusI801.bin not found");
         p_close(handle);
         FreeLibrary(dll);
         return false;
@@ -1297,6 +1334,7 @@ bool SetGSkillRAM(uint8_t r, uint8_t g, uint8_t b) {
     CloseHandle(hFile);
 
     if (p_load(handle, blob.data(), blob.size()) != S_OK) {
+        AppendStatus(L"[G.Skill] Failed to load SMBus module");
         p_close(handle);
         FreeLibrary(dll);
         return false;
@@ -1381,6 +1419,8 @@ bool SetGSkillRAM(uint8_t r, uint8_t g, uint8_t b) {
         AppendStatus(buf);
         return true;
     }
+
+    AppendStatus(L"[G.Skill] No RAM modules found on SMBus");
     return false;
 }
 

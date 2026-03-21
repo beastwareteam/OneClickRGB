@@ -1,7 +1,7 @@
 /*---------------------------------------------------------*\
 | MainWindow.h                                              |
 |                                                           |
-| OneClickRGB GUI - Simple Qt Interface                     |
+| OneClickRGB GUI - Professional Qt Interface               |
 |                                                           |
 | This file is part of the OneClickRGB project              |
 \*---------------------------------------------------------*/
@@ -9,65 +9,108 @@
 #pragma once
 
 #include <QMainWindow>
-#include <QPushButton>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QScrollArea>
 #include <QLabel>
-#include <QListWidget>
-#include <QSlider>
+#include <QPushButton>
 #include <QSystemTrayIcon>
 #include <QMenu>
-#include <QColorDialog>
-#include "../core/DeviceManager.h"
+#include <QAction>
+#include <QTimer>
+#include <memory>
+#include <vector>
+#include <string>
 
 namespace OneClickRGB {
 
-class MainWindow : public QMainWindow
-{
+// Forward declarations (avoid heavy includes in header)
+class DeviceManager;
+class DeviceCard;
+class QuickActions;
+
+// Simplified device info used by the GUI
+struct UIDeviceInfo {
+    std::string name;
+    std::string vendor;
+    std::string type;
+    std::string hardwareId;
+    bool connected;
+};
+
+class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget *parent = nullptr);
-    ~MainWindow();
+    explicit MainWindow(QWidget* parent = nullptr);
+    ~MainWindow() override;
+
+    void initialize();
+    void refreshDevices();
+
+protected:
+    void closeEvent(QCloseEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private slots:
-    void onRedClicked();
-    void onGreenClicked();
-    void onBlueClicked();
-    void onWhiteClicked();
-    void onOffClicked();
-    void onCustomColorClicked();
-    void onRefreshClicked();
-    void onBrightnessChanged(int value);
+    void onDeviceDetected(const std::string& deviceName);
+    void onDeviceRemoved(const std::string& deviceName);
     void onTrayIconActivated(QSystemTrayIcon::ActivationReason reason);
+    void onShowWindow();
+    void onSettings();
+    void onAbout();
+    void onQuit();
+    void onAutoRefresh();
 
 private:
     void setupUI();
     void setupTrayIcon();
-    void refreshDeviceList();
-    void applyColorToAll(const RGBColor& color);
+    void setupMenuBar();
+    void setupStatusBar();
+    void loadSettings();
+    void saveSettings();
+    void updateWindowTitle();
 
-    // UI Elements
-    QWidget* centralWidget;
-    QListWidget* deviceList;
-    QLabel* statusLabel;
-    QSlider* brightnessSlider;
+    // Core components
+    std::unique_ptr<DeviceManager> deviceManager_;
 
-    // Quick Color Buttons
-    QPushButton* btnRed;
-    QPushButton* btnGreen;
-    QPushButton* btnBlue;
-    QPushButton* btnWhite;
-    QPushButton* btnOff;
-    QPushButton* btnCustom;
-    QPushButton* btnRefresh;
+    // UI components
+    QWidget* centralWidget_;
+    QVBoxLayout* mainLayout_;
+    QHBoxLayout* contentLayout_;
 
-    // System Tray
-    QSystemTrayIcon* trayIcon;
-    QMenu* trayMenu;
+    // Device list area
+    QScrollArea* deviceScrollArea_;
+    QWidget* deviceContainer_;
+    QVBoxLayout* deviceLayout_;
 
-    // Current state
-    RGBColor currentColor;
+    // Quick actions panel
+    QuickActions* quickActions_;
+
+    // Device cards
+    std::vector<std::unique_ptr<DeviceCard>> deviceCards_;
+
+    // Tray icon
+    QSystemTrayIcon* trayIcon_;
+    QMenu* trayMenu_;
+
+    // Menu actions
+    QAction* showAction_;
+    QAction* settingsAction_;
+    QAction* aboutAction_;
+    QAction* quitAction_;
+
+    // Auto-refresh timer
+    QTimer* refreshTimer_;
+
+    // Settings
+    bool minimizeToTray_;
+    bool startMinimized_;
+    int refreshInterval_; // seconds
+
+    // Status bar
+    QLabel* statusLabel_;
+    QLabel* deviceCountLabel_;
 };
 
 } // namespace OneClickRGB

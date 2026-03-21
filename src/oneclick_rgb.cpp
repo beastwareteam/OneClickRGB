@@ -483,8 +483,8 @@ bool InstallPawnIODriver() {
 
     std::string installer_paths[] = {
         exeDir + "\\PawnIO_setup.exe",
-        "PawnIO_setup.exe",
-        "D:\\xampp\\htdocs\\RGB\\OneClickRGB\\build\\PawnIO_setup.exe"
+        exeDir + "\\dependencies\\PawnIO\\PawnIO_setup.exe",
+        "PawnIO_setup.exe"
     };
 
     std::string installer_path;
@@ -575,12 +575,21 @@ bool InstallPawnIODriver() {
     return false;
 }
 
+// Helper to get executable directory
+static std::string GetExeDirectory() {
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string dir = std::string(exePath);
+    return dir.substr(0, dir.find_last_of("\\/"));
+}
+
 bool LoadPawnIO() {
-    // Try to find PawnIOLib.dll
+    // Try to find PawnIOLib.dll relative to executable
+    std::string exeDir = GetExeDirectory();
     std::string dll_paths[] = {
-        "PawnIOLib.dll",
-        "D:\\xampp\\htdocs\\RGB\\OpenRGB\\OpenRGB Windows 64-bit\\PawnIOLib.dll",
-        "C:\\Program Files\\OpenRGB\\PawnIOLib.dll"
+        exeDir + "\\PawnIOLib.dll",
+        exeDir + "\\dependencies\\PawnIO\\PawnIOLib.dll",
+        "PawnIOLib.dll"
     };
 
     for (const auto& path : dll_paths) {
@@ -617,11 +626,13 @@ bool LoadPawnIO() {
 }
 
 bool LoadSMBusModule() {
-    // Find SMBus module
+    // Find SMBus module relative to executable
+    std::string exeDir = GetExeDirectory();
     std::string module_paths[] = {
-        "SmbusI801.bin",
-        "D:\\xampp\\htdocs\\RGB\\OpenRGB\\OpenRGB Windows 64-bit\\SmbusI801.bin",
-        "C:\\Program Files\\OpenRGB\\SmbusI801.bin"
+        exeDir + "\\SmbusI801.bin",
+        exeDir + "\\dependencies\\PawnIO\\modules\\SmbusI801.bin",
+        exeDir + "\\modules\\SmbusI801.bin",
+        "SmbusI801.bin"
     };
 
     std::string module_path;
