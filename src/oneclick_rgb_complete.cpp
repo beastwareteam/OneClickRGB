@@ -56,6 +56,7 @@
 #include <dwmapi.h>
 #include "hidapi.h"
 #include "channel_config.h"
+#include "app_config.h"
 #include "themes.h"
 #include "modern_ui.h"
 
@@ -66,41 +67,6 @@ inline void LogDebug(const char* msg) {
     std::ofstream f("debug.log", std::ios::app);
     f << msg << std::endl;
 }
-
-//=============================================================================
-// SETTINGS-PERSISTENZ
-//=============================================================================
-
-struct AppSettings {
-    int window_x = -1;
-    int window_y = -1;
-    int window_width = 800;
-    int window_height = 600;
-    bool autostart_enabled = false;
-    bool minimize_to_tray = false;
-    bool apply_on_startup = true;
-    int last_brightness = 100;
-    int last_color = 255;
-    std::string last_profile = "";
-    std::string startup_profile = "";
-    bool show_notifications = true;
-    int scan_interval_ms = 5000;
-    bool start_minimized = false;
-    // Erweiterte Settings:
-    int red = 255;
-    int green = 255;
-    int blue = 255;
-    int effect_keyboard = 0; // 0=Static, 1=Breathing, ...
-    int effect_edge = 0;     // 0=Static, 1=Breathing, ...
-    int speed = 50;
-    bool live_preview = false;
-    // Pro-Kanal-Werte (z.B. für 8 Kanäle)
-    int channel_r[8] = {255,255,255,255,255,255,255,255};
-    int channel_g[8] = {255,255,255,255,255,255,255,255};
-    int channel_b[8] = {255,255,255,255,255,255,255,255};
-    bool channel_active[8] = {true,true,true,true,true,true,true,true};
-    // Weitere Felder nach Bedarf ...
-};
 
 // Definition of modern dark theme
 ModernTheme g_modernDark = {
@@ -135,97 +101,18 @@ ModernTheme g_modernDark = {
 
 ModernTheme* g_mTheme = &g_modernDark;
 
-AppSettings g_settings;
+//=============================================================================
+// SETTINGS STUBS
+// Forward declarations - full implementations follow after AppState is defined
+//=============================================================================
 
-std::wstring GetSettingsPath() {
-    wchar_t* appdata = nullptr;
-    if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, &appdata) != S_OK) {
-        return L"settings.json";
-    }
-    std::wstring path = appdata;
-    CoTaskMemFree(appdata);
-    path += L"\\OneClickRGB\\settings.json";
-    return path;
-}
+void SaveAppSettings();
+void LoadAppSettings();
 
-void LoadSettings() {
-    std::wstring path = GetSettingsPath();
-    std::ifstream f(path);
-    if (!f) return;
-    try {
-        json j;
-        f >> j;
-        if (j.contains("window")) {
-            g_settings.window_x = j["window"].value("x", -1);
-            g_settings.window_y = j["window"].value("y", -1);
-            g_settings.window_width = j["window"].value("width", 800);
-            g_settings.window_height = j["window"].value("height", 600);
-        }
-        g_settings.autostart_enabled = j.value("autostart_enabled", false);
-        g_settings.minimize_to_tray = j.value("minimize_to_tray", false);
-        g_settings.apply_on_startup = j.value("apply_on_startup", true);
-        g_settings.last_brightness = j.value("last_brightness", 100);
-        g_settings.last_color = j.value("last_color", 255);
-        g_settings.last_profile = j.value("last_profile", "");
-        g_settings.startup_profile = j.value("startup_profile", "");
-        g_settings.show_notifications = j.value("show_notifications", true);
-        g_settings.scan_interval_ms = j.value("scan_interval_ms", 5000);
-        g_settings.start_minimized = j.value("start_minimized", false);
-        // Erweiterte Settings:
-        g_settings.red = j.value("red", 255);
-        g_settings.green = j.value("green", 255);
-        g_settings.blue = j.value("blue", 255);
-        g_settings.effect_keyboard = j.value("effect_keyboard", 0);
-        g_settings.effect_edge = j.value("effect_edge", 0);
-        g_settings.speed = j.value("speed", 50);
-        g_settings.live_preview = j.value("live_preview", false);
-        if (j.contains("channel_r")) for (int i=0;i<8;++i) if (j["channel_r"].size()>i) g_settings.channel_r[i] = j["channel_r"][i].get<int>();
-        if (j.contains("channel_g")) for (int i=0;i<8;++i) if (j["channel_g"].size()>i) g_settings.channel_g[i] = j["channel_g"][i].get<int>();
-        if (j.contains("channel_b")) for (int i=0;i<8;++i) if (j["channel_b"].size()>i) g_settings.channel_b[i] = j["channel_b"][i].get<int>();
-        if (j.contains("channel_active")) for (int i=0;i<8;++i) if (j["channel_active"].size()>i) g_settings.channel_active[i] = j["channel_active"][i].get<bool>();
-    } catch (...) {}
-}
-
-void SaveSettings() {
-    std::wstring path = GetSettingsPath();
-    // Verzeichnis anlegen, falls nicht vorhanden
-    size_t pos = path.find_last_of(L"\\/");
-    if (pos != std::wstring::npos) {
-        std::wstring dir = path.substr(0, pos);
-        SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
-    }
-    json j;
-    j["window"] = {
-        {"x", g_settings.window_x},
-        {"y", g_settings.window_y},
-        {"width", g_settings.window_width},
-        {"height", g_settings.window_height}
-    };
-    j["autostart_enabled"] = g_settings.autostart_enabled;
-    j["minimize_to_tray"] = g_settings.minimize_to_tray;
-    j["apply_on_startup"] = g_settings.apply_on_startup;
-    j["last_brightness"] = g_settings.last_brightness;
-    j["last_color"] = g_settings.last_color;
-    j["last_profile"] = g_settings.last_profile;
-    j["startup_profile"] = g_settings.startup_profile;
-    j["show_notifications"] = g_settings.show_notifications;
-    j["scan_interval_ms"] = g_settings.scan_interval_ms;
-    j["start_minimized"] = g_settings.start_minimized;
-    // Erweiterte Settings:
-    j["red"] = g_settings.red;
-    j["green"] = g_settings.green;
-    j["blue"] = g_settings.blue;
-    j["effect_keyboard"] = g_settings.effect_keyboard;
-    j["effect_edge"] = g_settings.effect_edge;
-    j["speed"] = g_settings.speed;
-    j["live_preview"] = g_settings.live_preview;
-    for (int i=0;i<8;++i) j["channel_r"][i] = g_settings.channel_r[i];
-    for (int i=0;i<8;++i) j["channel_g"][i] = g_settings.channel_g[i];
-    for (int i=0;i<8;++i) j["channel_b"][i] = g_settings.channel_b[i];
-    for (int i=0;i<8;++i) j["channel_active"][i] = g_settings.channel_active[i];
-    std::ofstream f(path);
-    if (f) f << std::setw(4) << j;
-}
+// SaveSettings/LoadSettings are kept for call-site compatibility;
+// they delegate to the unified SaveAppSettings/LoadAppSettings.
+void SaveSettings() { SaveAppSettings(); }
+void LoadSettings() { LoadAppSettings(); }
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -744,8 +631,7 @@ struct AppState {
     std::wstring lastProfile;
 } g_state;
 
-// Channel correction manager
-ChannelManager g_channels;
+// Channels are now owned by g_config (app_config.h)
 
 //=============================================================================
 // UTILITY FUNCTIONS
@@ -763,64 +649,60 @@ std::wstring GetAppDataPath() {
 int g_windowX = CW_USEDEFAULT, g_windowY = CW_USEDEFAULT;
 
 void SaveAppSettings() {
-    std::wstring path = GetAppDataPath() + L"\\app_settings.cfg";
-    std::ofstream file(path);
-    if (file.is_open()) {
-        file << "lang=" << (g_lang == LANG_DE ? "de" : "en") << "\n";
-        file << "theme=" << GetThemeId() << "\n";  // 0=Dark, 1=Light, 2=Colorblind
-        // Save last profile
-        if (!g_state.lastProfile.empty()) {
-            std::string profileName;
-            for (wchar_t wc : g_state.lastProfile) profileName += static_cast<char>(wc);
-            file << "lastProfile=" << profileName << "\n";
-        }
-        // Save window position
-        if (g_state.hWnd) {
-            RECT rc;
-            GetWindowRect(g_state.hWnd, &rc);
-            file << "windowX=" << rc.left << "\n";
-            file << "windowY=" << rc.top << "\n";
-        }
-        file.close();
+    // Sync runtime state → unified config, then persist
+    g_config.red        = g_state.red;
+    g_config.green      = g_state.green;
+    g_config.blue       = g_state.blue;
+    g_config.brightness = g_state.brightness;
+    g_config.speed      = g_state.speed;
+    g_config.kbMode     = g_state.kbMode;
+    g_config.edgeMode   = g_state.edgeMode;
+    g_config.enableAura     = g_state.enableAura;
+    g_config.enableMouse    = g_state.enableMouse;
+    g_config.enableKeyboard = g_state.enableKeyboard;
+    g_config.enableRAM      = g_state.enableRAM;
+    g_config.enableEdge     = g_state.enableEdge;
+    g_config.autostart      = g_state.autostart;
+    g_config.minimizeToTray = g_state.minimizeToTray;
+    g_config.autoApply      = g_state.autoApply;
+    g_config.themeId        = GetThemeId();
+    g_config.langId         = (g_lang == LANG_DE) ? 1 : 0;
+    if (!g_state.lastProfile.empty()) {
+        g_config.lastProfile.clear();
+        for (wchar_t wc : g_state.lastProfile) g_config.lastProfile += static_cast<char>(wc);
     }
+    if (g_state.hWnd) {
+        RECT rc;
+        GetWindowRect(g_state.hWnd, &rc);
+        g_config.windowX = rc.left;
+        g_config.windowY = rc.top;
+    }
+    g_config.Save();
 }
 
 void LoadAppSettings() {
-    std::wstring path = GetAppDataPath() + L"\\app_settings.cfg";
-    std::ifstream file(path);
-    if (file.is_open()) {
-        std::string line;
-        while (std::getline(file, line)) {
-            if (line.find("lang=de") != std::string::npos) {
-                g_lang = LANG_DE;
-                g_str = &g_strDE;
-            }
-            // Load theme (0=Dark, 1=Light, 2=Colorblind)
-            if (line.find("theme=") == 0) {
-                int themeId = std::stoi(line.substr(6));
-                SetTheme(themeId);
-            }
-            // Legacy support for old dark= setting
-            else if (line.find("dark=1") != std::string::npos) {
-                SetTheme(0);  // Dark
-            } else if (line.find("dark=0") != std::string::npos) {
-                SetTheme(1);  // Light
-            }
-            // Load last profile name
-            if (line.find("lastProfile=") == 0) {
-                std::string profileName = line.substr(12);
-                g_state.lastProfile = std::wstring(profileName.begin(), profileName.end());
-            }
-            // Load window position
-            if (line.find("windowX=") == 0) {
-                g_windowX = std::stoi(line.substr(8));
-            }
-            if (line.find("windowY=") == 0) {
-                g_windowY = std::stoi(line.substr(8));
-            }
-        }
-        file.close();
-    }
+    g_config.Load();
+    // Sync unified config → runtime state
+    g_state.red        = g_config.red;
+    g_state.green      = g_config.green;
+    g_state.blue       = g_config.blue;
+    g_state.brightness = g_config.brightness;
+    g_state.speed      = g_config.speed;
+    g_state.kbMode     = g_config.kbMode;
+    g_state.edgeMode   = g_config.edgeMode;
+    g_state.enableAura     = g_config.enableAura;
+    g_state.enableMouse    = g_config.enableMouse;
+    g_state.enableKeyboard = g_config.enableKeyboard;
+    g_state.enableRAM      = g_config.enableRAM;
+    g_state.enableEdge     = g_config.enableEdge;
+    g_state.autostart      = g_config.autostart;
+    g_state.minimizeToTray = g_config.minimizeToTray;
+    g_state.autoApply      = g_config.autoApply;
+    g_state.lastProfile    = std::wstring(g_config.lastProfile.begin(), g_config.lastProfile.end());
+    g_windowX = (g_config.windowX != -1) ? g_config.windowX : CW_USEDEFAULT;
+    g_windowY = (g_config.windowY != -1) ? g_config.windowY : CW_USEDEFAULT;
+    SetTheme(g_config.themeId);
+    if (g_config.langId == 1) { g_lang = LANG_DE; g_str = &g_strDE; }
 }
 
 void AppendStatus(const wchar_t* text) {
@@ -1326,9 +1208,9 @@ bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
     // Use hardware config if available
     if (g_asusHwConfig.valid) {
         for (int i = 0; i < g_asusHwConfig.numChannels; i++) {
-            if (g_channels.aura_channels[i].enabled) {
+            if (g_config.aura[i].enabled) {
                 uint8_t cr = r, cg = g, cb = b;
-                g_channels.aura_channels[i].ApplyCorrection(cr, cg, cb);
+                g_config.aura[i].ApplyCorrection(cr, cg, cb);
                 SetAsusChannel(dev, g_asusHwConfig.channels[i].directChannel,
                               g_asusHwConfig.channels[i].ledCount, cr, cg, cb);
                 setCount++;
@@ -1340,9 +1222,9 @@ bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
             {0x00, 60}, {0x01, 120}, {0x02, 120}, {0x03, 60}, {0x04, 60}, {0x0B, 60}, {0x0C, 60}
         };
         for (int i = 0; i < 7; i++) {
-            if (g_channels.aura_channels[i].enabled) {
+            if (g_config.aura[i].enabled) {
                 uint8_t cr = r, cg = g, cb = b;
-                g_channels.aura_channels[i].ApplyCorrection(cr, cg, cb);
+                g_config.aura[i].ApplyCorrection(cr, cg, cb);
                 SetAsusChannel(dev, channels[i].channel, channels[i].leds, cr, cg, cb);
                 setCount++;
             }
@@ -1369,9 +1251,9 @@ void SetAsusAuraQuick(uint8_t r, uint8_t g, uint8_t b) {
     // Use hardware config if available
     if (g_asusHwConfig.valid) {
         for (int i = 0; i < g_asusHwConfig.numChannels; i++) {
-            if (g_channels.aura_channels[i].enabled) {
+            if (g_config.aura[i].enabled) {
                 uint8_t cr = r, cg = g, cb = b;
-                g_channels.aura_channels[i].ApplyCorrection(cr, cg, cb);
+                g_config.aura[i].ApplyCorrection(cr, cg, cb);
                 SetAsusChannel(dev, g_asusHwConfig.channels[i].directChannel,
                               g_asusHwConfig.channels[i].ledCount, cr, cg, cb);
             }
@@ -1382,9 +1264,9 @@ void SetAsusAuraQuick(uint8_t r, uint8_t g, uint8_t b) {
             {0, 60}, {1, 120}, {2, 120}, {3, 60}, {4, 60}, {5, 60}, {6, 60}, {7, 60}
         };
         for (int i = 0; i < 8; i++) {
-            if (g_channels.aura_channels[i].enabled) {
+            if (g_config.aura[i].enabled) {
                 uint8_t cr = r, cg = g, cb = b;
-                g_channels.aura_channels[i].ApplyCorrection(cr, cg, cb);
+                g_config.aura[i].ApplyCorrection(cr, cg, cb);
                 SetAsusChannel(dev, channels[i].channel, channels[i].leds, cr, cg, cb);
             }
         }
@@ -1416,7 +1298,7 @@ bool SetSteelSeries(uint8_t r, uint8_t g, uint8_t b) {
 
     // Apply color correction for SteelSeries
     uint8_t cr = r, cg = g, cb = b;
-    g_channels.steelseries.ApplyCorrection(cr, cg, cb);
+    g_config.steelseries.ApplyCorrection(cr, cg, cb);
 
     for (int i = 0; i < 8; i++) {
         uint8_t pkt[8] = {0x1C, 0x27, 0x00, (uint8_t)(1 << i), cr, cg, cb, 0};
@@ -1475,7 +1357,7 @@ bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode, uint8_t b
 
     // Apply keyboard color correction
     uint8_t cr = r, cg = g, cb = b;
-    g_channels.keyboard.ApplyCorrection(cr, cg, cb);
+    g_config.keyboard.ApplyCorrection(cr, cg, cb);
 
     uint8_t profile = 0;
     EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &profile);
@@ -1528,7 +1410,7 @@ bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode) {
 
     // Apply edge color correction
     uint8_t cr = r, cg = g, cb = b;
-    g_channels.edge.ApplyCorrection(cr, cg, cb);
+    g_config.edge.ApplyCorrection(cr, cg, cb);
 
     uint8_t profile = 0;
     EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &profile);
@@ -1706,7 +1588,7 @@ bool SetGSkillRAM(uint8_t r, uint8_t g, uint8_t b) {
             // Apply per-slot color correction
             uint8_t cr = r, cg = g, cb = b;
             if (slot < 4) {
-                g_channels.ram_modules[slot].ApplyCorrection(cr, cg, cb);
+                g_config.ram[slot].ApplyCorrection(cr, cg, cb);
             }
 
             uint8_t led_count = ene_read(addr, 0x1C02);
@@ -2059,9 +1941,6 @@ void SetPresetColor(int r, int g, int b) {
         SetWindowTextW(g_state.hEditHex, hex);
     }
     // Save to settings
-    g_settings.red = r;
-    g_settings.green = g;
-    g_settings.blue = b;
     SaveSettings();
     if (g_state.autoApply) {
         std::thread(ApplyColors).detach();
@@ -2176,19 +2055,19 @@ INT_PTR CALLBACK ChannelSettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPAR
             HWND hR = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
                 130, y-2, 80, 25, hDlg, (HMENU)(INT_PTR)(7000 + i*3), NULL, NULL);
             SendMessage(hR, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
-            SendMessage(hR, TBM_SETPOS, TRUE, g_channels.aura_channels[i].red_adjust);
+            SendMessage(hR, TBM_SETPOS, TRUE, g_config.aura[i].red_adjust);
 
             CreateWindowW(L"STATIC", L"G:", WS_CHILD | WS_VISIBLE, 215, y, 15, 20, hDlg, NULL, NULL, NULL);
             HWND hG = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
                 230, y-2, 80, 25, hDlg, (HMENU)(INT_PTR)(7001 + i*3), NULL, NULL);
             SendMessage(hG, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
-            SendMessage(hG, TBM_SETPOS, TRUE, g_channels.aura_channels[i].green_adjust);
+            SendMessage(hG, TBM_SETPOS, TRUE, g_config.aura[i].green_adjust);
 
             CreateWindowW(L"STATIC", L"B:", WS_CHILD | WS_VISIBLE, 315, y, 15, 20, hDlg, NULL, NULL, NULL);
             HWND hB = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
                 330, y-2, 80, 25, hDlg, (HMENU)(INT_PTR)(7002 + i*3), NULL, NULL);
             SendMessage(hB, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
-            SendMessage(hB, TBM_SETPOS, TRUE, g_channels.aura_channels[i].blue_adjust);
+            SendMessage(hB, TBM_SETPOS, TRUE, g_config.aura[i].blue_adjust);
             y += 30;
         }
         CreateWindowW(L"STATIC", g_str->csHint, WS_CHILD | WS_VISIBLE, 10, y+5, 400, 20, hDlg, NULL, NULL, NULL);
@@ -2201,17 +2080,17 @@ INT_PTR CALLBACK ChannelSettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPAR
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK) {
             for (int i = 0; i < 8; i++) {
-                g_channels.aura_channels[i].red_adjust = (int)SendDlgItemMessage(hDlg, 7000+i*3, TBM_GETPOS, 0, 0);
-                g_channels.aura_channels[i].green_adjust = (int)SendDlgItemMessage(hDlg, 7001+i*3, TBM_GETPOS, 0, 0);
-                g_channels.aura_channels[i].blue_adjust = (int)SendDlgItemMessage(hDlg, 7002+i*3, TBM_GETPOS, 0, 0);
+                g_config.aura[i].red_adjust = (int)SendDlgItemMessage(hDlg, 7000+i*3, TBM_GETPOS, 0, 0);
+                g_config.aura[i].green_adjust = (int)SendDlgItemMessage(hDlg, 7001+i*3, TBM_GETPOS, 0, 0);
+                g_config.aura[i].blue_adjust = (int)SendDlgItemMessage(hDlg, 7002+i*3, TBM_GETPOS, 0, 0);
             }
-            g_channels.Save();
+            g_config.Save();
             EndDialog(hDlg, IDOK);
         } else if (LOWORD(wParam) == IDRETRY) {
             for (int i = 0; i < 8; i++) {
-                g_channels.aura_channels[i].red_adjust = 100;
-                g_channels.aura_channels[i].green_adjust = 100;
-                g_channels.aura_channels[i].blue_adjust = 100;
+                g_config.aura[i].red_adjust = 100;
+                g_config.aura[i].green_adjust = 100;
+                g_config.aura[i].blue_adjust = 100;
                 SendDlgItemMessage(hDlg, 7000+i*3, TBM_SETPOS, TRUE, 100);
                 SendDlgItemMessage(hDlg, 7001+i*3, TBM_SETPOS, TRUE, 100);
                 SendDlgItemMessage(hDlg, 7002+i*3, TBM_SETPOS, TRUE, 100);
@@ -2952,7 +2831,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }, (LPARAM)hFont);
 
         // Load saved settings into controls
-        g_channels.Load();
+        g_config.Load();
         RefreshProfileList();
         UpdateSliders();
         UpdatePreview();
@@ -3116,9 +2995,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             UpdatePreview();
             UpdateSliders();
             // Hex-Änderung speichern
-            g_settings.red = g_state.red;
-            g_settings.green = g_state.green;
-            g_settings.blue = g_state.blue;
             SaveSettings();
         }
         else if (id == ID_COMBO_KB_MODE && code == CBN_SELCHANGE) {
@@ -3128,7 +3004,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                KB_MODE_STARLIGHT, KB_MODE_RAINBOW, KB_MODE_HURRICANE};
             if (sel >= 0 && sel < 11) {
                 g_state.kbMode = modes[sel];
-                g_settings.effect_keyboard = sel;
                 SaveSettings();
             }
         }
@@ -3136,7 +3011,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int sel = (int)SendMessage(g_state.hComboEdgeMode, CB_GETCURSEL, 0, 0);
             if (sel >= 0 && sel <= 5) {
                 g_state.edgeMode = sel;
-                g_settings.effect_edge = sel;
                 SaveSettings();
             }
         }
@@ -3156,13 +3030,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         else if (id == ID_CHECK_AUTO_APPLY) {
             g_state.autoApply = (SendMessage(g_state.hCheckAutoApply, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            g_settings.live_preview = g_state.autoApply;
             SaveSettings();
         }
         else if (id == ID_BTN_CHANNEL_SETTINGS) {
             // Open integrated Channel Settings dialog
             ShowChannelSettingsDialog(hWnd);
-            g_channels.Load();  // Reload after dialog closes
+            g_config.Load();  // Reload after dialog closes
             AppendStatus(L"Channel corrections updated");
         }
         else if (id == ID_BTN_ASUS_TEST) {
