@@ -12,10 +12,23 @@
  * - Hotkey support
  */
 
+#define _CRT_SECURE_NO_WARNINGS
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
+#ifndef UNICODE
 #define UNICODE
+#endif
+#ifndef _UNICODE
 #define _UNICODE
+#endif
+
+#ifndef _WIN32_IE
+#define _WIN32_IE 0x0500
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+
 
 #include <windows.h>
 #include <windowsx.h>
@@ -26,18 +39,16 @@
 #include <iostream>
 #include <fstream>
 #include <iomanip>
-#include <sstream>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
 #include <string>
 #include <vector>
-#include <map>
 #include <thread>
 #include <atomic>
 #include <mutex>
-#include <algorithm>
 #include <objidl.h>
+#include <nlohmann/json.hpp>
 #include <gdiplus.h>
 #include <wtsapi32.h>
 #include <powrprof.h>
@@ -45,8 +56,176 @@
 #include <dwmapi.h>
 #include "hidapi.h"
 #include "channel_config.h"
-#include "modern_ui.h"
 #include "themes.h"
+#include "modern_ui.h"
+
+using json = nlohmann::json;
+
+#include <fstream>
+inline void LogDebug(const char* msg) {
+    std::ofstream f("debug.log", std::ios::app);
+    f << msg << std::endl;
+}
+
+//=============================================================================
+// SETTINGS-PERSISTENZ
+//=============================================================================
+
+struct AppSettings {
+    int window_x = -1;
+    int window_y = -1;
+    int window_width = 800;
+    int window_height = 600;
+    bool autostart_enabled = false;
+    bool minimize_to_tray = false;
+    bool apply_on_startup = true;
+    int last_brightness = 100;
+    int last_color = 255;
+    std::string last_profile = "";
+    std::string startup_profile = "";
+    bool show_notifications = true;
+    int scan_interval_ms = 5000;
+    bool start_minimized = false;
+    // Erweiterte Settings:
+    int red = 255;
+    int green = 255;
+    int blue = 255;
+    int effect_keyboard = 0; // 0=Static, 1=Breathing, ...
+    int effect_edge = 0;     // 0=Static, 1=Breathing, ...
+    int speed = 50;
+    bool live_preview = false;
+    // Pro-Kanal-Werte (z.B. für 8 Kanäle)
+    int channel_r[8] = {255,255,255,255,255,255,255,255};
+    int channel_g[8] = {255,255,255,255,255,255,255,255};
+    int channel_b[8] = {255,255,255,255,255,255,255,255};
+    bool channel_active[8] = {true,true,true,true,true,true,true,true};
+    // Weitere Felder nach Bedarf ...
+};
+
+// Definition of modern dark theme
+ModernTheme g_modernDark = {
+    // Backgrounds - deep dark with slight blue tint
+    Gdiplus::Color(255, 18, 18, 24),      // bgPrimary
+    Gdiplus::Color(255, 25, 25, 35),      // bgSecondary
+    Gdiplus::Color(255, 35, 35, 50),      // bgTertiary
+    Gdiplus::Color(200, 40, 40, 55),      // bgCard (semi-transparent)
+
+    // Accent - electric cyan/blue
+    Gdiplus::Color(255, 0, 200, 255),     // accent
+    Gdiplus::Color(255, 50, 220, 255),    // accentHover
+    Gdiplus::Color(100, 0, 200, 255),     // accentGlow
+
+    // Text
+    Gdiplus::Color(255, 240, 240, 245),   // textPrimary
+    Gdiplus::Color(255, 180, 180, 190),   // textSecondary
+    Gdiplus::Color(255, 100, 100, 120),   // textMuted
+
+    // Border & effects
+    Gdiplus::Color(255, 60, 60, 80),      // border
+    Gdiplus::Color(80, 0, 0, 0),          // shadow
+    Gdiplus::Color(60, 0, 200, 255),      // glow
+
+    // State
+    Gdiplus::Color(255, 0, 255, 136),     // success (neon green)
+    Gdiplus::Color(255, 255, 200, 0),     // warning
+    Gdiplus::Color(255, 255, 60, 100),    // error
+
+    true
+};
+
+ModernTheme* g_mTheme = &g_modernDark;
+
+AppSettings g_settings;
+
+std::wstring GetSettingsPath() {
+    wchar_t* appdata = nullptr;
+    if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, &appdata) != S_OK) {
+        return L"settings.json";
+    }
+    std::wstring path = appdata;
+    CoTaskMemFree(appdata);
+    path += L"\\OneClickRGB\\settings.json";
+    return path;
+}
+
+void LoadSettings() {
+    std::wstring path = GetSettingsPath();
+    std::ifstream f(path);
+    if (!f) return;
+    try {
+        json j;
+        f >> j;
+        if (j.contains("window")) {
+            g_settings.window_x = j["window"].value("x", -1);
+            g_settings.window_y = j["window"].value("y", -1);
+            g_settings.window_width = j["window"].value("width", 800);
+            g_settings.window_height = j["window"].value("height", 600);
+        }
+        g_settings.autostart_enabled = j.value("autostart_enabled", false);
+        g_settings.minimize_to_tray = j.value("minimize_to_tray", false);
+        g_settings.apply_on_startup = j.value("apply_on_startup", true);
+        g_settings.last_brightness = j.value("last_brightness", 100);
+        g_settings.last_color = j.value("last_color", 255);
+        g_settings.last_profile = j.value("last_profile", "");
+        g_settings.startup_profile = j.value("startup_profile", "");
+        g_settings.show_notifications = j.value("show_notifications", true);
+        g_settings.scan_interval_ms = j.value("scan_interval_ms", 5000);
+        g_settings.start_minimized = j.value("start_minimized", false);
+        // Erweiterte Settings:
+        g_settings.red = j.value("red", 255);
+        g_settings.green = j.value("green", 255);
+        g_settings.blue = j.value("blue", 255);
+        g_settings.effect_keyboard = j.value("effect_keyboard", 0);
+        g_settings.effect_edge = j.value("effect_edge", 0);
+        g_settings.speed = j.value("speed", 50);
+        g_settings.live_preview = j.value("live_preview", false);
+        if (j.contains("channel_r")) for (int i=0;i<8;++i) if (j["channel_r"].size()>i) g_settings.channel_r[i] = j["channel_r"][i].get<int>();
+        if (j.contains("channel_g")) for (int i=0;i<8;++i) if (j["channel_g"].size()>i) g_settings.channel_g[i] = j["channel_g"][i].get<int>();
+        if (j.contains("channel_b")) for (int i=0;i<8;++i) if (j["channel_b"].size()>i) g_settings.channel_b[i] = j["channel_b"][i].get<int>();
+        if (j.contains("channel_active")) for (int i=0;i<8;++i) if (j["channel_active"].size()>i) g_settings.channel_active[i] = j["channel_active"][i].get<bool>();
+    } catch (...) {}
+}
+
+void SaveSettings() {
+    std::wstring path = GetSettingsPath();
+    // Verzeichnis anlegen, falls nicht vorhanden
+    size_t pos = path.find_last_of(L"\\/");
+    if (pos != std::wstring::npos) {
+        std::wstring dir = path.substr(0, pos);
+        SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+    }
+    json j;
+    j["window"] = {
+        {"x", g_settings.window_x},
+        {"y", g_settings.window_y},
+        {"width", g_settings.window_width},
+        {"height", g_settings.window_height}
+    };
+    j["autostart_enabled"] = g_settings.autostart_enabled;
+    j["minimize_to_tray"] = g_settings.minimize_to_tray;
+    j["apply_on_startup"] = g_settings.apply_on_startup;
+    j["last_brightness"] = g_settings.last_brightness;
+    j["last_color"] = g_settings.last_color;
+    j["last_profile"] = g_settings.last_profile;
+    j["startup_profile"] = g_settings.startup_profile;
+    j["show_notifications"] = g_settings.show_notifications;
+    j["scan_interval_ms"] = g_settings.scan_interval_ms;
+    j["start_minimized"] = g_settings.start_minimized;
+    // Erweiterte Settings:
+    j["red"] = g_settings.red;
+    j["green"] = g_settings.green;
+    j["blue"] = g_settings.blue;
+    j["effect_keyboard"] = g_settings.effect_keyboard;
+    j["effect_edge"] = g_settings.effect_edge;
+    j["speed"] = g_settings.speed;
+    j["live_preview"] = g_settings.live_preview;
+    for (int i=0;i<8;++i) j["channel_r"][i] = g_settings.channel_r[i];
+    for (int i=0;i<8;++i) j["channel_g"][i] = g_settings.channel_g[i];
+    for (int i=0;i<8;++i) j["channel_b"][i] = g_settings.channel_b[i];
+    for (int i=0;i<8;++i) j["channel_active"][i] = g_settings.channel_active[i];
+    std::ofstream f(path);
+    if (f) f << std::setw(4) << j;
+}
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -57,6 +236,16 @@
 #pragma comment(lib, "powrprof.lib")
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "ole32.lib")
+
+// Forward declarations for Modern UI subclass procedures
+LRESULT CALLBACK SliderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
+LRESULT CALLBACK BtnCheckboxSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
+LRESULT CALLBACK ComboSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
+LRESULT CALLBACK StaticSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
+LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
+LRESULT CALLBACK ColorPreviewSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
+LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 
 //=============================================================================
 // CONSTANTS & LAYOUT
@@ -83,8 +272,8 @@
 #define MAX_BUTTON_W 80
 #define MAX_COMBO_W 160
 #define LABEL_W 70
-#define CHECKBOX_W 85
-#define SMALL_BTN_W 50
+#define CHECKBOX_W 105
+#define SMALL_BTN_W 85
 #define COLOR_BTN_W 48      // Minimum width for color preset buttons
 #define BTN_GAP 6           // Gap between buttons
 
@@ -161,53 +350,14 @@
 #define ID_BTN_ASUS_TEST 1111
 #define ID_BTN_HID_RESET 1112
 
-//=============================================================================
-// THEME SYSTEM
-//=============================================================================
-
-struct Theme {
-    COLORREF bgWindow;
-    COLORREF bgControl;
-    COLORREF bgButton;
-    COLORREF bgButtonHover;
-    COLORREF textPrimary;
-    COLORREF textSecondary;
-    COLORREF border;
-    COLORREF accent;
-    bool isDark;
-};
-
-Theme g_darkTheme = {
-    RGB(30, 30, 30),      // bgWindow
-    RGB(45, 45, 45),      // bgControl
-    RGB(60, 60, 60),      // bgButton
-    RGB(80, 80, 80),      // bgButtonHover
-    RGB(255, 255, 255),   // textPrimary
-    RGB(180, 180, 180),   // textSecondary
-    RGB(70, 70, 70),      // border
-    RGB(0, 120, 215),     // accent
-    true
-};
-
-Theme g_lightTheme = {
-    RGB(245, 245, 245),   // bgWindow
-    RGB(255, 255, 255),   // bgControl
-    RGB(225, 225, 225),   // bgButton
-    RGB(200, 200, 200),   // bgButtonHover
-    RGB(0, 0, 0),         // textPrimary
-    RGB(80, 80, 80),      // textSecondary
-    RGB(200, 200, 200),   // border
-    RGB(0, 120, 215),     // accent
-    false
-};
-
-Theme* g_theme = &g_darkTheme;
+// Removed struct Theme, g_darkTheme, g_lightTheme, and g_theme as part of theme consolidation
 HBRUSH g_hBgBrush = NULL;
 HBRUSH g_hCtrlBrush = NULL;
 HBRUSH g_hBtnBrush = NULL;
 
 // Trackbar background brush matching the dark theme
 HBRUSH g_hTrackbarBrush = NULL;
+ULONG_PTR g_gdiplusToken = 0;
 
 void InitTrackbarBrush() {
     if (!g_hTrackbarBrush) {
@@ -620,7 +770,8 @@ void SaveAppSettings() {
         file << "theme=" << GetThemeId() << "\n";  // 0=Dark, 1=Light, 2=Colorblind
         // Save last profile
         if (!g_state.lastProfile.empty()) {
-            std::string profileName(g_state.lastProfile.begin(), g_state.lastProfile.end());
+            std::string profileName;
+            for (wchar_t wc : g_state.lastProfile) profileName += static_cast<char>(wc);
             file << "lastProfile=" << profileName << "\n";
         }
         // Save window position
@@ -673,19 +824,28 @@ void LoadAppSettings() {
 }
 
 void AppendStatus(const wchar_t* text) {
-    std::lock_guard<std::mutex> lock(g_state.statusMutex);
-    g_state.statusLog += text;
-    g_state.statusLog += L"\r\n";
+    std::wstring currentText;
+    {
+        std::lock_guard<std::mutex> lock(g_state.statusMutex);
+        g_state.statusLog += text;
+        g_state.statusLog += L"\r\n";
+        currentText = g_state.statusLog;
+    }
+    
     if (g_state.hStatus) {
-        SetWindowTextW(g_state.hStatus, g_state.statusLog.c_str());
-        SendMessage(g_state.hStatus, EM_SETSEL, g_state.statusLog.length(), g_state.statusLog.length());
+        // Call UI functions without holding the lock to prevent deadlock
+        // when worker threads update the log while UI thread is busy.
+        SetWindowTextW(g_state.hStatus, currentText.c_str());
+        SendMessage(g_state.hStatus, EM_SETSEL, currentText.length(), currentText.length());
         SendMessage(g_state.hStatus, EM_SCROLLCARET, 0, 0);
     }
 }
 
 void ClearStatus() {
-    std::lock_guard<std::mutex> lock(g_state.statusMutex);
-    g_state.statusLog.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_state.statusMutex);
+        g_state.statusLog.clear();
+    }
     if (g_state.hStatus) SetWindowTextW(g_state.hStatus, L"");
 }
 
@@ -1764,6 +1924,256 @@ void ApplyColors() {
 }
 
 //=============================================================================
+// UI HELPER FUNCTIONS (moved from top of file)
+//=============================================================================
+
+// Oeffnet einen Farbauswahldialog und uebernimmt die gewaehlte Farbe in die UI
+void PickColor() {
+    CHOOSECOLORW cc = {0};
+    static COLORREF customColors[16] = {0};
+    cc.lStructSize = sizeof(cc);
+    cc.hwndOwner = g_state.hWnd;
+    COLORREF rgb = RGB(g_state.red, g_state.green, g_state.blue);
+    cc.rgbResult = rgb;
+    cc.lpCustColors = customColors;
+    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+    if (ChooseColorW(&cc)) {
+        g_state.red = GetRValue(cc.rgbResult);
+        g_state.green = GetGValue(cc.rgbResult);
+        g_state.blue = GetBValue(cc.rgbResult);
+        UpdateSliders();
+        UpdatePreview();
+        if (g_state.hEditHex) {
+            wchar_t hex[10];
+            swprintf(hex, 10, L"#%02X%02X%02X", g_state.red, g_state.green, g_state.blue);
+            SetWindowTextW(g_state.hEditHex, hex);
+        }
+    }
+}
+
+// Parst einen Hex-String wie #RRGGBB und setzt die Farbe
+void ParseHexColor(const wchar_t* hex) {
+    if (!hex) return;
+    int r=0, g=0, b=0;
+    if (wcslen(hex) == 7 && hex[0] == L'#') {
+        swscanf(hex+1, L"%02x%02x%02x", &r, &g, &b);
+    } else if (wcslen(hex) == 6) {
+        swscanf(hex, L"%02x%02x%02x", &r, &g, &b);
+    } else {
+        return;
+    }
+    g_state.red = (uint8_t)r;
+    g_state.green = (uint8_t)g;
+    g_state.blue = (uint8_t)b;
+    UpdateSliders();
+    UpdatePreview();
+}
+
+// Aktualisiert die Farbvorschau in der UI
+void UpdatePreview() {
+    if (g_state.hPreview) {
+        InvalidateRect(g_state.hPreview, NULL, TRUE);
+    }
+    // Update modern color preview
+    g_colorPreview.r = g_state.red;
+    g_colorPreview.g = g_state.green;
+    g_colorPreview.b = g_state.blue;
+}
+
+// Setzt die Slider-Positionen auf die aktuellen RGB-Werte
+void UpdateSliders() {
+    if (g_state.hSliderR) SendMessage(g_state.hSliderR, TBM_SETPOS, TRUE, g_state.red);
+    if (g_state.hSliderG) SendMessage(g_state.hSliderG, TBM_SETPOS, TRUE, g_state.green);
+    if (g_state.hSliderB) SendMessage(g_state.hSliderB, TBM_SETPOS, TRUE, g_state.blue);
+    if (g_state.hLabelRVal) {
+        wchar_t buf[8]; swprintf(buf, 8, L"%d", g_state.red);
+        SetWindowTextW(g_state.hLabelRVal, buf);
+    }
+    if (g_state.hLabelGVal) {
+        wchar_t buf[8]; swprintf(buf, 8, L"%d", g_state.green);
+        SetWindowTextW(g_state.hLabelGVal, buf);
+    }
+    if (g_state.hLabelBVal) {
+        wchar_t buf[8]; swprintf(buf, 8, L"%d", g_state.blue);
+        SetWindowTextW(g_state.hLabelBVal, buf);
+    }
+}
+
+//=============================================================================
+// PRESET & UI UPDATE FUNCTIONS
+//=============================================================================
+
+void SetPresetColor(int r, int g, int b) {
+    g_state.red = (uint8_t)r;
+    g_state.green = (uint8_t)g;
+    g_state.blue = (uint8_t)b;
+    UpdateSliders();
+    UpdatePreview();
+    if (g_state.hEditHex) {
+        wchar_t hex[10];
+        swprintf(hex, 10, L"#%02X%02X%02X", r, g, b);
+        SetWindowTextW(g_state.hEditHex, hex);
+    }
+    // Save to settings
+    g_settings.red = r;
+    g_settings.green = g;
+    g_settings.blue = b;
+    SaveSettings();
+    if (g_state.autoApply) {
+        std::thread(ApplyColors).detach();
+    }
+}
+
+void UpdateAllControls() {
+    UpdateSliders();
+    UpdatePreview();
+    if (g_state.hEditHex) {
+        wchar_t hex[10];
+        swprintf(hex, 10, L"#%02X%02X%02X", g_state.red, g_state.green, g_state.blue);
+        SetWindowTextW(g_state.hEditHex, hex);
+    }
+    if (g_state.hCheckAura) SendMessage(g_state.hCheckAura, BM_SETCHECK, g_state.enableAura ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_state.hCheckMouse) SendMessage(g_state.hCheckMouse, BM_SETCHECK, g_state.enableMouse ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_state.hCheckKeyboard) SendMessage(g_state.hCheckKeyboard, BM_SETCHECK, g_state.enableKeyboard ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_state.hCheckRAM) SendMessage(g_state.hCheckRAM, BM_SETCHECK, g_state.enableRAM ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_state.hCheckEdge) SendMessage(g_state.hCheckEdge, BM_SETCHECK, g_state.enableEdge ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_state.hCheckAutostart) SendMessage(g_state.hCheckAutostart, BM_SETCHECK, g_state.autostart ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_state.hCheckMinimizeTray) SendMessage(g_state.hCheckMinimizeTray, BM_SETCHECK, g_state.minimizeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_state.hCheckAutoApply) SendMessage(g_state.hCheckAutoApply, BM_SETCHECK, g_state.autoApply ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_state.hSliderBrightness) SendMessage(g_state.hSliderBrightness, TBM_SETPOS, TRUE, g_state.brightness);
+    if (g_state.hSliderSpeed) SendMessage(g_state.hSliderSpeed, TBM_SETPOS, TRUE, g_state.speed);
+    if (g_state.hComboEdgeMode) SendMessage(g_state.hComboEdgeMode, CB_SETCURSEL, g_state.edgeMode, 0);
+}
+
+//=============================================================================
+// TRAY ICON FUNCTIONS
+//=============================================================================
+
+void MinimizeToTray() {
+    NOTIFYICONDATAW& nid = g_state.nid;
+    memset(&nid, 0, sizeof(nid));
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_state.hWnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAYICON;
+    nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(101));
+    wcscpy_s(nid.szTip, APP_NAME);
+    Shell_NotifyIconW(NIM_ADD, &nid);
+    ShowWindow(g_state.hWnd, SW_HIDE);
+    g_state.minimizedToTray = true;
+}
+
+void RestoreFromTray() {
+    ShowWindow(g_state.hWnd, SW_SHOW);
+    SetForegroundWindow(g_state.hWnd);
+    g_state.minimizedToTray = false;
+}
+
+void RemoveTrayIcon() {
+    Shell_NotifyIconW(NIM_DELETE, &g_state.nid);
+}
+
+void ShowTrayMenu(HWND hWnd) {
+    POINT pt;
+    GetCursorPos(&pt);
+    HMENU hMenu = CreatePopupMenu();
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"Show");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_BLUE, L"Blue");
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_RED, L"Red");
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_GREEN, L"Green");
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_WHITE, L"White");
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_OFF, L"Off");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_STANDBY, L"Standby");
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHUTDOWN, L"Shutdown");
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_RESTART, L"Restart");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Exit");
+    SetForegroundWindow(hWnd);
+    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
+    DestroyMenu(hMenu);
+}
+
+//=============================================================================
+// CHANNEL SETTINGS DIALOG
+//=============================================================================
+
+INT_PTR CALLBACK ChannelSettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_INITDIALOG: {
+        SetWindowTextW(hDlg, g_str->csTitle);
+        // Create channel correction controls
+        int y = 30;
+        for (int i = 0; i < 8; i++) {
+            wchar_t label[64];
+            swprintf(label, 64, L"ASUS Ch %d", i);
+            CreateWindowW(L"STATIC", label, WS_CHILD | WS_VISIBLE, 10, y, 100, 20, hDlg, NULL, NULL, NULL);
+
+            CreateWindowW(L"STATIC", L"R:", WS_CHILD | WS_VISIBLE, 115, y, 15, 20, hDlg, NULL, NULL, NULL);
+            HWND hR = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+                130, y-2, 80, 25, hDlg, (HMENU)(INT_PTR)(7000 + i*3), NULL, NULL);
+            SendMessage(hR, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
+            SendMessage(hR, TBM_SETPOS, TRUE, g_channels.aura_channels[i].red_adjust);
+
+            CreateWindowW(L"STATIC", L"G:", WS_CHILD | WS_VISIBLE, 215, y, 15, 20, hDlg, NULL, NULL, NULL);
+            HWND hG = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+                230, y-2, 80, 25, hDlg, (HMENU)(INT_PTR)(7001 + i*3), NULL, NULL);
+            SendMessage(hG, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
+            SendMessage(hG, TBM_SETPOS, TRUE, g_channels.aura_channels[i].green_adjust);
+
+            CreateWindowW(L"STATIC", L"B:", WS_CHILD | WS_VISIBLE, 315, y, 15, 20, hDlg, NULL, NULL, NULL);
+            HWND hB = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+                330, y-2, 80, 25, hDlg, (HMENU)(INT_PTR)(7002 + i*3), NULL, NULL);
+            SendMessage(hB, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
+            SendMessage(hB, TBM_SETPOS, TRUE, g_channels.aura_channels[i].blue_adjust);
+            y += 30;
+        }
+        CreateWindowW(L"STATIC", g_str->csHint, WS_CHILD | WS_VISIBLE, 10, y+5, 400, 20, hDlg, NULL, NULL, NULL);
+        CreateWindowW(L"BUTTON", g_str->csSaveClose, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            10, y+30, 120, 28, hDlg, (HMENU)IDOK, NULL, NULL);
+        CreateWindowW(L"BUTTON", g_str->csResetAll, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            140, y+30, 100, 28, hDlg, (HMENU)IDRETRY, NULL, NULL);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK) {
+            for (int i = 0; i < 8; i++) {
+                g_channels.aura_channels[i].red_adjust = (int)SendDlgItemMessage(hDlg, 7000+i*3, TBM_GETPOS, 0, 0);
+                g_channels.aura_channels[i].green_adjust = (int)SendDlgItemMessage(hDlg, 7001+i*3, TBM_GETPOS, 0, 0);
+                g_channels.aura_channels[i].blue_adjust = (int)SendDlgItemMessage(hDlg, 7002+i*3, TBM_GETPOS, 0, 0);
+            }
+            g_channels.Save();
+            EndDialog(hDlg, IDOK);
+        } else if (LOWORD(wParam) == IDRETRY) {
+            for (int i = 0; i < 8; i++) {
+                g_channels.aura_channels[i].red_adjust = 100;
+                g_channels.aura_channels[i].green_adjust = 100;
+                g_channels.aura_channels[i].blue_adjust = 100;
+                SendDlgItemMessage(hDlg, 7000+i*3, TBM_SETPOS, TRUE, 100);
+                SendDlgItemMessage(hDlg, 7001+i*3, TBM_SETPOS, TRUE, 100);
+                SendDlgItemMessage(hDlg, 7002+i*3, TBM_SETPOS, TRUE, 100);
+            }
+        }
+        break;
+    case WM_CLOSE:
+        EndDialog(hDlg, IDCANCEL);
+        break;
+    }
+    return FALSE;
+}
+
+void ShowChannelSettingsDialog(HWND hWnd) {
+    // Create a dialog template in memory
+    BYTE dlgTemplate[512] = {0};
+    DLGTEMPLATE* pDlg = (DLGTEMPLATE*)dlgTemplate;
+    pDlg->style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
+    pDlg->cx = 230; pDlg->cy = 200;
+    DialogBoxIndirectW(GetModuleHandle(NULL), pDlg, hWnd, ChannelSettingsDlgProc);
+}
+
+//=============================================================================
 // ASUS AURA TEST DIALOG - Visual channel testing with live feedback
 //=============================================================================
 
@@ -2045,100 +2455,38 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 
     case WM_COMMAND: {
         int id = LOWORD(wParam);
-        int numCh = g_asusTest ? g_asusTest->numChannels : 3;
-
-        // Checkbox changed
-        if (id >= ID_ASUS_CH_CHECK_BASE && id < ID_ASUS_CH_CHECK_BASE + numCh) {
-            int ch = id - ID_ASUS_CH_CHECK_BASE;
-            g_asusTest->channelActive[ch] = (SendMessage(g_asusTest->hCheckBox[ch], BM_GETCHECK, 0, 0) == BST_CHECKED);
-            g_channels.aura_channels[ch].enabled = g_asusTest->channelActive[ch];
-
-            // Apply immediately if enabled
-            if (g_asusTest->channelActive[ch]) {
-                TestAsusChannel(ch, g_asusTest->channelR[ch],
-                               g_asusTest->channelG[ch],
-                               g_asusTest->channelB[ch]);
+        // Handle channel checkboxes
+        for (int i = 0; i < g_asusTest->numChannels; i++) {
+            if (id == ID_ASUS_CH_CHECK_BASE + i) {
+                g_asusTest->channelActive[i] = (SendMessage(g_asusTest->hCheckBox[i], BM_GETCHECK, 0, 0) == BST_CHECKED);
+                break;
             }
-
-            wchar_t buf[64];
-            swprintf(buf, 64, L"Kanal %d %s", ch, g_asusTest->channelActive[ch] ? L"aktiv" : L"aus");
-            SetWindowTextW(g_asusTest->hStatus, buf);
         }
-        else if (id == ID_ASUS_TEST_ALL) {
-            hid_init();
-            hid_device* dev = OpenAsusAura();
-            if (dev) {
-                int count = 0;
-
-                for (int i = 0; i < numCh; i++) {
-                    if (g_asusTest->channelActive[i]) {
-                        int leds = 120;
-                        int directCh = i;
-                        if (g_asusHwConfig.valid && i < g_asusHwConfig.numChannels) {
-                            leds = g_asusHwConfig.channels[i].ledCount;
-                            directCh = g_asusHwConfig.channels[i].directChannel;
-                        }
-                        SetAsusChannel(dev, directCh, leds,
-                                      g_asusTest->channelR[i],
-                                      g_asusTest->channelG[i],
-                                      g_asusTest->channelB[i]);
-                        count++;
-                    }
+        if (id == ID_ASUS_TEST_ALL) {
+            for (int i = 0; i < g_asusTest->numChannels; i++) {
+                if (g_asusTest->channelActive[i]) {
+                    TestAsusChannel(i, g_asusTest->channelR[i], g_asusTest->channelG[i], g_asusTest->channelB[i]);
                 }
-
-                hid_close(dev);
-                wchar_t buf[64];
-                swprintf(buf, 64, L"%d Kan\x00E4le angewendet", count);
-                SetWindowTextW(g_asusTest->hStatus, buf);
-            } else {
-                SetWindowTextW(g_asusTest->hStatus, L"Ger\x00E4t nicht gefunden");
             }
-            hid_exit();
+            SetWindowTextW(g_asusTest->hStatus, L"Alle Kanaele angewendet");
         }
         else if (id == ID_ASUS_RESET) {
-            hid_init();
-            hid_device* dev = OpenAsusAura();
-            if (dev) {
-                for (int i = 0; i < numCh; i++) {
-                    int leds = 120;
-                    int directCh = i;
-                    if (g_asusHwConfig.valid && i < g_asusHwConfig.numChannels) {
-                        leds = g_asusHwConfig.channels[i].ledCount;
-                        directCh = g_asusHwConfig.channels[i].directChannel;
-                    }
-                    SetAsusChannel(dev, directCh, leds, 0, 0, 0);
-                    g_asusTest->channelR[i] = 0;
-                    g_asusTest->channelG[i] = 0;
-                    g_asusTest->channelB[i] = 0;
-                    SendMessage(g_asusTest->hSliderR[i], TBM_SETPOS, TRUE, 0);
-                    SendMessage(g_asusTest->hSliderG[i], TBM_SETPOS, TRUE, 0);
-                    SendMessage(g_asusTest->hSliderB[i], TBM_SETPOS, TRUE, 0);
-                    SetWindowTextW(g_asusTest->hLabelR[i], L"0");
-                    SetWindowTextW(g_asusTest->hLabelG[i], L"0");
-                    SetWindowTextW(g_asusTest->hLabelB[i], L"0");
-                    InvalidateRect(g_asusTest->hColorPreview[i], NULL, TRUE);
-                }
-                hid_close(dev);
-                SetWindowTextW(g_asusTest->hStatus, L"Alle Kan\x00E4le aus");
+            for (int i = 0; i < g_asusTest->numChannels; i++) {
+                TestAsusChannel(i, 0, 0, 0);
             }
-            hid_exit();
+            SetWindowTextW(g_asusTest->hStatus, L"Alle Kanaele ausgeschaltet");
         }
-        else if (id == ID_ASUS_CLOSE || id == IDCANCEL) {
-            // Save channel colors and states to hardware config
-            for (int i = 0; i < numCh; i++) {
-                if (g_asusHwConfig.valid && i < g_asusHwConfig.numChannels) {
+        else if (id == ID_ASUS_CLOSE) {
+            // Save colors back to hardware config
+            if (g_asusHwConfig.valid) {
+                for (int i = 0; i < g_asusTest->numChannels && i < g_asusHwConfig.numChannels; i++) {
                     g_asusHwConfig.channels[i].colorR = g_asusTest->channelR[i];
                     g_asusHwConfig.channels[i].colorG = g_asusTest->channelG[i];
                     g_asusHwConfig.channels[i].colorB = g_asusTest->channelB[i];
                     g_asusHwConfig.channels[i].enabled = g_asusTest->channelActive[i];
                 }
-                g_channels.aura_channels[i].enabled = g_asusTest->channelActive[i];
+                SaveAsusHardwareConfig();
             }
-            SaveAsusHardwareConfig();
-            g_channels.Save();
-
-            delete g_asusTest;
-            g_asusTest = nullptr;
             EndDialog(hWnd, IDOK);
         }
         break;
@@ -2147,2027 +2495,545 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
     case WM_TIMER:
         if (wParam == ID_TIMER_DEBOUNCE) {
             KillTimer(hWnd, ID_TIMER_DEBOUNCE);
-            // Apply pending channel change
+            // Apply the pending channel
+            static int s_lastChannel = -1;
             for (int ch = 0; ch < g_asusTest->numChannels; ch++) {
                 if (g_asusTest->channelActive[ch]) {
-                    TestAsusChannel(ch, g_asusTest->channelR[ch],
-                                   g_asusTest->channelG[ch],
-                                   g_asusTest->channelB[ch]);
+                    TestAsusChannel(ch, g_asusTest->channelR[ch], g_asusTest->channelG[ch], g_asusTest->channelB[ch]);
                 }
             }
         }
         break;
 
     case WM_CLOSE:
-        SendMessage(hWnd, WM_COMMAND, ID_ASUS_CLOSE, 0);
-        return TRUE;
-    }
+        EndDialog(hWnd, IDCANCEL);
+        break;
 
+    case WM_DESTROY:
+        if (g_asusTest) { delete g_asusTest; g_asusTest = nullptr; }
+        break;
+    }
     return FALSE;
 }
 
-void ShowAsusTestDialog(HWND hParent) {
-    // Calculate dialog height based on number of channels
+void ShowAsusTestDialog(HWND hWnd) {
+    // Calculate dialog size based on number of channels
     int numCh = g_asusHwConfig.valid ? g_asusHwConfig.numChannels : 3;
     if (numCh > 8) numCh = 8;
     if (numCh < 1) numCh = 1;
+    int dlgHeight = 35 + numCh * 105 + 80;
 
-    // Height: ~70 dialog units per channel + 50 for header/buttons
-    int dlgHeight = 50 + numCh * 55;
-
-    struct {
-        DLGTEMPLATE tmpl;
-        WORD menu;
-        WORD wndClass;
-        WCHAR title[32];
-    } dlgData = {};
-
-    dlgData.tmpl.style = DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER;
-    dlgData.tmpl.cx = 260;  // Dialog units - wider for RGB sliders
-    dlgData.tmpl.cy = dlgHeight;
-    dlgData.menu = 0;
-    dlgData.wndClass = 0;
-    wcscpy_s(dlgData.title, L"ASUS Aura Kanalsteuerung");
-
-    DialogBoxIndirectW(GetModuleHandle(NULL), &dlgData.tmpl, hParent, AsusTestDlgProc);
-}
-
-//=============================================================================
-// CHANNEL SETTINGS DIALOG (integrated)
-//=============================================================================
-
-#define ID_CS_TAB 5000
-#define ID_CS_SAVE 5001
-#define ID_CS_RESET 5002
-#define ID_CS_SLIDER_BASE 5100
-#define ID_CS_CHECK_BASE 5200
-
-struct ChannelDialogData {
-    HWND hTab;
-    int currentTab;
-    struct ControlRow {
-        HWND hCheck;
-        HWND hSliderR, hSliderG, hSliderB, hSliderBright;
-        HWND hLabelR, hLabelG, hLabelB, hLabelBright;
-    };
-    std::vector<ControlRow> controls;
-};
-
-ChannelDialogData* g_csDlg = nullptr;
-
-void UpdateChannelSliderLabel(int index) {
-    if (!g_csDlg || index >= (int)g_csDlg->controls.size()) return;
-
-    ChannelConfig* cfg = nullptr;
-    if (g_csDlg->currentTab == 0 && index < 8) cfg = &g_channels.aura_channels[index];
-    else if (g_csDlg->currentTab == 1 && index < 4) cfg = &g_channels.ram_modules[index];
-    else if (g_csDlg->currentTab == 2) {
-        if (index == 0) cfg = &g_channels.steelseries;
-        else if (index == 1) cfg = &g_channels.keyboard;
-        else if (index == 2) cfg = &g_channels.edge;
-    }
-    if (!cfg) return;
-
-    wchar_t buf[16];
-    swprintf(buf, 16, L"%d%%", cfg->red_adjust);
-    SetWindowTextW(g_csDlg->controls[index].hLabelR, buf);
-    swprintf(buf, 16, L"%d%%", cfg->green_adjust);
-    SetWindowTextW(g_csDlg->controls[index].hLabelG, buf);
-    swprintf(buf, 16, L"%d%%", cfg->blue_adjust);
-    SetWindowTextW(g_csDlg->controls[index].hLabelB, buf);
-    swprintf(buf, 16, L"%d%%", cfg->brightness);
-    SetWindowTextW(g_csDlg->controls[index].hLabelBright, buf);
-}
-
-void CreateChannelRowInDialog(HWND hWnd, int index, int y, const wchar_t* name, ChannelConfig* cfg) {
-    ChannelDialogData::ControlRow ctrl = {};
-
-    ctrl.hCheck = CreateWindowW(L"BUTTON", name,
-        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        15, y, 110, 20, hWnd, (HMENU)(INT_PTR)(ID_CS_CHECK_BASE + index), NULL, NULL);
-    SendMessage(ctrl.hCheck, BM_SETCHECK, cfg->enabled ? BST_CHECKED : BST_UNCHECKED, 0);
-
-    CreateWindowW(L"STATIC", L"R:", WS_CHILD | WS_VISIBLE, 130, y + 2, 15, 18, hWnd, NULL, NULL, NULL);
-    ctrl.hSliderR = CreateWindowW(TRACKBAR_CLASSW, L"",
-        WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-        145, y, 80, 22, hWnd, (HMENU)(INT_PTR)(ID_CS_SLIDER_BASE + index * 10 + 0), NULL, NULL);
-    SendMessage(ctrl.hSliderR, TBM_SETRANGE, TRUE, MAKELONG(0, 200));
-    SendMessage(ctrl.hSliderR, TBM_SETPOS, TRUE, cfg->red_adjust);
-        ctrl.hLabelR = CreateWindowW(L"STATIC", L"100%", WS_CHILD | WS_VISIBLE, 225, y + 2, 35, 18, hWnd, NULL, NULL, NULL);
-
-    CreateWindowW(L"STATIC", L"G:", WS_CHILD | WS_VISIBLE, 265, y + 2, 15, 18, hWnd, NULL, NULL, NULL);
-    ctrl.hSliderG = CreateWindowW(TRACKBAR_CLASSW, L"",
-        WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-        280, y, 80, 22, hWnd, (HMENU)(INT_PTR)(ID_CS_SLIDER_BASE + index * 10 + 1), NULL, NULL);
-    SendMessage(ctrl.hSliderG, TBM_SETRANGE, TRUE, MAKELONG(0, 200));
-    SendMessage(ctrl.hSliderG, TBM_SETPOS, TRUE, cfg->green_adjust);
-        ctrl.hLabelG = CreateWindowW(L"STATIC", L"100%", WS_CHILD | WS_VISIBLE, 360, y + 2, 35, 18, hWnd, NULL, NULL, NULL);
-
-    CreateWindowW(L"STATIC", L"B:", WS_CHILD | WS_VISIBLE, 400, y + 2, 15, 18, hWnd, NULL, NULL, NULL);
-    ctrl.hSliderB = CreateWindowW(TRACKBAR_CLASSW, L"",
-        WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-        415, y, 80, 22, hWnd, (HMENU)(INT_PTR)(ID_CS_SLIDER_BASE + index * 10 + 2), NULL, NULL);
-    SendMessage(ctrl.hSliderB, TBM_SETRANGE, TRUE, MAKELONG(0, 200));
-    SendMessage(ctrl.hSliderB, TBM_SETPOS, TRUE, cfg->blue_adjust);
-        ctrl.hLabelB = CreateWindowW(L"STATIC", L"100%", WS_CHILD | WS_VISIBLE, 495, y + 2, 35, 18, hWnd, NULL, NULL, NULL);
-
-    CreateWindowW(L"STATIC", L"Bright:", WS_CHILD | WS_VISIBLE, 535, y + 2, 40, 18, hWnd, NULL, NULL, NULL);
-    ctrl.hSliderBright = CreateWindowW(TRACKBAR_CLASSW, L"",
-        WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-        575, y, 70, 22, hWnd, (HMENU)(INT_PTR)(ID_CS_SLIDER_BASE + index * 10 + 3), NULL, NULL);
-    SendMessage(ctrl.hSliderBright, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
-    SendMessage(ctrl.hSliderBright, TBM_SETPOS, TRUE, cfg->brightness);
-        ctrl.hLabelBright = CreateWindowW(L"STATIC", L"100%", WS_CHILD | WS_VISIBLE, 645, y + 2, 35, 18, hWnd, NULL, NULL, NULL);
-
-    g_csDlg->controls.push_back(ctrl);
-    UpdateChannelSliderLabel(index);
-}
-
-void ClearChannelControls() {
-    if (!g_csDlg) return;
-    for (auto& ctrl : g_csDlg->controls) {
-        DestroyWindow(ctrl.hCheck);
-        DestroyWindow(ctrl.hSliderR);
-        DestroyWindow(ctrl.hSliderG);
-        DestroyWindow(ctrl.hSliderB);
-        DestroyWindow(ctrl.hSliderBright);
-        DestroyWindow(ctrl.hLabelR);
-        DestroyWindow(ctrl.hLabelG);
-        DestroyWindow(ctrl.hLabelB);
-        DestroyWindow(ctrl.hLabelBright);
-    }
-    g_csDlg->controls.clear();
-}
-
-void CreateChannelTabContent(HWND hWnd, int tab) {
-    ClearChannelControls();
-    int y = 70;
-
-    if (tab == 0) {
-        for (int i = 0; i < 8; i++) {
-            wchar_t name[32];
-            swprintf(name, 32, L"ASUS Ch %d", i);
-            CreateChannelRowInDialog(hWnd, i, y, name, &g_channels.aura_channels[i]);
-            y += 28;
-        }
-    } else if (tab == 1) {
-        const wchar_t* names[] = {L"RAM Slot 0", L"RAM Slot 1", L"RAM Slot 2", L"RAM Slot 3"};
-        for (int i = 0; i < 4; i++) {
-            CreateChannelRowInDialog(hWnd, i, y, names[i], &g_channels.ram_modules[i]);
-            y += 28;
-        }
-    } else if (tab == 2) {
-        CreateChannelRowInDialog(hWnd, 0, y, L"SteelSeries", &g_channels.steelseries); y += 28;
-        CreateChannelRowInDialog(hWnd, 1, y, L"Keyboard", &g_channels.keyboard); y += 28;
-        CreateChannelRowInDialog(hWnd, 2, y, L"Edge LEDs", &g_channels.edge);
-    }
-}
-
-INT_PTR CALLBACK ChannelSettingsDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-    case WM_INITDIALOG: {
-        g_csDlg = new ChannelDialogData();
-        g_csDlg->currentTab = 0;
-
-        g_csDlg->hTab = CreateWindowW(WC_TABCONTROLW, L"",
-            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-            10, 10, 680, 28, hWnd, (HMENU)ID_CS_TAB, NULL, NULL);
-
-        TCITEMW tie = {};
-        tie.mask = TCIF_TEXT;
-        tie.pszText = (LPWSTR)L"ASUS Aura (8)";
-        SendMessage(g_csDlg->hTab, TCM_INSERTITEM, 0, (LPARAM)&tie);
-        tie.pszText = (LPWSTR)L"RAM (4)";
-        SendMessage(g_csDlg->hTab, TCM_INSERTITEM, 1, (LPARAM)&tie);
-        tie.pszText = (LPWSTR)L"Other";
-        SendMessage(g_csDlg->hTab, TCM_INSERTITEM, 2, (LPARAM)&tie);
-
-        CreateWindowW(L"STATIC", g_str->csHint,
-            WS_CHILD | WS_VISIBLE, 15, 45, 400, 18, hWnd, NULL, NULL, NULL);
-
-        CreateChannelTabContent(hWnd, 0);
-
-        CreateWindowW(L"BUTTON", g_str->csSaveClose,
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            200, 320, 120, 30, hWnd, (HMENU)ID_CS_SAVE, NULL, NULL);
-        CreateWindowW(L"BUTTON", g_str->csResetAll,
-            WS_CHILD | WS_VISIBLE,
-            340, 320, 100, 30, hWnd, (HMENU)ID_CS_RESET, NULL, NULL);
-
-        return TRUE;
-    }
-
-    case WM_NOTIFY: {
-        NMHDR* nmhdr = (NMHDR*)lParam;
-        if (nmhdr->code == TCN_SELCHANGE && nmhdr->hwndFrom == g_csDlg->hTab) {
-            g_csDlg->currentTab = TabCtrl_GetCurSel(g_csDlg->hTab);
-            CreateChannelTabContent(hWnd, g_csDlg->currentTab);
-        }
-        break;
-    }
-
-    case WM_HSCROLL: {
-        HWND slider = (HWND)lParam;
-        int pos = (int)SendMessage(slider, TBM_GETPOS, 0, 0);
-        int id = GetDlgCtrlID(slider);
-
-        if (id >= ID_CS_SLIDER_BASE) {
-            int index = (id - ID_CS_SLIDER_BASE) / 10;
-            int component = (id - ID_CS_SLIDER_BASE) % 10;
-
-            ChannelConfig* cfg = nullptr;
-            if (g_csDlg->currentTab == 0 && index < 8) cfg = &g_channels.aura_channels[index];
-            else if (g_csDlg->currentTab == 1 && index < 4) cfg = &g_channels.ram_modules[index];
-            else if (g_csDlg->currentTab == 2) {
-                if (index == 0) cfg = &g_channels.steelseries;
-                else if (index == 1) cfg = &g_channels.keyboard;
-                else if (index == 2) cfg = &g_channels.edge;
-            }
-
-            if (cfg) {
-                switch (component) {
-                    case 0: cfg->red_adjust = pos; break;
-                    case 1: cfg->green_adjust = pos; break;
-                    case 2: cfg->blue_adjust = pos; break;
-                    case 3: cfg->brightness = pos; break;
-                }
-                UpdateChannelSliderLabel(index);
-
-                // Live update with debouncing (150ms delay)
-                if (g_csDlg->currentTab == 0) {
-                    KillTimer(hWnd, ID_TIMER_DEBOUNCE);
-                    SetTimer(hWnd, ID_TIMER_DEBOUNCE, 150, NULL);
-                }
-            }
-        }
-        break;
-    }
-
-    case WM_TIMER:
-        if (wParam == ID_TIMER_DEBOUNCE) {
-            KillTimer(hWnd, ID_TIMER_DEBOUNCE);
-            if (g_csDlg && g_csDlg->currentTab == 0) {
-                SetAsusAuraQuick(g_state.red, g_state.green, g_state.blue);
-            }
-        }
-        break;
-
-    case WM_COMMAND: {
-        int id = LOWORD(wParam);
-
-        if (id >= ID_CS_CHECK_BASE && id < ID_CS_CHECK_BASE + 20) {
-            int index = id - ID_CS_CHECK_BASE;
-            bool checked = (SendMessage((HWND)lParam, BM_GETCHECK, 0, 0) == BST_CHECKED);
-
-            ChannelConfig* cfg = nullptr;
-            if (g_csDlg->currentTab == 0 && index < 8) cfg = &g_channels.aura_channels[index];
-            else if (g_csDlg->currentTab == 1 && index < 4) cfg = &g_channels.ram_modules[index];
-            else if (g_csDlg->currentTab == 2) {
-                if (index == 0) cfg = &g_channels.steelseries;
-                else if (index == 1) cfg = &g_channels.keyboard;
-                else if (index == 2) cfg = &g_channels.edge;
-            }
-            if (cfg) {
-                cfg->enabled = checked;
-                // Live update on checkbox change
-                if (g_csDlg->currentTab == 0) {
-                    SetAsusAuraQuick(g_state.red, g_state.green, g_state.blue);
-                }
-            }
-        }
-        else if (id == ID_CS_SAVE) {
-            g_channels.Save();
-            ClearChannelControls();
-            delete g_csDlg;
-            g_csDlg = nullptr;
-            EndDialog(hWnd, IDOK);
-        }
-        else if (id == ID_CS_RESET) {
-            for (int i = 0; i < 8; i++) {
-                g_channels.aura_channels[i] = ChannelConfig();
-                g_channels.aura_channels[i].name = "ASUS Channel " + std::to_string(i);
-            }
-            for (int i = 0; i < 4; i++) {
-                g_channels.ram_modules[i] = ChannelConfig();
-                g_channels.ram_modules[i].name = "RAM Slot " + std::to_string(i);
-            }
-            g_channels.steelseries = ChannelConfig();
-            g_channels.keyboard = ChannelConfig();
-            g_channels.edge = ChannelConfig();
-            CreateChannelTabContent(hWnd, g_csDlg->currentTab);
-        }
-        else if (id == IDCANCEL) {
-            ClearChannelControls();
-            delete g_csDlg;
-            g_csDlg = nullptr;
-            EndDialog(hWnd, IDCANCEL);
-        }
-        break;
-    }
-
-    case WM_CLOSE:
-        ClearChannelControls();
-        delete g_csDlg;
-        g_csDlg = nullptr;
-        EndDialog(hWnd, IDCANCEL);
-        return TRUE;
-    }
-    return FALSE;
-}
-
-void ShowChannelSettingsDialog(HWND hParent) {
     // Create dialog template in memory
-    DLGTEMPLATE dlg = {};
-    dlg.style = DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER;
-    dlg.dwExtendedStyle = 0;
-    dlg.cdit = 0;
-    dlg.x = 0; dlg.y = 0;
-    dlg.cx = 350; dlg.cy = 190;  // Dialog units
-
-    // We need to build a proper dialog template with title
-    struct {
-        DLGTEMPLATE tmpl;
-        WORD menu;
-        WORD wndClass;
-        WCHAR title[32];
-    } dlgData = {};
-
-    dlgData.tmpl.style = DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER;
-    dlgData.tmpl.cx = 355;
-    dlgData.tmpl.cy = 185;
-    dlgData.menu = 0;
-    dlgData.wndClass = 0;
-    wcscpy_s(dlgData.title, g_str->csTitle);
-
-    DialogBoxIndirectW(GetModuleHandle(NULL), &dlgData.tmpl, hParent, ChannelSettingsDlgProc);
+    BYTE dlgTemplate[512] = {0};
+    DLGTEMPLATE* pDlg = (DLGTEMPLATE*)dlgTemplate;
+    pDlg->style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
+    pDlg->cx = 260; pDlg->cy = (short)(dlgHeight * 8 / 13);
+    DialogBoxIndirectW(GetModuleHandle(NULL), pDlg, hWnd, AsusTestDlgProc);
 }
 
 //=============================================================================
-// GUI HELPER FUNCTIONS
+// MAIN WINDOW PROCEDURE
 //=============================================================================
 
-void UpdatePreview() {
-    if (g_state.hPreview) InvalidateRect(g_state.hPreview, NULL, TRUE);
-}
-
-void UpdateSliders() {
-    wchar_t valBuf[8];
-    if (g_state.hSliderR) {
-        SendMessage(g_state.hSliderR, TBM_SETPOS, TRUE, g_state.red);
-        if (g_state.hLabelRVal) {
-            swprintf(valBuf, 8, L"%d", g_state.red);
-            SetWindowTextW(g_state.hLabelRVal, valBuf);
-        }
-    }
-    if (g_state.hSliderG) {
-        SendMessage(g_state.hSliderG, TBM_SETPOS, TRUE, g_state.green);
-        if (g_state.hLabelGVal) {
-            swprintf(valBuf, 8, L"%d", g_state.green);
-            SetWindowTextW(g_state.hLabelGVal, valBuf);
-        }
-    }
-    if (g_state.hSliderB) {
-        SendMessage(g_state.hSliderB, TBM_SETPOS, TRUE, g_state.blue);
-        if (g_state.hLabelBVal) {
-            swprintf(valBuf, 8, L"%d", g_state.blue);
-            SetWindowTextW(g_state.hLabelBVal, valBuf);
-        }
-    }
-    if (g_state.hSliderBrightness) SendMessage(g_state.hSliderBrightness, TBM_SETPOS, TRUE, g_state.brightness);
-    if (g_state.hSliderSpeed) SendMessage(g_state.hSliderSpeed, TBM_SETPOS, TRUE, g_state.speed);
-}
-
-void UpdateHexEdit() {
-    wchar_t hex[8];
-    swprintf(hex, 8, L"#%02X%02X%02X", g_state.red, g_state.green, g_state.blue);
-    SetWindowTextW(g_state.hEditHex, hex);
-}
-
-void UpdateAllControls() {
-    UpdatePreview();
-    UpdateSliders();
-    UpdateHexEdit();
-
-    SendMessage(g_state.hCheckAura, BM_SETCHECK, g_state.enableAura ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessage(g_state.hCheckMouse, BM_SETCHECK, g_state.enableMouse ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessage(g_state.hCheckKeyboard, BM_SETCHECK, g_state.enableKeyboard ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessage(g_state.hCheckRAM, BM_SETCHECK, g_state.enableRAM ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessage(g_state.hCheckEdge, BM_SETCHECK, g_state.enableEdge ? BST_CHECKED : BST_UNCHECKED, 0);
-}
-
-void ParseHexColor(const wchar_t* hex) {
-    if (hex[0] == L'#') hex++;
-    if (wcslen(hex) >= 6) {
-        wchar_t r[3] = {hex[0], hex[1], 0};
-        wchar_t g[3] = {hex[2], hex[3], 0};
-        wchar_t b[3] = {hex[4], hex[5], 0};
-        g_state.red = (uint8_t)wcstol(r, NULL, 16);
-        g_state.green = (uint8_t)wcstol(g, NULL, 16);
-        g_state.blue = (uint8_t)wcstol(b, NULL, 16);
-    }
-}
-
-void SetPresetColor(uint8_t r, uint8_t g, uint8_t b) {
-    g_state.red = r; g_state.green = g; g_state.blue = b;
-    UpdatePreview();
-    UpdateSliders();
-    UpdateHexEdit();
-}
-
-void PickColor() {
-    CHOOSECOLOR cc = {0};
-    static COLORREF customColors[16] = {0};
-    cc.lStructSize = sizeof(cc);
-    cc.hwndOwner = g_state.hWnd;
-    cc.lpCustColors = customColors;
-    cc.rgbResult = RGB(g_state.red, g_state.green, g_state.blue);
-    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
-
-    if (ChooseColor(&cc)) {
-        g_state.red = GetRValue(cc.rgbResult);
-        g_state.green = GetGValue(cc.rgbResult);
-        g_state.blue = GetBValue(cc.rgbResult);
-        UpdatePreview();
-        UpdateSliders();
-        UpdateHexEdit();
-    }
-}
-
-//=============================================================================
-// TRAY ICON
-//=============================================================================
-
-void CreateTrayIcon(HWND hWnd) {
-    g_state.nid.cbSize = sizeof(NOTIFYICONDATAW);
-    g_state.nid.hWnd = hWnd;
-    g_state.nid.uID = 1;
-    g_state.nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    g_state.nid.uCallbackMessage = WM_TRAYICON;
-    g_state.nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(101));  // Custom icon
-    wcscpy_s(g_state.nid.szTip, L"OneClickRGB");
-    Shell_NotifyIconW(NIM_ADD, &g_state.nid);
-}
-
-void RemoveTrayIcon() {
-    Shell_NotifyIconW(NIM_DELETE, &g_state.nid);
-}
-
-void ShowTrayMenu(HWND hWnd) {
-    POINT pt;
-    GetCursorPos(&pt);
-
-    HMENU hMenu = CreatePopupMenu();
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"Show Window");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-
-    // Quick colors submenu
-    HMENU hColorMenu = CreatePopupMenu();
-    AppendMenuW(hColorMenu, MF_STRING, ID_TRAY_BLUE, L"Blue");
-    AppendMenuW(hColorMenu, MF_STRING, ID_TRAY_RED, L"Red");
-    AppendMenuW(hColorMenu, MF_STRING, ID_TRAY_GREEN, L"Green");
-    AppendMenuW(hColorMenu, MF_STRING, ID_TRAY_WHITE, L"White");
-    AppendMenuW(hColorMenu, MF_STRING, ID_TRAY_OFF, L"Off");
-    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hColorMenu, L"Quick Colors");
-
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-
-    // Power submenu
-    HMENU hPowerMenu = CreatePopupMenu();
-    AppendMenuW(hPowerMenu, MF_STRING, ID_TRAY_STANDBY, L"Standby");
-    AppendMenuW(hPowerMenu, MF_STRING, ID_TRAY_SHUTDOWN, L"Shutdown");
-    AppendMenuW(hPowerMenu, MF_STRING, ID_TRAY_RESTART, L"Restart");
-    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hPowerMenu, L"Power");
-
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Exit");
-
-    SetForegroundWindow(hWnd);
-    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
-    DestroyMenu(hMenu);
-}
-
-void MinimizeToTray() {
-    ShowWindow(g_state.hWnd, SW_HIDE);
-    g_state.minimizedToTray = true;
-}
-
-void RestoreFromTray() {
-    ShowWindow(g_state.hWnd, SW_SHOW);
-    SetForegroundWindow(g_state.hWnd);
-    g_state.minimizedToTray = false;
-}
-
-//=============================================================================
-// WINDOW PROCEDURES
-//=============================================================================
-
-LRESULT CALLBACK PreviewProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (msg == WM_PAINT) {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
-        RECT rc;
-        GetClientRect(hWnd, &rc);
-
-        HBRUSH brush = CreateSolidBrush(RGB(g_state.red, g_state.green, g_state.blue));
-        FillRect(hdc, &rc, brush);
-        DeleteObject(brush);
-        FrameRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
-
-        EndPaint(hWnd, &ps);
-        return 0;
-    }
-    return DefWindowProc(hWnd, msg, wParam, lParam);
-}
-
-// Group box positions (calculated once, used for painting)
-struct GroupRect { int x, y, w, h; const wchar_t* title; };
-GroupRect g_groups[5];
-int g_numGroups = 0;
-
-// Shadow offset for text (1px right, 1px down)
-const float SHADOW_OFFSET_X = 1.0f;
-const float SHADOW_OFFSET_Y = 1.0f;
-
-// Helper to draw text with shadow
-void DrawTextWithShadow(Gdiplus::Graphics& gfx, const wchar_t* text, Gdiplus::Font* font,
-                        Gdiplus::RectF& rect, Gdiplus::StringFormat* format,
-                        Gdiplus::Color textColor, Gdiplus::Color shadowColor = Gdiplus::Color(128, 0, 0, 0)) {
-    // Draw shadow first (offset by 2px)
-    Gdiplus::RectF shadowRect(rect.X + SHADOW_OFFSET_X, rect.Y + SHADOW_OFFSET_Y, rect.Width, rect.Height);
-    Gdiplus::SolidBrush shadowBrush(shadowColor);
-    gfx.DrawString(text, -1, font, shadowRect, format, &shadowBrush);
-
-    // Draw text on top
-    Gdiplus::SolidBrush textBrush(textColor);
-    gfx.DrawString(text, -1, font, rect, format, &textBrush);
-}
-
-// Helper to draw modern group box
-void DrawThemedGroupBox(HDC hdc, const GroupRect& g) {
-    Gdiplus::Graphics gfx(hdc);
-    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
-    gfx.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);  // Crisp lines
-
-    // Use 0.5f offset for crisp 1px lines
-    float x = (float)g.x + 0.5f;
-    float y = (float)g.y + 0.5f;
-    float w = (float)g.w - 1.0f;
-    float h = (float)g.h - 1.0f;
-    float radius = 8.0f;
-
-    // Rounded rectangle path
-    Gdiplus::GraphicsPath path;
-    float d = radius * 2;
-    path.AddArc(x, y, d, d, 180, 90);
-    path.AddArc(x + w - d, y, d, d, 270, 90);
-    path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
-    path.AddArc(x, y + h - d, d, d, 90, 90);
-    path.CloseFigure();
-
-    // Semi-transparent fill
-    Gdiplus::SolidBrush fillBrush(Gdiplus::Color(20, 255, 255, 255));
-    gfx.FillPath(&fillBrush, &path);
-
-    // Border - consistent 1px line
-    Gdiplus::Pen borderPen(Gdiplus::Color(80, 100, 160, 220), 1.0f);
-    borderPen.SetAlignment(Gdiplus::PenAlignmentCenter);
-    gfx.DrawPath(&borderPen, &path);
-
-    // Title badge
-    Gdiplus::FontFamily fontFamily(L"Segoe UI");
-    Gdiplus::Font font(&fontFamily, 9, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
-
-    // Measure text for badge size
-    Gdiplus::RectF textBounds;
-    gfx.MeasureString(g.title, -1, &font, Gdiplus::PointF(0, 0), &textBounds);
-
-    float badgeX = (float)g.x + GROUP_PADDING;  // Same as left padding
-    float badgeY = (float)g.y + GROUP_PADDING; // Same as top padding
-    float badgeW = textBounds.Width + 18;
-    float badgeH = 20;
-    float badgeR = 5.0f;
-
-    // Badge rounded rect
-    Gdiplus::GraphicsPath badgePath;
-    float bd = badgeR * 2;
-    badgePath.AddArc(badgeX, badgeY, bd, bd, 180, 90);
-    badgePath.AddArc(badgeX + badgeW - bd, badgeY, bd, bd, 270, 90);
-    badgePath.AddArc(badgeX + badgeW - bd, badgeY + badgeH - bd, bd, bd, 0, 90);
-    badgePath.AddArc(badgeX, badgeY + badgeH - bd, bd, bd, 90, 90);
-    badgePath.CloseFigure();
-
-    // Badge fill (subtle gradient feel)
-    Gdiplus::SolidBrush badgeFill(Gdiplus::Color(255, 35, 80, 140));
-    gfx.FillPath(&badgeFill, &badgePath);
-
-    // Badge border
-    Gdiplus::Pen badgeBorderPen(Gdiplus::Color(255, 60, 120, 200), 1.0f);
-    gfx.DrawPath(&badgeBorderPen, &badgePath);
-
-    // Title text (centered in badge) with shadow
-    Gdiplus::StringFormat format;
-    format.SetAlignment(Gdiplus::StringAlignmentCenter);
-    format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-    Gdiplus::RectF badgeRect(badgeX, badgeY, badgeW, badgeH);
-    DrawTextWithShadow(gfx, g.title, &font, badgeRect, &format,
-                       ToGdipColor(g_currentTheme->groupTitle));
-}
-
-// Modern button drawing helper
-void DrawModernButton(HDC hdc, RECT* rc, const wchar_t* text, bool isHovered, bool isPressed, bool isAccent = false, bool isFocused = false) {
-    Gdiplus::Graphics gfx(hdc);
-    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
-
-    // Inset by 2px so border (1px pen width) isn't clipped at control edges
-    float inset = 2.0f;
-    float x = (float)rc->left + inset;
-    float y = (float)rc->top + inset;
-    float w = (float)(rc->right - rc->left) - inset * 2;
-    float h = (float)(rc->bottom - rc->top) - inset * 2;
-    float radius = 4.0f;  // Slightly smaller radius for better fit
-
-    // Rounded rectangle path
-    Gdiplus::GraphicsPath path;
-    float d = radius * 2;
-    path.AddArc(x, y, d, d, 180, 90);
-    path.AddArc(x + w - d, y, d, d, 270, 90);
-    path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
-    path.AddArc(x, y + h - d, d, d, 90, 90);
-    path.CloseFigure();
-
-    // Background color based on state (from theme)
-    Gdiplus::Color bgColor;
-    Gdiplus::Color borderColor;
-    Gdiplus::Color textColor;
-
-    if (isAccent) {
-        // Accent button (Apply, etc.)
-        if (isPressed) {
-            bgColor = ToGdipColor(g_currentTheme->bgAccentPressed);
-            borderColor = ToGdipColor(g_currentTheme->bgAccentHover);
-        } else if (isHovered) {
-            bgColor = ToGdipColor(g_currentTheme->bgAccentHover);
-            borderColor = ToGdipColor(g_currentTheme->borderHover);
-        } else {
-            bgColor = ToGdipColor(g_currentTheme->bgAccent);
-            borderColor = ToGdipColor(g_currentTheme->bgAccentHover);
-        }
-        textColor = ToGdipColor(g_currentTheme->textOnAccent);
-    } else {
-        // Normal button
-        if (isPressed) {
-            bgColor = ToGdipColor(g_currentTheme->bgButtonPressed);
-            borderColor = ToGdipColor(g_currentTheme->borderHover);
-        } else if (isHovered) {
-            bgColor = ToGdipColor(g_currentTheme->bgButtonHover);
-            borderColor = ToGdipColor(g_currentTheme->borderHover);
-        } else {
-            bgColor = ToGdipColor(g_currentTheme->bgButton);
-            borderColor = ToGdipColor(g_currentTheme->border);
-        }
-        textColor = ToGdipColor(g_currentTheme->textPrimary);
-    }
-
-    // Fill
-    Gdiplus::SolidBrush fillBrush(bgColor);
-    gfx.FillPath(&fillBrush, &path);
-
-    // Border
-    Gdiplus::Pen borderPen(borderColor, 1.0f);
-    gfx.DrawPath(&borderPen, &path);
-
-    // Focus indicator - dotted inner border
-    if (isFocused) {
-        Gdiplus::GraphicsPath focusPath;
-        float fi = 4.0f;  // Focus inset
-        float fx = x + fi, fy = y + fi;
-        float fw = w - fi * 2, fh = h - fi * 2;
-        float fr = radius - 2;
-        float fd = fr * 2;
-        focusPath.AddArc(fx, fy, fd, fd, 180, 90);
-        focusPath.AddArc(fx + fw - fd, fy, fd, fd, 270, 90);
-        focusPath.AddArc(fx + fw - fd, fy + fh - fd, fd, fd, 0, 90);
-        focusPath.AddArc(fx, fy + fh - fd, fd, fd, 90, 90);
-        focusPath.CloseFigure();
-        Gdiplus::Pen focusPen(Gdiplus::Color(255, 150, 200, 255), 1.0f);
-        focusPen.SetDashStyle(Gdiplus::DashStyleDot);
-        gfx.DrawPath(&focusPen, &focusPath);
-    }
-
-    // Text with shadow
-    Gdiplus::FontFamily fontFamily(L"Segoe UI");
-    Gdiplus::Font font(&fontFamily, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
-
-    Gdiplus::RectF textRect(x, y, w, h);
-    Gdiplus::StringFormat format;
-    format.SetAlignment(Gdiplus::StringAlignmentCenter);
-    format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-    DrawTextWithShadow(gfx, text, &font, textRect, &format, textColor);
-}
-
-// Draw modern checkbox with badge-style background
-void DrawModernCheckbox(HDC hdc, RECT* rc, const wchar_t* text, bool isChecked, bool isHovered, bool isFocused = false) {
-    Gdiplus::Graphics gfx(hdc);
-    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
-
-    int w = rc->right - rc->left;
-    int h = rc->bottom - rc->top;
-
-    // Badge background (rounded rect for entire control) - no rectangular clear!
-    int padding = 2;
-    float badgeRadius = 5.0f;
-    Gdiplus::GraphicsPath badgePath;
-    float bd = badgeRadius * 2;
-    badgePath.AddArc((float)padding, (float)padding, bd, bd, 180, 90);
-    badgePath.AddArc((float)(w - padding) - bd, (float)padding, bd, bd, 270, 90);
-    badgePath.AddArc((float)(w - padding) - bd, (float)(h - padding) - bd, bd, bd, 0, 90);
-    badgePath.AddArc((float)padding, (float)(h - padding) - bd, bd, bd, 90, 90);
-    badgePath.CloseFigure();
-
-    // Badge fill - from theme
-    Gdiplus::Color badgeBg = isHovered ?
-        ToGdipColor(g_currentTheme->bgButtonHover) :
-        ToGdipColor(g_currentTheme->bgButton);
-    Gdiplus::SolidBrush badgeBrush(badgeBg);
-    gfx.FillPath(&badgeBrush, &badgePath);
-
-    // Badge border - from theme
-    Gdiplus::Color badgeBorderColor = isHovered ?
-        ToGdipColor(g_currentTheme->borderHover) :
-        ToGdipColor(g_currentTheme->border);
-    Gdiplus::Pen badgeBorder(badgeBorderColor, 1.0f);
-    gfx.DrawPath(&badgeBorder, &badgePath);
-
-    // Checkbox square
-    int boxSize = 14;
-    int boxX = padding + 8;
-    int boxY = (h - boxSize) / 2;
-
-    Gdiplus::GraphicsPath boxPath;
-    float radius = 3.0f;
-    float d = radius * 2;
-    boxPath.AddArc((float)boxX, (float)boxY, d, d, 180, 90);
-    boxPath.AddArc((float)boxX + boxSize - d, (float)boxY, d, d, 270, 90);
-    boxPath.AddArc((float)boxX + boxSize - d, (float)boxY + boxSize - d, d, d, 0, 90);
-    boxPath.AddArc((float)boxX, (float)boxY + boxSize - d, d, d, 90, 90);
-    boxPath.CloseFigure();
-
-    // Checkbox background - from theme
-    Gdiplus::Color boxBg = isChecked ?
-        ToGdipColor(g_currentTheme->checkboxBgChecked) :
-        ToGdipColor(g_currentTheme->checkboxBg);
-    Gdiplus::SolidBrush boxBrush(boxBg);
-    gfx.FillPath(&boxBrush, &boxPath);
-
-    // Checkbox border - from theme
-    Gdiplus::Color boxBorder = isChecked ?
-        ToGdipColor(g_currentTheme->checkboxBorderChecked) :
-        ToGdipColor(g_currentTheme->checkboxBorder);
-    Gdiplus::Pen boxPen(boxBorder, 1.0f);
-    gfx.DrawPath(&boxPen, &boxPath);
-
-    // Checkmark - from theme
-    if (isChecked) {
-        Gdiplus::Pen checkPen(ToGdipColor(g_currentTheme->checkboxCheck), 2.0f);
-        checkPen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
-        int cx = boxX + boxSize / 2;
-        int cy = boxY + boxSize / 2;
-        Gdiplus::Point pts[3] = {
-            {cx - 3, cy},
-            {cx - 1, cy + 3},
-            {cx + 4, cy - 3}
-        };
-        gfx.DrawLines(&checkPen, pts, 3);
-    }
-
-    // Focus indicator - dotted border around entire badge
-    if (isFocused) {
-        Gdiplus::GraphicsPath focusPath;
-        float fi = 1.0f;  // Focus inset
-        focusPath.AddArc((float)padding + fi, (float)padding + fi, bd, bd, 180, 90);
-        focusPath.AddArc((float)(w - padding) - bd - fi, (float)padding + fi, bd, bd, 270, 90);
-        focusPath.AddArc((float)(w - padding) - bd - fi, (float)(h - padding) - bd - fi, bd, bd, 0, 90);
-        focusPath.AddArc((float)padding + fi, (float)(h - padding) - bd - fi, bd, bd, 90, 90);
-        focusPath.CloseFigure();
-        Gdiplus::Pen focusPen(Gdiplus::Color(255, 150, 200, 255), 1.0f);
-        focusPen.SetDashStyle(Gdiplus::DashStyleDot);
-        gfx.DrawPath(&focusPen, &focusPath);
-    }
-
-    // Text with shadow
-    int textX = boxX + boxSize + 10;
-    Gdiplus::FontFamily fontFamily(L"Segoe UI");
-    Gdiplus::Font font(&fontFamily, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
-    Gdiplus::RectF textRect((float)textX, 0.0f, (float)(w - textX - 6), (float)h);
-    Gdiplus::StringFormat format;
-    format.SetAlignment(Gdiplus::StringAlignmentNear);
-    format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-    format.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);  // Prevent text wrapping
-    DrawTextWithShadow(gfx, text, &font, textRect, &format,
-                       ToGdipColor(g_currentTheme->textPrimary));
-}
-
-// Track button hover states
-std::map<HWND, bool> g_buttonHover;
-std::map<HWND, bool> g_buttonPressed;
-std::map<HWND, bool> g_checkboxHover;
-std::map<HWND, bool> g_checkboxChecked;
-std::map<HWND, bool> g_labelHover;
-std::map<HWND, bool> g_comboHover;
-
-// Button subclass procedure for hover tracking
-LRESULT CALLBACK ModernButtonProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
-    switch (uMsg) {
-        case WM_MOUSEMOVE: {
-            if (!g_buttonHover[hWnd]) {
-                g_buttonHover[hWnd] = true;
-                // Request mouse leave tracking
-                TRACKMOUSEEVENT tme = {};
-                tme.cbSize = sizeof(tme);
-                tme.dwFlags = TME_LEAVE;
-                tme.hwndTrack = hWnd;
-                TrackMouseEvent(&tme);
-                InvalidateRect(hWnd, NULL, FALSE);
-            }
-            break;
-        }
-        case WM_MOUSELEAVE: {
-            g_buttonHover[hWnd] = false;
-            InvalidateRect(hWnd, NULL, FALSE);
-            break;
-        }
-        // Keyboard accessibility: Space/Enter activates button
-        case WM_KEYDOWN: {
-            if (wParam == VK_SPACE || wParam == VK_RETURN) {
-                g_buttonPressed[hWnd] = true;
-                InvalidateRect(hWnd, NULL, FALSE);
-            }
-            break;
-        }
-        case WM_KEYUP: {
-            if (wParam == VK_SPACE || wParam == VK_RETURN) {
-                g_buttonPressed[hWnd] = false;
-                InvalidateRect(hWnd, NULL, FALSE);
-                // Send click notification to parent
-                HWND parent = GetParent(hWnd);
-                int id = GetDlgCtrlID(hWnd);
-                SendMessage(parent, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), (LPARAM)hWnd);
-            }
-            break;
-        }
-        // Visual feedback for focus
-        case WM_SETFOCUS:
-        case WM_KILLFOCUS: {
-            InvalidateRect(hWnd, NULL, FALSE);
-            break;
-        }
-        case WM_NCDESTROY: {
-            g_buttonHover.erase(hWnd);
-            g_buttonPressed.erase(hWnd);
-            RemoveWindowSubclass(hWnd, ModernButtonProc, uIdSubclass);
-            break;
-        }
-    }
-    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-}
-
-// Forward declarations
-void ApplyModernCheckboxStyle(HWND hCheck);
-
-// Helper to create a modern owner-draw button with hover tracking
-HWND CreateModernButton(LPCWSTR text, DWORD style, int x, int y, int w, int h, HWND parent, int id) {
-    HWND hBtn = CreateWindowW(L"BUTTON", text,
-        style | BS_OWNERDRAW | WS_TABSTOP,
-        x, y, w, h, parent, (HMENU)(INT_PTR)id, NULL, NULL);
-    if (hBtn) {
-        SetWindowSubclass(hBtn, ModernButtonProc, 0, 0);
-    }
-    return hBtn;
-}
-
-// Helper to create modern checkbox with auto-calculated width based on text
-// Returns the created HWND and sets outWidth to the calculated width
-HWND CreateModernCheckbox(LPCWSTR text, int x, int y, int h, HWND parent, int id, int* outWidth) {
-    // Calculate text width
-    HDC hdc = GetDC(parent);
-    HFONT hFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
-
-    SIZE textSize;
-    GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &textSize);
-
-    SelectObject(hdc, hOldFont);
-    DeleteObject(hFont);
-    ReleaseDC(parent, hdc);
-
-    // Width = padding(10) + checkbox(14) + gap(10) + text + padding(16) + extra(8)
-    int width = 10 + 14 + 10 + textSize.cx + 16 + 8;
-    if (outWidth) *outWidth = width;
-
-    HWND hCheck = CreateWindowW(L"BUTTON", text,
-        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
-        x, y, width, h, parent, (HMENU)(INT_PTR)id, NULL, NULL);
-
-    if (hCheck) {
-        ApplyModernCheckboxStyle(hCheck);
-    }
-    return hCheck;
-}
-
-// Checkbox subclass for owner-draw behavior
-LRESULT CALLBACK ModernCheckboxProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
-    switch (uMsg) {
-        case BM_GETCHECK: {
-            // Return our tracked state
-            return g_checkboxChecked[hWnd] ? BST_CHECKED : BST_UNCHECKED;
-        }
-        case BM_SETCHECK: {
-            // Set our tracked state
-            g_checkboxChecked[hWnd] = (wParam == BST_CHECKED);
-            InvalidateRect(hWnd, NULL, TRUE);
-            return 0;
-        }
-        case WM_ERASEBKGND: {
-            // Copy parent background to simulate transparency
-            HWND hParent = GetParent(hWnd);
-            HDC hdc = (HDC)wParam;
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-
-            // Get position relative to parent
-            POINT pt = {0, 0};
-            MapWindowPoints(hWnd, hParent, &pt, 1);
-
-            // Get parent DC and copy background
-            HDC hParentDC = GetDC(hParent);
-            BitBlt(hdc, 0, 0, rc.right, rc.bottom, hParentDC, pt.x, pt.y, SRCCOPY);
-            ReleaseDC(hParent, hParentDC);
-            return 1;
-        }
-        case WM_PAINT: {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hWnd, &ps);
-
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-
-            wchar_t text[64] = {0};
-            GetWindowTextW(hWnd, text, 64);
-            bool isChecked = g_checkboxChecked[hWnd];
-            bool isHovered = g_checkboxHover[hWnd];
-            bool isFocused = (GetFocus() == hWnd);
-
-            DrawModernCheckbox(hdc, &rc, text, isChecked, isHovered, isFocused);
-
-            EndPaint(hWnd, &ps);
-            return 0;
-        }
-        case WM_MOUSEMOVE: {
-            if (!g_checkboxHover[hWnd]) {
-                g_checkboxHover[hWnd] = true;
-                TRACKMOUSEEVENT tme = {};
-                tme.cbSize = sizeof(tme);
-                tme.dwFlags = TME_LEAVE;
-                tme.hwndTrack = hWnd;
-                TrackMouseEvent(&tme);
-                InvalidateRect(hWnd, NULL, FALSE);
-            }
-            break;
-        }
-        case WM_MOUSELEAVE: {
-            g_checkboxHover[hWnd] = false;
-            InvalidateRect(hWnd, NULL, FALSE);
-            break;
-        }
-        case WM_LBUTTONDOWN: {
-            SetCapture(hWnd);
-            break;
-        }
-        case WM_LBUTTONUP: {
-            ReleaseCapture();
-            // Check if mouse is still over the control
-            POINT pt = {LOWORD(lParam), HIWORD(lParam)};
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-            if (PtInRect(&rc, pt)) {
-                // Toggle state
-                g_checkboxChecked[hWnd] = !g_checkboxChecked[hWnd];
-                InvalidateRect(hWnd, NULL, TRUE);
-                // Notify parent of state change (send BN_CLICKED)
-                SendMessage(GetParent(hWnd), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(hWnd), BN_CLICKED), (LPARAM)hWnd);
-            }
-            return 0;
-        }
-        // Keyboard accessibility: Space toggles checkbox
-        case WM_KEYDOWN: {
-            if (wParam == VK_SPACE) {
-                // Toggle state on Space
-                g_checkboxChecked[hWnd] = !g_checkboxChecked[hWnd];
-                InvalidateRect(hWnd, NULL, TRUE);
-                // Notify parent
-                SendMessage(GetParent(hWnd), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(hWnd), BN_CLICKED), (LPARAM)hWnd);
-                return 0;
-            }
-            break;
-        }
-        // Visual feedback for focus
-        case WM_SETFOCUS:
-        case WM_KILLFOCUS: {
-            InvalidateRect(hWnd, NULL, FALSE);
-            break;
-        }
-        case WM_NCDESTROY: {
-            g_checkboxHover.erase(hWnd);
-            g_checkboxChecked.erase(hWnd);
-            RemoveWindowSubclass(hWnd, ModernCheckboxProc, uIdSubclass);
-            break;
-        }
-    }
-    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-}
-
-// Helper to apply modern checkbox style
-void ApplyModernCheckboxStyle(HWND hCheck) {
-    g_checkboxChecked[hCheck] = false; // Initialize unchecked
-    SetWindowSubclass(hCheck, ModernCheckboxProc, 0, 0);
-}
-
-// Combobox subclass for modern border styling with hover
-LRESULT CALLBACK ModernComboProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
-    switch (uMsg) {
-        case WM_PAINT: {
-            // Let default paint happen first
-            LRESULT result = DefSubclassProc(hWnd, uMsg, wParam, lParam);
-
-            // Then draw our border on top
-            HDC hdc = GetDC(hWnd);
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-
-            bool isHovered = g_comboHover[hWnd];
-
-            Gdiplus::Graphics g(hdc);
-            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-
-            // Draw rounded border - brighter on hover
-            float radius = 4.0f;
-            float x = 0.5f, y = 0.5f;
-            float w = (float)(rc.right - rc.left) - 1.0f;
-            float h = (float)(rc.bottom - rc.top) - 1.0f;
-
-            Gdiplus::GraphicsPath path;
-            float d = radius * 2;
-            path.AddArc(x, y, d, d, 180, 90);
-            path.AddArc(x + w - d, y, d, d, 270, 90);
-            path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
-            path.AddArc(x, y + h - d, d, d, 90, 90);
-            path.CloseFigure();
-
-            // Border color (same as buttons)
-            Gdiplus::Color borderColor = isHovered ?
-                Gdiplus::Color(255, 100, 160, 220) :  // Hover: same as button border hover
-                Gdiplus::Color(255, 70, 80, 100);     // Normal: same as button border
-            Gdiplus::Pen borderPen(borderColor, 1.0f);
-            g.DrawPath(&borderPen, &path);
-
-            ReleaseDC(hWnd, hdc);
-            return result;
-        }
-        case WM_MOUSEMOVE: {
-            if (!g_comboHover[hWnd]) {
-                g_comboHover[hWnd] = true;
-                TRACKMOUSEEVENT tme = {};
-                tme.cbSize = sizeof(tme);
-                tme.dwFlags = TME_LEAVE;
-                tme.hwndTrack = hWnd;
-                TrackMouseEvent(&tme);
-                InvalidateRect(hWnd, NULL, FALSE);
-            }
-            break;
-        }
-        case WM_MOUSELEAVE: {
-            g_comboHover[hWnd] = false;
-            InvalidateRect(hWnd, NULL, FALSE);
-            break;
-        }
-        case WM_NCDESTROY: {
-            g_comboHover.erase(hWnd);
-            RemoveWindowSubclass(hWnd, ModernComboProc, uIdSubclass);
-            break;
-        }
-    }
-    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-}
-
-// Helper to apply modern combobox style
-void ApplyModernComboStyle(HWND hCombo) {
-    SetWindowSubclass(hCombo, ModernComboProc, 0, 0);
-}
-
-// Label subclass for hover effect
-LRESULT CALLBACK ModernLabelProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
-    switch (uMsg) {
-        case WM_PAINT: {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hWnd, &ps);
-
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-
-            wchar_t text[128] = {0};
-            GetWindowTextW(hWnd, text, 128);
-            bool isHovered = g_labelHover[hWnd];
-
-            // Draw with GDI+
-            Gdiplus::Graphics gfx(hdc);
-            gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
-
-            // Text color changes on hover (from theme)
-            Gdiplus::Color textColor = isHovered ?
-                ToGdipColor(g_currentTheme->borderHover) :
-                ToGdipColor(g_currentTheme->textPrimary);
-
-            Gdiplus::FontFamily fontFamily(L"Segoe UI");
-            Gdiplus::Font font(&fontFamily, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
-            Gdiplus::StringFormat format;
-            format.SetAlignment(Gdiplus::StringAlignmentNear);
-            format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-
-            Gdiplus::RectF textRect((float)rc.left, (float)rc.top, (float)(rc.right - rc.left), (float)(rc.bottom - rc.top));
-            DrawTextWithShadow(gfx, text, &font, textRect, &format, textColor);
-
-            EndPaint(hWnd, &ps);
-            return 0;
-        }
-        case WM_ERASEBKGND: {
-            // Copy parent background
-            HWND hParent = GetParent(hWnd);
-            HDC hdc = (HDC)wParam;
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-            POINT pt = {0, 0};
-            MapWindowPoints(hWnd, hParent, &pt, 1);
-            HDC hParentDC = GetDC(hParent);
-            BitBlt(hdc, 0, 0, rc.right, rc.bottom, hParentDC, pt.x, pt.y, SRCCOPY);
-            ReleaseDC(hParent, hParentDC);
-            return 1;
-        }
-        case WM_MOUSEMOVE: {
-            if (!g_labelHover[hWnd]) {
-                g_labelHover[hWnd] = true;
-                TRACKMOUSEEVENT tme = {};
-                tme.cbSize = sizeof(tme);
-                tme.dwFlags = TME_LEAVE;
-                tme.hwndTrack = hWnd;
-                TrackMouseEvent(&tme);
-                InvalidateRect(hWnd, NULL, TRUE);
-            }
-            break;
-        }
-        case WM_MOUSELEAVE: {
-            g_labelHover[hWnd] = false;
-            InvalidateRect(hWnd, NULL, TRUE);
-            break;
-        }
-        case WM_NCDESTROY: {
-            g_labelHover.erase(hWnd);
-            RemoveWindowSubclass(hWnd, ModernLabelProc, uIdSubclass);
-            break;
-        }
-    }
-    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-}
-
-// Helper to apply modern label style with hover
-void ApplyModernLabelStyle(HWND hLabel) {
-    SetWindowSubclass(hLabel, ModernLabelProc, 0, 0);
-}
-
-// Helper to create a modern label with hover effect
-HWND CreateModernLabel(LPCWSTR text, int x, int y, int w, int h, HWND parent) {
-    HWND hLabel = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE,
-        x, y, w, h, parent, NULL, NULL, NULL);
-    if (hLabel) {
-        ApplyModernLabelStyle(hLabel);
-    }
-    return hLabel;
-}
-
-// No extra border drawing needed - use clean WS_BORDER styling
-
-// GDI+ token
-ULONG_PTR g_gdiplusToken = 0;
-
-// Load logo PNG from exe directory - keep as GDI+ Image for proper rendering
-void LoadLogoBitmap() {
-    // Cleanup old
-    if (g_pLogoImage) {
-        delete g_pLogoImage;
-        g_pLogoImage = NULL;
-    }
-    if (g_hLogoBitmap) {
-        DeleteObject(g_hLogoBitmap);
-        g_hLogoBitmap = NULL;
-    }
-
-    // Get path to icon.png next to exe
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    wchar_t* lastSlash = wcsrchr(exePath, L'\\');
-    if (lastSlash) *(lastSlash + 1) = L'\0';
-    wcscat(exePath, L"icon.png");
-
-    // Load PNG with GDI+ and keep as Image (not HBITMAP)
-    g_pLogoImage = Gdiplus::Image::FromFile(exePath);
-    if (!g_pLogoImage || g_pLogoImage->GetLastStatus() != Gdiplus::Ok) {
-        // Try src folder
-        if (g_pLogoImage) delete g_pLogoImage;
-        GetModuleFileNameW(NULL, exePath, MAX_PATH);
-        lastSlash = wcsrchr(exePath, L'\\');
-        if (lastSlash) *(lastSlash + 1) = L'\0';
-        wcscat(exePath, L"..\\src\\icon.png");
-        g_pLogoImage = Gdiplus::Image::FromFile(exePath);
-    }
-
-    if (!g_pLogoImage || g_pLogoImage->GetLastStatus() != Gdiplus::Ok) {
-        if (g_pLogoImage) {
-            delete g_pLogoImage;
-            g_pLogoImage = NULL;
-        }
-        return;
-    }
-
-    g_logoWidth = g_pLogoImage->GetWidth();
-    g_logoHeight = g_pLogoImage->GetHeight();
-}
-
-//=============================================================================
-// TOOLTIP SYSTEM
-//=============================================================================
-
-// Create main tooltip control
-void CreateTooltipControl(HWND hWndParent) {
-    g_state.hTooltip = CreateWindowExW(
-        WS_EX_TOPMOST,
-        TOOLTIPS_CLASSW,
-        NULL,
-        WS_POPUP | TTS_ALWAYSTIP | TTS_BALLOON | TTS_NOPREFIX,
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        hWndParent,
-        NULL,
-        GetModuleHandle(NULL),
-        NULL
-    );
-
-    if (g_state.hTooltip) {
-        // Set maximum width for multi-line tooltips
-        SendMessage(g_state.hTooltip, TTM_SETMAXTIPWIDTH, 0, 300);
-        // Set delay times (ms)
-        SendMessage(g_state.hTooltip, TTM_SETDELAYTIME, TTDT_AUTOPOP, 15000);  // Show for 15s
-        SendMessage(g_state.hTooltip, TTM_SETDELAYTIME, TTDT_INITIAL, 400);    // Show after 400ms
-        SendMessage(g_state.hTooltip, TTM_SETDELAYTIME, TTDT_RESHOW, 100);     // Reshow quickly
-    }
-}
-
-// Add tooltip to a control (hParent must be passed explicitly during WM_CREATE)
-void AddTooltip(HWND hParent, HWND hControl, const wchar_t* text) {
-    if (!g_state.hTooltip || !hControl || !hParent || !text || !text[0]) return;
-
-    TOOLINFOW ti = {0};
-    ti.cbSize = TTTOOLINFOW_V1_SIZE;  // Use V1 size for compatibility
-    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
-    ti.hwnd = hParent;
-    ti.uId = (UINT_PTR)hControl;
+// Helper: Create a tooltip for a control
+void AddTooltip(HWND hTip, HWND hCtrl, const wchar_t* text) {
+    if (!hTip || !hCtrl || !text) return;
+    TOOLINFOW ti = {sizeof(ti)};
+    ti.uFlags = TTF_SUBCLASS | TTF_IDISHWND;
+    ti.hwnd = GetParent(hCtrl);
+    ti.uId = (UINT_PTR)hCtrl;
     ti.lpszText = (LPWSTR)text;
-
-    SendMessageW(g_state.hTooltip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+    SendMessage(hTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
 }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+
     case WM_CREATE: {
-        // Create theme brushes
-        g_hBgBrush = CreateSolidBrush(g_theme->bgWindow);
-        g_hCtrlBrush = CreateSolidBrush(g_theme->bgControl);
-        g_hBtnBrush = CreateSolidBrush(g_theme->bgButton);
-        InitTrackbarBrush();
+        LogDebug("WM_CREATE started");
+        HINSTANCE hInst = ((LPCREATESTRUCT)lParam)->hInstance;
+        HFONT hFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
-        // Load logo
-        LoadLogoBitmap();
+        // Create tooltip control
+        g_state.hTooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL,
+            WS_POPUP | TTS_ALWAYSTIP | TTS_BALLOON | TTS_NOPREFIX,
+            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+            hWnd, NULL, hInst, NULL);
+        SendMessage(g_state.hTooltip, TTM_SETMAXTIPWIDTH, 0, 300);
+        SendMessage(g_state.hTooltip, TTM_SETDELAYTIME, TTDT_AUTOPOP, 15000);
 
-        // Register preview class
-        WNDCLASS wc = {0};
-        wc.lpfnWndProc = PreviewProc;
-        wc.hInstance = GetModuleHandle(NULL);
-        wc.lpszClassName = L"ColorPreview";
-        wc.hbrBackground = g_hBgBrush;
-        RegisterClass(&wc);
+        int clientW = WINDOW_WIDTH - 2 * MARGIN;
+        int groupW = clientW;
+        int innerW = groupW - 2 * GROUP_PADDING;
+        int curY = MARGIN;
+        LogDebug("WM_CREATE variables initialized");
 
-        // Layout variables - mathematically correct
-        const int M = MARGIN;           // 12 - outer margin from window edge
-        const int GM = GROUP_MARGIN;    // 8 - space between groups
-        const int GP = GROUP_PADDING;   // 10 - padding inside group box
-        const int GTH = GROUP_TITLE_H;  // 18 - group title height
-        const int IS = ITEM_SPACING;    // 6 - vertical item spacing
-        const int IHS = ITEM_H_SPACING; // 8 - horizontal item spacing
-
-        // Window client area = WINDOW_WIDTH (620)
-        // Group box width = WINDOW_WIDTH - 2*MARGIN = 620 - 24 = 596
-        const int CW = WINDOW_WIDTH - M * 2;  // 531 = Content/Group width
-        // Inner content width = CW - 2*GP = 531 - 20 = 511
-        const int ICW = CW - GP * 2;  // 511 = usable width inside group
-
-        // Start content at top margin (standard Windows titlebar)
-        int y = M;
-        int x = M;  // x = left edge of group boxes
-        int gy;  // Group content y start
-
-        // ═══════════════════════════════════════════════════════════════
-        // GROUP 1: COLOR
-        // ═══════════════════════════════════════════════════════════════
-        int g1y = y;
-        gy = y + GTH + GP;  // Content starts after title badge + padding
-
-        // Row 1: Preview + Hex + Pick + Theme toggle
-        g_state.hPreview = CreateWindowW(L"ColorPreview", L"",
-            WS_CHILD | WS_VISIBLE | WS_BORDER,
-            x + GP, gy, 70, 60, hWnd, (HMENU)ID_STATIC_PREVIEW, NULL, NULL);
-
-        CreateModernLabel(g_str->hex, x + GP + 80, gy + 6, 32, BTN_H, hWnd);
-        g_state.hEditHex = CreateWindowW(L"EDIT", L"#0022FF",
-            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_UPPERCASE | ES_CENTER,
-            x + GP + 112, gy + 4, 76, BTN_H, hWnd, (HMENU)ID_EDIT_HEX, NULL, NULL);
-
-        CreateModernButton(g_str->pick, WS_CHILD | WS_VISIBLE,
-            x + GP + 196, gy + 4, 60, BTN_H, hWnd, ID_BTN_PICK_COLOR);
-
-        // Theme and Language buttons - right side of preview row with clear labels
-        int rightEdge = x + GP + ICW;
-
-        // Theme button with clear label showing current theme
-        wchar_t themeLabel[32];
-        swprintf_s(themeLabel, 32, L"%s", g_currentTheme->name);
-        CreateModernButton(themeLabel, WS_CHILD | WS_VISIBLE,
-            rightEdge - 140, gy + 4, 85, BTN_H, hWnd, ID_BTN_THEME);
-
-        // Language button - shows target language to switch to
-        CreateModernButton(g_lang == LANG_EN ? L"Deutsch" : L"English", WS_CHILD | WS_VISIBLE,
-            rightEdge - 52, gy + 4, 52, BTN_H, hWnd, ID_BTN_LANG);
-
-        // Row 2: 7 Color presets - uniform sizing with proper gaps
-        // Available width: ICW - 8 (margins) = 503px
-        // 7 buttons + 6 gaps: 7*pw + 6*gap = 503 -> pw = (503 - 6*5) / 7 = 67.5
-        int presetY = gy + 68;  // Push buttons further down
-        int pw = 66;            // Button width (fits 7 buttons with gaps)
-        int ph = 28;            // Button height
-        int gap = 5;            // Gap between buttons
-        int px = x + GP + 4;    // Left margin so border isn't clipped
-        CreateModernButton(g_str->presetBlue, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_BLUE); px += pw + gap;
-        CreateModernButton(g_str->presetRed, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_RED); px += pw + gap;
-        CreateModernButton(g_str->presetGreen, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_GREEN); px += pw + gap;
-        CreateModernButton(g_str->presetCyan, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_CYAN); px += pw + gap;
-        CreateModernButton(g_str->presetPurple, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_PURPLE); px += pw + gap;
-        CreateModernButton(g_str->presetWhite, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_WHITE); px += pw + gap;
-        CreateModernButton(g_str->presetOff, WS_CHILD | WS_VISIBLE, px, presetY, pw, ph, hWnd, ID_BTN_PRESET_OFF);
-
-        // Row 3-5: RGB Sliders - tighter vertical spacing
-        int sliderX = x + GP + LABEL_W;
-        int sliderW = ICW - LABEL_W;
-        int sliderSpacing = SLIDER_H + 6;  // Less space between sliders
-        int sy = presetY + ph + 20;  // Space after preset buttons
-
-        // RGB Sliders with live value display
-        int valLabelW = 32;  // Width for "255" text
-        int actualSliderW = sliderW - valLabelW - 4;
-
-        CreateModernLabel(g_str->red, x + GP, sy + 2, LABEL_W - 4, CTRL_H, hWnd);
-        g_state.hSliderR = CreateWindowW(TRACKBAR_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
-            sliderX, sy, actualSliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_R, NULL, NULL);
-        SendMessage(g_state.hSliderR, TBM_SETRANGE, TRUE, MAKELONG(0, 255));
-        SetWindowTheme(g_state.hSliderR, L"", L"");
-        g_state.hLabelRVal = CreateWindowW(L"STATIC", L"0",
-            WS_CHILD | WS_VISIBLE | SS_RIGHT,
-            sliderX + actualSliderW + 4, sy + 2, valLabelW, SLIDER_H, hWnd, NULL, NULL, NULL);
-        sy += sliderSpacing;
-
-        CreateModernLabel(g_str->green, x + GP, sy + 2, LABEL_W - 4, CTRL_H, hWnd);
-        g_state.hSliderG = CreateWindowW(TRACKBAR_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
-            sliderX, sy, actualSliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_G, NULL, NULL);
-        SendMessage(g_state.hSliderG, TBM_SETRANGE, TRUE, MAKELONG(0, 255));
-        SetWindowTheme(g_state.hSliderG, L"", L"");
-        g_state.hLabelGVal = CreateWindowW(L"STATIC", L"0",
-            WS_CHILD | WS_VISIBLE | SS_RIGHT,
-            sliderX + actualSliderW + 4, sy + 2, valLabelW, SLIDER_H, hWnd, NULL, NULL, NULL);
-        sy += sliderSpacing;
-
-        CreateModernLabel(g_str->blue, x + GP, sy + 2, LABEL_W - 4, CTRL_H, hWnd);
-        g_state.hSliderB = CreateWindowW(TRACKBAR_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
-            sliderX, sy, actualSliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_B, NULL, NULL);
-        SendMessage(g_state.hSliderB, TBM_SETRANGE, TRUE, MAKELONG(0, 255));
-        SetWindowTheme(g_state.hSliderB, L"", L"");
-        g_state.hLabelBVal = CreateWindowW(L"STATIC", L"0",
-            WS_CHILD | WS_VISIBLE | SS_RIGHT,
-            sliderX + actualSliderW + 4, sy + 2, valLabelW, SLIDER_H, hWnd, NULL, NULL, NULL);
-
-        // Initialize custom modern sliders (overlay on top of standard trackbars)
-        int sliderHeight = 28;
-        g_sliderR.slider = {{}, {sliderX, sy - 2*sliderSpacing, sliderX + sliderW, sy - 2*sliderSpacing + sliderHeight}, 0, 255, 'R', false, false, ID_SLIDER_R};
-        g_sliderR.registered = true;
-        g_sliderG.slider = {{}, {sliderX, sy - sliderSpacing, sliderX + sliderW, sy - sliderSpacing + sliderHeight}, 34, 255, 'G', false, false, ID_SLIDER_G};
-        g_sliderG.registered = true;
-        g_sliderB.slider = {{}, {sliderX, sy, sliderX + sliderW, sy + sliderHeight}, 255, 255, 'B', false, false, ID_SLIDER_B};
-        g_sliderB.registered = true;
-
-        // Color preview position
-        g_colorPreview = {{x + GP, gy, x + GP + 70, gy + 70}, 0, 34, 255, false, 0};
-
-        int g1h = sy + SLIDER_H + GP - g1y + 20;  // +20px extra group height, no bottom margin
-        g_groups[0] = {x, g1y, CW, g1h, g_str->colorSelection};
-
-        // Initialize modern card for this group
-        g_cards[0] = {{x, g1y, x + CW, g1y + g1h}, L"", false, Gdiplus::Color(0,0,0,0)};
+        // ============= COLOR SELECTION GROUP =============
+        g_cards[0].rect = {MARGIN, curY, MARGIN + groupW, curY + GROUP_TITLE_H + 240};
         wcscpy_s(g_cards[0].title, g_str->colorSelection);
         g_numCards = 1;
-        y = g1y + g1h + GM;
 
-        // ═══════════════════════════════════════════════════════════════
-        // GROUP 2: EFFECTS
-        // ═══════════════════════════════════════════════════════════════
-        int g2y = y;
-        gy = y + GTH + GP;
+        int gx = MARGIN + GROUP_PADDING;
+        int gy = curY + GROUP_TITLE_H;
+        int innerAvailableW = groupW - 2 * GROUP_PADDING;
 
-        // Row 1: Keyboard + Edge mode
-        CreateModernLabel(g_str->keyboardEffect, x + GP, gy + 2, 52, CTRL_H, hWnd);
+        // 5 rows evenly dividing the 240px card body height
+        int rowsTotalH = 240;
+        int rowH = 48;
+
+        int row1Y = gy + (rowH * 0) + (rowH - 20) / 2;
+        int row2Y = gy + (rowH * 1) + (rowH - 20) / 2;
+        int row3Y = gy + (rowH * 2) + (rowH - 20) / 2;
+
+        // Color Preview (Left side, repositioned with equal gaps)
+        int previewSize = 100;
+        int previewGap = 20;
+        int previewX = gx + previewGap;
+        int previewY = gy + previewGap;
+        
+        g_state.hPreview = CreateWindowW(L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW | SS_NOTIFY,
+            previewX, previewY, previewSize, previewSize, hWnd, (HMENU)ID_STATIC_PREVIEW, hInst, NULL);
+        g_colorPreview.rect = {previewX, previewY, previewX + previewSize, previewY + previewSize};
+        SetWindowSubclass(g_state.hPreview, ColorPreviewSubclassProc, 1, 0);
+        AddTooltip(g_state.hTooltip, g_state.hPreview, g_str->tipColorPreview);
+
+        // Hex input (Directly under preview)
+        int hexInputY = previewY + previewSize + 15;
+        int hexLblW = 35;
+        int hexInputW = 80;
+        int hexStartX = previewX + (previewSize - (hexLblW + hexInputW + 2)) / 2;
+        
+        CreateWindowW(L"STATIC", g_str->hex, WS_CHILD | WS_VISIBLE, hexStartX, hexInputY + 4, hexLblW, 18, hWnd, NULL, hInst, NULL);
+        g_state.hEditHex = CreateWindowExW(0, L"EDIT", L"#0022FF",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_UPPERCASE, 
+            hexStartX + hexLblW + 2, hexInputY, hexInputW, 24, hWnd, (HMENU)ID_EDIT_HEX, hInst, NULL);
+        SetWindowSubclass(g_state.hEditHex, EditBorderSubclassProc, 1, 0);
+        AddTooltip(g_state.hTooltip, g_state.hEditHex, g_str->tipHexInput);
+
+        // Sliders (Right side, adjusted to avoid preview)
+        int valueLabelW = 35;
+        int maxSliderW = 200;
+        int labelW = 40;
+        int rightEdge = gx + innerAvailableW;
+        
+        // Dynamic slider width
+        int sliderStartX = previewX + previewSize + 40; 
+        int sliderW = rightEdge - sliderStartX - labelW - valueLabelW - 10;
+        if (sliderW > maxSliderW) sliderW = maxSliderW;
+
+        int valueLabelX = rightEdge - valueLabelW;
+        int sliderX = valueLabelX - sliderW - 5;
+        int labelX = sliderX - labelW - 5;
+
+        // R slider row
+        CreateWindowW(L"STATIC", g_str->red, WS_CHILD | WS_VISIBLE | SS_RIGHT, labelX, row1Y+2, labelW, 18, hWnd, NULL, hInst, NULL);
+        g_state.hSliderR = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+            sliderX, row1Y, sliderW, 20, hWnd, (HMENU)ID_SLIDER_R, hInst, NULL);
+        SendMessage(g_state.hSliderR, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
+        SendMessage(g_state.hSliderR, TBM_SETPOS, TRUE, g_state.red);
+        SetWindowSubclass(g_state.hSliderR, SliderSubclassProc, 1, (DWORD_PTR)&g_sliderR);
+        g_sliderR.slider.hWnd = g_state.hSliderR;
+        g_sliderR.slider.channel = 'R';
+        g_sliderR.slider.maxValue = 255;
+        g_state.hLabelRVal = CreateWindowW(L"STATIC", L"0", WS_CHILD | WS_VISIBLE | SS_CENTER,
+            valueLabelX, row1Y+2, valueLabelW, 18, hWnd, NULL, hInst, NULL);
+        AddTooltip(g_state.hTooltip, g_state.hSliderR, g_str->tipSliderR);
+
+        // G slider row
+        CreateWindowW(L"STATIC", g_str->green, WS_CHILD | WS_VISIBLE | SS_RIGHT, labelX, row2Y+2, labelW, 18, hWnd, NULL, hInst, NULL);
+        g_state.hSliderG = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+            sliderX, row2Y, sliderW, 20, hWnd, (HMENU)ID_SLIDER_G, hInst, NULL);
+        SendMessage(g_state.hSliderG, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
+        SendMessage(g_state.hSliderG, TBM_SETPOS, TRUE, g_state.green);
+        SetWindowSubclass(g_state.hSliderG, SliderSubclassProc, 2, (DWORD_PTR)&g_sliderG);
+        g_sliderG.slider.hWnd = g_state.hSliderG;
+        g_sliderG.slider.channel = 'G';
+        g_sliderG.slider.maxValue = 255;
+        g_state.hLabelGVal = CreateWindowW(L"STATIC", L"0", WS_CHILD | WS_VISIBLE | SS_CENTER,
+            valueLabelX, row2Y+2, valueLabelW, 18, hWnd, NULL, hInst, NULL);
+        AddTooltip(g_state.hTooltip, g_state.hSliderG, g_str->tipSliderG);
+
+        // B slider row
+        CreateWindowW(L"STATIC", g_str->blue, WS_CHILD | WS_VISIBLE | SS_RIGHT, labelX, row3Y+2, labelW, 18, hWnd, NULL, hInst, NULL);
+        g_state.hSliderB = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+            sliderX, row3Y, sliderW, 20, hWnd, (HMENU)ID_SLIDER_B, hInst, NULL);
+        SendMessage(g_state.hSliderB, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
+        SendMessage(g_state.hSliderB, TBM_SETPOS, TRUE, g_state.blue);
+        SetWindowSubclass(g_state.hSliderB, SliderSubclassProc, 3, (DWORD_PTR)&g_sliderB);
+        g_sliderB.slider.hWnd = g_state.hSliderB;
+        g_sliderB.slider.channel = 'B';
+        g_sliderB.slider.maxValue = 255;
+        g_state.hLabelBVal = CreateWindowW(L"STATIC", L"0", WS_CHILD | WS_VISIBLE | SS_CENTER,
+            valueLabelX, row3Y+2, valueLabelW, 18, hWnd, NULL, hInst, NULL);
+        AddTooltip(g_state.hTooltip, g_state.hSliderB, g_str->tipSliderB);
+
+        // Color preset buttons
+        int row5Y = gy + (rowH * 4) + (rowH - BTN_H) / 2;
+        int px = gx;
+        int pbwTotalAvailable = innerAvailableW - (6 * BTN_GAP);
+        int pbw = pbwTotalAvailable / 7;
+        int rem = pbwTotalAvailable % 7;
+        
+        struct { int id; const wchar_t* label; } presets[] = {
+            {ID_BTN_PRESET_BLUE, g_str->presetBlue}, {ID_BTN_PRESET_RED, g_str->presetRed},
+            {ID_BTN_PRESET_GREEN, g_str->presetGreen}, {ID_BTN_PRESET_CYAN, g_str->presetCyan},
+            {ID_BTN_PRESET_PURPLE, g_str->presetPurple}, {ID_BTN_PRESET_WHITE, g_str->presetWhite},
+            {ID_BTN_PRESET_OFF, g_str->presetOff}
+        };
+        for (int i = 0; i < 7; i++) {
+            int currentPbw = pbw + (i < rem ? 1 : 0);
+            CreateWindowW(L"BUTTON", presets[i].label, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                px, row5Y, currentPbw, BTN_H, hWnd, (HMENU)(INT_PTR)presets[i].id, hInst, NULL);
+            px += currentPbw + BTN_GAP;
+        }
+
+        curY = g_cards[0].rect.bottom + GROUP_MARGIN;
+        // ============= EFFECTS GROUP =============
+        g_cards[1].rect = {MARGIN, curY, MARGIN + groupW, curY + GROUP_TITLE_H + 85};
+        wcscpy_s(g_cards[1].title, g_str->effects);
+        g_numCards = 2;
+        
+        gx = MARGIN + GROUP_PADDING;
+        gy = curY + GROUP_TITLE_H;
+
+        // Keyboard mode combo
+        CreateWindowW(L"STATIC", g_str->keyboardEffect, WS_CHILD | WS_VISIBLE, gx, gy+3, 70, 18, hWnd, NULL, hInst, NULL);
         g_state.hComboKbMode = CreateWindowW(L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
-            x + GP + 56, gy, 130, 200, hWnd, (HMENU)ID_COMBO_KB_MODE, NULL, NULL);
-        SetWindowTheme(g_state.hComboKbMode, L"DarkMode_CFD", NULL);
-        ApplyModernComboStyle(g_state.hComboKbMode);
-        SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Static");
-        SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Breathing");
-        SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Spectrum");
-        SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Wave");
-        SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Wave Long");
-        SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Wheel");
-        SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Reactive");
-        SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Ripple");
-        SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Starlight");
-        SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Rainbow");
-        SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)L"Hurricane");
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            gx+75, gy, MAX_COMBO_W, 200, hWnd, (HMENU)ID_COMBO_KB_MODE, hInst, NULL);
+        const wchar_t* kbModes[] = {g_str->modeStatic, g_str->modeBreathing, L"Spectrum", L"Wave Short",
+            L"Wave Long", L"Color Wheel", g_str->modeReactive, L"Ripple", L"Starlight", g_str->modeRainbow, L"Hurricane"};
+        for (int i = 0; i < 11; i++) SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)kbModes[i]);
         SendMessage(g_state.hComboKbMode, CB_SETCURSEL, 0, 0);
+        AddTooltip(g_state.hTooltip, g_state.hComboKbMode, g_str->tipKeyboardMode);
 
-        CreateModernLabel(g_str->edgeEffect, x + GP + 200, gy + 2, 36, CTRL_H, hWnd);
+        // Edge mode combo
+        int edgeX = gx + 75 + MAX_COMBO_W + 20;
+        CreateWindowW(L"STATIC", g_str->edgeEffect, WS_CHILD | WS_VISIBLE, edgeX, gy+3, 50, 18, hWnd, NULL, hInst, NULL);
         g_state.hComboEdgeMode = CreateWindowW(L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-            x + GP + 240, gy, 120, 200, hWnd, (HMENU)ID_COMBO_EDGE_MODE, NULL, NULL);
-        SetWindowTheme(g_state.hComboEdgeMode, L"DarkMode_CFD", NULL);
-        ApplyModernComboStyle(g_state.hComboEdgeMode);
-        SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)L"Freeze");
-        SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)L"Wave");
-        SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)L"Spectrum");
-        SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)L"Breath");
-        SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)L"Static");
-        SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)L"Off");
-        SendMessage(g_state.hComboEdgeMode, CB_SETCURSEL, 4, 0);
-        gy += CTRL_H + IS;
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            edgeX+55, gy, MAX_COMBO_W, 200, hWnd, (HMENU)ID_COMBO_EDGE_MODE, hInst, NULL);
+        const wchar_t* edgeModes[] = {g_str->edgeStatic, g_str->edgeBreathing, g_str->edgeWave, g_str->edgeSpectrum, g_str->edgeOff};
+        for (int i = 0; i < 5; i++) SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)edgeModes[i]);
+        SendMessage(g_state.hComboEdgeMode, CB_SETCURSEL, 0, 0);
+        AddTooltip(g_state.hTooltip, g_state.hComboEdgeMode, g_str->tipEdgeMode);
 
-        // Row 2: Brightness + Speed
-        CreateModernLabel(g_str->brightness, x + GP, gy + 2, 80, CTRL_H, hWnd);
-        g_state.hSliderBrightness = CreateWindowW(TRACKBAR_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
-            x + GP + 84, gy, 110, SLIDER_H, hWnd, (HMENU)ID_SLIDER_BRIGHTNESS, NULL, NULL);
-        SendMessage(g_state.hSliderBrightness, TBM_SETRANGE, TRUE, MAKELONG(0, 4));
-        SendMessage(g_state.hSliderBrightness, TBM_SETPOS, TRUE, 4);
-        SetWindowTheme(g_state.hSliderBrightness, L"", L"");
+        // Brightness slider
+        int effY2 = gy + CTRL_H + ITEM_SPACING + 15;
+        CreateWindowW(L"STATIC", g_str->brightness, WS_CHILD | WS_VISIBLE, gx, effY2+2, 70, 18, hWnd, NULL, hInst, NULL);
+        g_state.hSliderBrightness = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+            gx+75, effY2, 150, 20, hWnd, (HMENU)ID_SLIDER_BRIGHTNESS, hInst, NULL);
+        SendMessage(g_state.hSliderBrightness, TBM_SETRANGE, TRUE, MAKELPARAM(0, 4));
+        SendMessage(g_state.hSliderBrightness, TBM_SETPOS, TRUE, g_state.brightness);
+        SetWindowSubclass(g_state.hSliderBrightness, SliderSubclassProc, 4, (DWORD_PTR)&g_sliderBrightness);
+        g_sliderBrightness.slider.hWnd = g_state.hSliderBrightness;
+        g_sliderBrightness.slider.channel = 'X';
+        g_sliderBrightness.slider.maxValue = 4;
 
-        CreateModernLabel(g_str->speed, x + GP + 210, gy + 2, 60, CTRL_H, hWnd);
-        g_state.hSliderSpeed = CreateWindowW(TRACKBAR_CLASSW, L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
-            x + GP + 274, gy, 110, SLIDER_H, hWnd, (HMENU)ID_SLIDER_SPEED, NULL, NULL);
-        SendMessage(g_state.hSliderSpeed, TBM_SETRANGE, TRUE, MAKELONG(0, 5));
-        SendMessage(g_state.hSliderSpeed, TBM_SETPOS, TRUE, 2);
-        SetWindowTheme(g_state.hSliderSpeed, L"", L"");
+        // Speed slider
+        CreateWindowW(L"STATIC", g_str->speed, WS_CHILD | WS_VISIBLE, edgeX, effY2+2, 50, 18, hWnd, NULL, hInst, NULL);
+        g_state.hSliderSpeed = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+            edgeX+55, effY2, 150, 20, hWnd, (HMENU)ID_SLIDER_SPEED, hInst, NULL);
+        SendMessage(g_state.hSliderSpeed, TBM_SETRANGE, TRUE, MAKELPARAM(0, 5));
+        SendMessage(g_state.hSliderSpeed, TBM_SETPOS, TRUE, g_state.speed);
+        SetWindowSubclass(g_state.hSliderSpeed, SliderSubclassProc, 5, (DWORD_PTR)&g_sliderSpeed);
+        g_sliderSpeed.slider.hWnd = g_state.hSliderSpeed;
+        g_sliderSpeed.slider.channel = 'X';
+        g_sliderSpeed.slider.maxValue = 5;
+        AddTooltip(g_state.hTooltip, g_state.hSliderSpeed, g_str->tipSpeed);
+        curY = g_cards[1].rect.bottom + GROUP_MARGIN;
 
-        int g2h = gy + SLIDER_H + GP - g2y;
-        g_groups[1] = {x, g2y, CW, g2h, g_str->effects};
-        y = g2y + g2h + GM;
+        // ============= DEVICES GROUP =============
+        g_cards[2].rect = {MARGIN, curY, MARGIN + groupW, curY + GROUP_TITLE_H + 65};
+        wcscpy_s(g_cards[2].title, g_str->devices);
+        g_numCards = 3;
+        
+        gx = MARGIN + GROUP_PADDING;
+        gy = curY + GROUP_TITLE_H;
+        // Device checkboxes (first row)
+        // Set the positioning step wider than the control width to prevent 
+        // expanded client areas (from Modern UI glow) from overlapping.
+        int ck_width = 105;
+        int ck_step = 120;
+        g_state.hCheckAura = CreateWindowW(L"BUTTON", L"Aura", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            gx, gy, ck_width, 20, hWnd, (HMENU)ID_CHECK_AURA, hInst, NULL);
+        g_state.hCheckMouse = CreateWindowW(L"BUTTON", L"Mouse", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            gx+ck_step, gy, ck_width, 20, hWnd, (HMENU)ID_CHECK_MOUSE, hInst, NULL);
+        g_state.hCheckKeyboard = CreateWindowW(L"BUTTON", L"Keyboard", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            gx+ck_step*2, gy, ck_width, 20, hWnd, (HMENU)ID_CHECK_KEYBOARD, hInst, NULL);
+        g_state.hCheckRAM = CreateWindowW(L"BUTTON", L"RAM", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            gx+ck_step*3, gy, ck_width, 20, hWnd, (HMENU)ID_CHECK_RAM, hInst, NULL);
+        g_state.hCheckEdge = CreateWindowW(L"BUTTON", L"Edge", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            gx+ck_step*4, gy, ck_width, 20, hWnd, (HMENU)ID_CHECK_EDGE, hInst, NULL);
+        SendMessage(g_state.hCheckAura, BM_SETCHECK, g_state.enableAura ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessage(g_state.hCheckMouse, BM_SETCHECK, g_state.enableMouse ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessage(g_state.hCheckKeyboard, BM_SETCHECK, g_state.enableKeyboard ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessage(g_state.hCheckRAM, BM_SETCHECK, g_state.enableRAM ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessage(g_state.hCheckEdge, BM_SETCHECK, g_state.enableEdge ? BST_CHECKED : BST_UNCHECKED, 0);
 
-        // ═══════════════════════════════════════════════════════════════
-        // GROUP 3: DEVICES
-        // ═══════════════════════════════════════════════════════════════
-        int g3y = y;
-        gy = y + GTH + GP;
+        // Utility buttons (second row)
+        int btnY2 = gy + 24;
+        CreateWindowW(L"BUTTON", g_str->channelCorrection, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            gx, btnY2, 100, BTN_H, hWnd, (HMENU)ID_BTN_CHANNEL_SETTINGS, hInst, NULL);
+        CreateWindowW(L"BUTTON", L"ASUS Test", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            gx+106, btnY2, 80, BTN_H, hWnd, (HMENU)ID_BTN_ASUS_TEST, hInst, NULL);
+        CreateWindowW(L"BUTTON", L"HID Reset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            gx+192, btnY2, 80, BTN_H, hWnd, (HMENU)ID_BTN_HID_RESET, hInst, NULL);
+        curY = g_cards[2].rect.bottom + GROUP_MARGIN;
 
-        // Row 1: Device checkboxes (auto-width based on text)
-        int cbW = 0, cbX = x + GP;
-        int cbGap = 6;  // Gap between checkboxes
+        // ============= PROFILES & SETTINGS GROUP =============
+        g_cards[3].rect = {MARGIN, curY, MARGIN + groupW, curY + GROUP_TITLE_H + 65};
+        wcscpy_s(g_cards[3].title, g_str->profilesSettings);
+        g_numCards = 4;
+        gx = MARGIN + GROUP_PADDING;
+        gy = curY + GROUP_TITLE_H;
 
-        g_state.hCheckAura = CreateModernCheckbox(L"ASUS Aura", cbX, gy, CTRL_H, hWnd, ID_CHECK_AURA, &cbW);
-        SendMessage(g_state.hCheckAura, BM_SETCHECK, BST_CHECKED, 0);
-        cbX += cbW + cbGap;
-
-        g_state.hCheckMouse = CreateModernCheckbox(L"SteelSeries", cbX, gy, CTRL_H, hWnd, ID_CHECK_MOUSE, &cbW);
-        SendMessage(g_state.hCheckMouse, BM_SETCHECK, BST_CHECKED, 0);
-        cbX += cbW + cbGap;
-
-        g_state.hCheckKeyboard = CreateModernCheckbox(L"Keyboard", cbX, gy, CTRL_H, hWnd, ID_CHECK_KEYBOARD, &cbW);
-        SendMessage(g_state.hCheckKeyboard, BM_SETCHECK, BST_CHECKED, 0);
-        cbX += cbW + cbGap;
-
-        g_state.hCheckEdge = CreateModernCheckbox(L"Edge", cbX, gy, CTRL_H, hWnd, ID_CHECK_EDGE, &cbW);
-        SendMessage(g_state.hCheckEdge, BM_SETCHECK, BST_CHECKED, 0);
-        cbX += cbW + cbGap;
-
-        g_state.hCheckRAM = CreateModernCheckbox(L"RAM", cbX, gy, CTRL_H, hWnd, ID_CHECK_RAM, &cbW);
-        SendMessage(g_state.hCheckRAM, BM_SETCHECK, BST_CHECKED, 0);
-
-        // Row 2: Action buttons (right-aligned within group)
-        gy += CTRL_H + IS;
-
-        CreateModernButton(g_str->channelCorrection, WS_CHILD | WS_VISIBLE,
-            x + GP, gy, 70, CTRL_H, hWnd, ID_BTN_CHANNEL_SETTINGS);
-
-        CreateModernButton(L"ASUS", WS_CHILD | WS_VISIBLE,
-            x + GP + 75, gy, 50, CTRL_H, hWnd, ID_BTN_ASUS_TEST);
-
-        CreateModernButton(L"HID Reset", WS_CHILD | WS_VISIBLE,
-            x + GP + 130, gy, 70, CTRL_H, hWnd, ID_BTN_HID_RESET);
-
-        int g3h = gy + CTRL_H + GP - g3y;
-        g_groups[2] = {x, g3y, CW, g3h, g_str->devices};
-        y = g3y + g3h + GM;
-
-        // ═══════════════════════════════════════════════════════════════
-        // GROUP 4: PROFILES
-        // ═══════════════════════════════════════════════════════════════
-        int g4y = y;
-        gy = y + GTH + GP;
-
-        // Row 1: Profile dropdown + Save/Load
-        CreateModernLabel(g_str->profile, x + GP, gy + 2, 40, CTRL_H, hWnd);
+        // Profile row
+        // Account for +5px glow expansion on each side of buttons/combos:
+        // leave 15px gap between elements (5px own expansion + 5px neighbor + 5px margin)
+        int profLabelW = 50;
+        int profComboW = 140;
+        int profBtnW = 75;
+        int profGap = 15;  // gap between expanded controls
+        int profX = gx;
+        CreateWindowW(L"STATIC", g_str->profile, WS_CHILD | WS_VISIBLE, profX, gy+3, profLabelW, 18, hWnd, NULL, hInst, NULL);
+        profX += profLabelW + 5;
         g_state.hComboProfiles = CreateWindowW(L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWN | WS_VSCROLL,
-            x + GP + 44, gy, 110, 200, hWnd, (HMENU)ID_COMBO_PROFILES, NULL, NULL);
-        SetWindowTheme(g_state.hComboProfiles, L"DarkMode_CFD", NULL);
-        ApplyModernComboStyle(g_state.hComboProfiles);
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | WS_VSCROLL,
+            profX, gy, profComboW, 200, hWnd, (HMENU)ID_COMBO_PROFILES, hInst, NULL);
+        profX += profComboW + profGap;
+        CreateWindowW(L"BUTTON", g_str->save, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            profX, gy, profBtnW, BTN_H, hWnd, (HMENU)ID_BTN_SAVE_PROFILE, hInst, NULL);
+        profX += profBtnW + profGap;
+        CreateWindowW(L"BUTTON", g_str->load, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            profX, gy, profBtnW, BTN_H, hWnd, (HMENU)ID_BTN_LOAD_PROFILE, hInst, NULL);
 
-        CreateModernButton(g_str->save, WS_CHILD | WS_VISIBLE,
-            x + GP + 160, gy, 65, CTRL_H, hWnd, ID_BTN_SAVE_PROFILE);
-        CreateModernButton(g_str->load, WS_CHILD | WS_VISIBLE,
-            x + GP + 230, gy, 50, CTRL_H, hWnd, ID_BTN_LOAD_PROFILE);
-
-        // Settings checkboxes (auto-width)
-        int settingsCbX = x + GP + 285;
-        g_state.hCheckAutostart = CreateModernCheckbox(g_str->autostart, settingsCbX, gy, CTRL_H, hWnd, ID_CHECK_AUTOSTART, &cbW);
-        if (IsAutoStartEnabled()) {
-            SendMessage(g_state.hCheckAutostart, BM_SETCHECK, BST_CHECKED, 0);
-            g_state.autostart = true;
-        }
-        settingsCbX += cbW + cbGap;
-
-        g_state.hCheckMinimizeTray = CreateModernCheckbox(g_str->tray, settingsCbX, gy, CTRL_H, hWnd, ID_CHECK_MINIMIZE_TRAY, &cbW);
-        SendMessage(g_state.hCheckMinimizeTray, BM_SETCHECK, BST_CHECKED, 0);
-
-        int g4h = gy + CTRL_H + GP - g4y;
-        g_groups[3] = {x, g4y, CW, g4h, g_str->profilesSettings};
-        g_numGroups = 4;
-        y = g4y + g4h + GM;
-
-        // ═══════════════════════════════════════════════════════════════
-        // APPLY BUTTON + AUTO-APPLY CHECKBOX
-        // ═══════════════════════════════════════════════════════════════
-        int applyBtnW = 120;
-        CreateModernButton(g_str->apply, WS_CHILD | WS_VISIBLE,
-            x, y, applyBtnW, 32, hWnd, ID_BTN_APPLY);
-
-        g_state.hCheckAutoApply = CreateModernCheckbox(g_str->autoApply, x + applyBtnW + 12, y + 4, CTRL_H, hWnd, ID_CHECK_AUTO_APPLY, NULL);
+        // Settings checkboxes row
+        int setY = gy + CTRL_H + ITEM_SPACING;
+        g_state.hCheckAutostart = CreateWindowW(L"BUTTON", g_str->autostart, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            gx, setY, ck_width, 20, hWnd, (HMENU)ID_CHECK_AUTOSTART, hInst, NULL);
+        g_state.hCheckMinimizeTray = CreateWindowW(L"BUTTON", g_str->tray, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            gx+ck_step, setY, ck_width, 20, hWnd, (HMENU)ID_CHECK_MINIMIZE_TRAY, hInst, NULL);
+        g_state.hCheckAutoApply = CreateWindowW(L"BUTTON", g_str->autoApply, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            gx+ck_step*2, setY, ck_width, 20, hWnd, (HMENU)ID_CHECK_AUTO_APPLY, hInst, NULL);
+        SendMessage(g_state.hCheckAutostart, BM_SETCHECK, g_state.autostart ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessage(g_state.hCheckMinimizeTray, BM_SETCHECK, g_state.minimizeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessage(g_state.hCheckAutoApply, BM_SETCHECK, g_state.autoApply ? BST_CHECKED : BST_UNCHECKED, 0);
+        curY = g_cards[3].rect.bottom + GROUP_MARGIN;
 
-        y += 36;
+        // ============= ACTION BUTTONS =============
+        CreateWindowW(L"BUTTON", g_str->apply, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            MARGIN, curY, MAX_BUTTON_W + 20, BTN_H + 4, hWnd, (HMENU)ID_BTN_APPLY, hInst, NULL);
+        CreateWindowW(L"BUTTON", g_str->theme, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            MARGIN + MAX_BUTTON_W + 30, curY, 65, BTN_H, hWnd, (HMENU)ID_BTN_THEME, hInst, NULL);
+        CreateWindowW(L"BUTTON", L"DE/EN", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            MARGIN + MAX_BUTTON_W + 100, curY, 55, BTN_H, hWnd, (HMENU)ID_BTN_LANG, hInst, NULL);
+        curY += BTN_H + 8;
 
-        // ═══════════════════════════════════════════════════════════════
-        // GROUP 5: STATUS
-        // ═══════════════════════════════════════════════════════════════
-        int g5y = y;
-        gy = y + GTH + GP;
+        // ============= STATUS LOG =============
+        g_state.hStatus = CreateWindowExW(0, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+            MARGIN, curY, groupW, STATUS_H, hWnd, (HMENU)ID_STATIC_STATUS, hInst, NULL);
+        SetWindowSubclass(g_state.hStatus, EditBorderSubclassProc, 1, 0);
+        // Apply Explorer theme for better scrollbars
+        SetWindowTheme(g_state.hStatus, L"Explorer", NULL);
 
-        // Logo dimensions and spacing
-        int logoSize = 64;
-        int logoMargin = 12;  // Margin from edges
-        int statusLogWidth = CW - GP * 2 - logoSize - logoMargin;  // Leave space for logo
-
-        // Status log container (owner-draw for rounded background)
-        int statusLogHeight = STATUS_H - GTH - GP * 2;
-        int borderInset = 6;  // Inset for border visibility (enough for rounded corners)
-
-        // Create container for rounded border effect (drawn first, behind edit)
-        g_state.hStatusBorder = CreateWindowW(L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
-            x + GP, gy, statusLogWidth, statusLogHeight, hWnd, (HMENU)9998, NULL, NULL);
-
-        // Status log inside container (slightly inset for border)
-        g_state.hStatus = CreateWindowW(L"EDIT", g_str->ready,
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
-            x + GP + borderInset, gy + borderInset,
-            statusLogWidth - borderInset * 2, statusLogHeight - borderInset * 2,
-            hWnd, (HMENU)ID_STATIC_STATUS, NULL, NULL);
-        // Apply dark theme to scrollbar
-        SetWindowTheme(g_state.hStatus, L"DarkMode_Explorer", NULL);
-        // Apply rounded corners to status log
-        int editW = statusLogWidth - borderInset * 2;
-        int editH = statusLogHeight - borderInset * 2;
-        HRGN hRgn = CreateRoundRectRgn(0, 0, editW + 1, editH + 1, 6, 6);
-        SetWindowRgn(g_state.hStatus, hRgn, TRUE);
-
-        // Logo control (owner-draw static, positioned in bottom-right of status group)
-        int logoX = x + CW - GP - logoSize;
-        int logoY = gy + (STATUS_H - GTH - GP * 2) / 2 - logoSize / 2;  // Vertically centered in status area
-        g_state.hLogo = CreateWindowW(L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
-            logoX, logoY, logoSize, logoSize, hWnd, (HMENU)9999, NULL, NULL);
-
-        int g5h = STATUS_H;
-        g_groups[4] = {x, g5y, CW, g5h, g_str->statusTitle};
-        g_numGroups = 5;
-
-        // Initialize
-        UpdateSliders();
-        UpdateHexEdit();
-        RefreshProfileList();
-        CreateTrayIcon(hWnd);
-        g_channels.Load();
-
-        // Load last profile if exists
-        if (!g_state.lastProfile.empty()) {
-            // Check if profile exists in list
-            for (const auto& p : g_state.profiles) {
-                if (p == g_state.lastProfile) {
-                    LoadProfile(g_state.lastProfile);
-                    UpdateSliders();
-                    UpdateHexEdit();
-                    UpdatePreview();
-                    // Select in combo
-                    SetWindowTextW(g_state.hComboProfiles, g_state.lastProfile.c_str());
-                    // Apply colors only on real startup, not after theme/language change
-                    if (!g_skipApplyOnStart) {
-                        ApplyColors();
-                    }
-                    break;
+        // Apply font to all child windows
+        EnumChildWindows(hWnd, [](HWND hChild, LPARAM lParam) -> BOOL {
+            SendMessage(hChild, WM_SETFONT, (WPARAM)lParam, TRUE);
+            
+            // Auto-subclass all buttons and checkboxes for Modern UI
+            wchar_t className[256];
+            GetClassNameW(hChild, className, 256);
+            bool expand = false;
+            
+            if (wcscmp(className, L"Button") == 0 || wcscmp(className, L"BUTTON") == 0) {
+                SetWindowSubclass(hChild, BtnCheckboxSubclassProc, 1, 0);
+                expand = true;
+            } else if (wcscmp(className, L"ComboBox") == 0 || wcscmp(className, L"COMBOBOX") == 0) {
+                SetWindowSubclass(hChild, ComboSubclassProc, 1, 0);
+                // Do NOT expand comboboxes - glow expansion breaks native dropdown functionality
+                expand = false;
+                
+                // Find and fix the internal Edit control (inside CBS_DROPDOWN)
+                HWND hEdit = FindWindowExW(hChild, NULL, L"EDIT", NULL);
+                if (hEdit) {
+                    SetWindowSubclass(hEdit, EditSubclassProc, 1, 0);
+                    // Remove native border from internal Edit
+                    SetWindowLong(hEdit, GWL_EXSTYLE, GetWindowLong(hEdit, GWL_EXSTYLE) & ~WS_EX_CLIENTEDGE);
+                    // Position Edit so it doesn't overlap our custom arrow (which is at end - 30)
+                    RECT rc; GetClientRect(hChild, &rc);
+                    SetWindowPos(hEdit, NULL, 10, 4, rc.right - 40, rc.bottom - 8, SWP_NOZORDER | SWP_FRAMECHANGED);
                 }
+            } else if (wcscmp(className, L"Static") == 0 || wcscmp(className, L"STATIC") == 0) {
+                LONG style = GetWindowLong(hChild, GWL_STYLE);
+                if (!(style & SS_OWNERDRAW)) { // Don't override the Color Preview box
+                    SetWindowSubclass(hChild, StaticSubclassProc, 1, 0);
+                }
+            } else if (wcscmp(className, L"msctls_trackbar32") == 0 || wcscmp(className, L"Trackbar") == 0) {
+                // Slider expansion handled exclusively to 10px instead of 5px
+                RECT rcC; GetWindowRect(hChild, &rcC);
+                MapWindowPoints(HWND_DESKTOP, GetParent(hChild), (LPPOINT)&rcC, 2);
+                SetWindowPos(hChild, NULL, rcC.left - 10, rcC.top - 10, (rcC.right - rcC.left) + 20, (rcC.bottom - rcC.top) + 20, SWP_NOZORDER);
+                expand = false;
             }
+            
+            if (expand) {
+                // Expand window by 5px on all sides to allow rendering glow effects naturally
+                RECT rcC; GetWindowRect(hChild, &rcC);
+                MapWindowPoints(HWND_DESKTOP, GetParent(hChild), (LPPOINT)&rcC, 2);
+                SetWindowPos(hChild, NULL, rcC.left - 5, rcC.top - 5, (rcC.right - rcC.left) + 10, (rcC.bottom - rcC.top) + 10, SWP_NOZORDER);
+            }
+            
+            return TRUE;
+        }, (LPARAM)hFont);
+
+        // Load saved settings into controls
+        g_channels.Load();
+        RefreshProfileList();
+        UpdateSliders();
+        UpdatePreview();
+
+        // Load saved profile if any
+        if (!g_state.lastProfile.empty()) {
+            LoadProfile(g_state.lastProfile);
+            UpdateAllControls();
         }
 
-        // Register global hotkeys (Ctrl+Alt+1-6)
-        RegisterHotKey(hWnd, ID_HOTKEY_BLUE, MOD_CONTROL | MOD_ALT, '1');
-        RegisterHotKey(hWnd, ID_HOTKEY_RED, MOD_CONTROL | MOD_ALT, '2');
-        RegisterHotKey(hWnd, ID_HOTKEY_GREEN, MOD_CONTROL | MOD_ALT, '3');
-        RegisterHotKey(hWnd, ID_HOTKEY_WHITE, MOD_CONTROL | MOD_ALT, '4');
+        // Register global hotkeys
+        RegisterHotKey(hWnd, ID_HOTKEY_BLUE, MOD_CONTROL | MOD_ALT, 'B');
+        RegisterHotKey(hWnd, ID_HOTKEY_RED, MOD_CONTROL | MOD_ALT, 'R');
+        RegisterHotKey(hWnd, ID_HOTKEY_GREEN, MOD_CONTROL | MOD_ALT, 'G');
+        RegisterHotKey(hWnd, ID_HOTKEY_WHITE, MOD_CONTROL | MOD_ALT, 'W');
         RegisterHotKey(hWnd, ID_HOTKEY_OFF, MOD_CONTROL | MOD_ALT, '0');
-        RegisterHotKey(hWnd, ID_HOTKEY_TOGGLE, MOD_CONTROL | MOD_ALT, VK_SPACE);
 
-        // ═══════════════════════════════════════════════════════════════
-        // TOOLTIPS - Add info bubbles to all controls
-        // ═══════════════════════════════════════════════════════════════
-        CreateTooltipControl(hWnd);
-
-        // Color section - Sliders and preview
-        AddTooltip(hWnd, g_state.hSliderR, g_str->tipSliderR);
-        AddTooltip(hWnd, g_state.hSliderG, g_str->tipSliderG);
-        AddTooltip(hWnd, g_state.hSliderB, g_str->tipSliderB);
-        AddTooltip(hWnd, g_state.hPreview, g_str->tipColorPreview);
-        AddTooltip(hWnd, g_state.hEditHex, g_str->tipHexInput);
-
-        // Color section - Buttons (via control ID)
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PICK_COLOR), g_str->tipPickColor);
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_THEME), g_str->tipTheme);
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_LANG), g_str->tipLang);
-
-        // Color presets
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_BLUE), g_str->tipPresetBlue);
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_RED), g_str->tipPresetRed);
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_GREEN), g_str->tipPresetGreen);
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_CYAN), g_str->tipPresetCyan);
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_PURPLE), g_str->tipPresetPurple);
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_WHITE), g_str->tipPresetWhite);
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_PRESET_OFF), g_str->tipPresetOff);
-
-        // Effects section
-        AddTooltip(hWnd, g_state.hComboKbMode, g_str->tipKeyboardMode);
-        AddTooltip(hWnd, g_state.hComboEdgeMode, g_str->tipEdgeMode);
-        AddTooltip(hWnd, g_state.hSliderBrightness, g_str->tipBrightness);
-        AddTooltip(hWnd, g_state.hSliderSpeed, g_str->tipSpeed);
-
-        // Devices section
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_CHANNEL_SETTINGS), g_str->tipChannels);
-
-        // Profile section
-        AddTooltip(hWnd, g_state.hComboProfiles, g_str->tipProfile);
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_SAVE_PROFILE), g_str->tipSave);
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_LOAD_PROFILE), g_str->tipLoad);
-        AddTooltip(hWnd, g_state.hCheckAutostart, g_str->tipAutostart);
-        AddTooltip(hWnd, g_state.hCheckMinimizeTray, g_str->tipTray);
-        AddTooltip(hWnd, g_state.hCheckAutoApply, g_str->tipLive);
-
-        // Apply button
-        AddTooltip(hWnd, GetDlgItem(hWnd, ID_BTN_APPLY), g_str->tipApply);
-
-        // Status log
-        AddTooltip(hWnd, g_state.hStatus, g_str->tipStatus);
-
-        break;
-    }
-
-    case WM_HOTKEY: {
-        static bool ledsOn = true;
-        static uint8_t lastR = 0, lastG = 34, lastB = 255;
-
-        switch (wParam) {
-            case ID_HOTKEY_BLUE:
-                SetPresetColor(0, 34, 255);
-                ApplyColors();
-                break;
-            case ID_HOTKEY_RED:
-                SetPresetColor(255, 0, 0);
-                ApplyColors();
-                break;
-            case ID_HOTKEY_GREEN:
-                SetPresetColor(0, 255, 0);
-                ApplyColors();
-                break;
-            case ID_HOTKEY_WHITE:
-                SetPresetColor(255, 255, 255);
-                ApplyColors();
-                break;
-            case ID_HOTKEY_OFF:
-                SetPresetColor(0, 0, 0);
-                ApplyColors();
-                break;
-            case ID_HOTKEY_TOGGLE:
-                if (ledsOn) {
-                    lastR = g_state.red; lastG = g_state.green; lastB = g_state.blue;
-                    SetPresetColor(0, 0, 0);
-                } else {
-                    SetPresetColor(lastR, lastG, lastB);
-                }
-                ledsOn = !ledsOn;
-                ApplyColors();
-                break;
+        // Apply colors on startup (unless --no-apply)
+        if (!g_skipApplyOnStart) {
+            std::thread(ApplyColors).detach();
         }
+        LogDebug("WM_CREATE finished");
+        AppendStatus(L"OneClickRGB started");
         break;
     }
+    case WM_ERASEBKGND:
+        return 1; // Handled, prevent flicker
 
+    case WM_PRINTCLIENT:
     case WM_PAINT: {
         PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
+        HDC hdc = (msg == WM_PRINTCLIENT) ? (HDC)wParam : BeginPaint(hWnd, &ps);
 
-        RECT clientRect;
-        GetClientRect(hWnd, &clientRect);
+        // Double buffering to prevent flicker
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
+        HDC hdcMem = CreateCompatibleDC(hdc);
+        HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rcClient.right, rcClient.bottom);
+        HBITMAP hOldBm = (HBITMAP)SelectObject(hdcMem, hbmMem);
 
-        // Simple gradient background using GDI+
-        Gdiplus::Graphics g(hdc);
-        g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
-        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        // Fill background
+        HBRUSH bgBrush = CreateSolidBrush(g_currentTheme->bgWindowTop);
+        FillRect(hdcMem, &rcClient, bgBrush);
+        DeleteObject(bgBrush);
 
-        // Diagonal gradient
-        Gdiplus::LinearGradientBrush bgBrush(
-            Gdiplus::Point(0, 0),
-            Gdiplus::Point(clientRect.right, clientRect.bottom),
-            Gdiplus::Color(255, 20, 22, 30),
-            Gdiplus::Color(255, 35, 40, 55)
-        );
-        g.FillRectangle(&bgBrush, 0, 0, clientRect.right, clientRect.bottom);
-
-        // Draw group boxes with rounded corners
-        for (int i = 0; i < g_numGroups; i++) {
-            DrawThemedGroupBox(hdc, g_groups[i]);
+        // Draw modern cards globally
+        for (int i = 0; i < g_numCards; i++) {
+            g_cards[i].Draw(hdcMem);
         }
 
-        // Status log border is drawn via owner-draw control (WM_DRAWITEM, ID 9998)
-        // Logo is drawn in its own owner-draw control (WM_DRAWITEM, ID 9999)
+        // Blit and cleanup
+        BitBlt(hdc, 0, 0, rcClient.right, rcClient.bottom, hdcMem, 0, 0, SRCCOPY);
+        SelectObject(hdcMem, hOldBm);
+        DeleteObject(hbmMem);
+        DeleteDC(hdcMem);
 
-        EndPaint(hWnd, &ps);
+        if (msg == WM_PAINT) EndPaint(hWnd, &ps);
         return 0;
     }
 
-    case WM_CTLCOLORSTATIC: {
-        HDC hdc = (HDC)wParam;
-        HWND ctrl = (HWND)lParam;
-
-        // Status log (readonly edit) - needs solid background to prevent ghosting
-        if (ctrl == g_state.hStatus) {
-            SetTextColor(hdc, g_currentTheme->statusText);
-            SetBkMode(hdc, OPAQUE);
-            SetBkColor(hdc, g_currentTheme->statusBg);
-            static HBRUSH hStatusBrush = NULL;
-            static COLORREF lastStatusBg = 0;
-            if (!hStatusBrush || lastStatusBg != g_currentTheme->statusBg) {
-                if (hStatusBrush) DeleteObject(hStatusBrush);
-                hStatusBrush = CreateSolidBrush(g_currentTheme->statusBg);
-                lastStatusBg = g_currentTheme->statusBg;
-            }
-            return (LRESULT)hStatusBrush;
+    case WM_HSCROLL: {
+        HWND hSlider = (HWND)lParam;
+        if (hSlider == g_state.hSliderR) {
+            g_state.red = (uint8_t)SendMessage(hSlider, TBM_GETPOS, 0, 0);
+        } else if (hSlider == g_state.hSliderG) {
+            g_state.green = (uint8_t)SendMessage(hSlider, TBM_GETPOS, 0, 0);
+        } else if (hSlider == g_state.hSliderB) {
+            g_state.blue = (uint8_t)SendMessage(hSlider, TBM_GETPOS, 0, 0);
+        } else if (hSlider == g_state.hSliderBrightness) {
+            g_state.brightness = (uint8_t)SendMessage(hSlider, TBM_GETPOS, 0, 0);
+        } else if (hSlider == g_state.hSliderSpeed) {
+            g_state.speed = (uint8_t)SendMessage(hSlider, TBM_GETPOS, 0, 0);
         }
-
-        SetTextColor(hdc, g_currentTheme->textPrimary);
-        SetBkMode(hdc, TRANSPARENT);
-
-        // Check if it's a trackbar or slider value label - use group body background
-        if (ctrl == g_state.hSliderR || ctrl == g_state.hSliderG ||
-            ctrl == g_state.hSliderB || ctrl == g_state.hSliderBrightness ||
-            ctrl == g_state.hSliderSpeed ||
-            ctrl == g_state.hLabelRVal || ctrl == g_state.hLabelGVal ||
-            ctrl == g_state.hLabelBVal) {
-            SetBkMode(hdc, OPAQUE);
-            SetBkColor(hdc, g_currentTheme->groupBodyBg);
-            static HBRUSH hSliderBrush = NULL;
-            static COLORREF lastSliderBg = 0;
-            if (!hSliderBrush || lastSliderBg != g_currentTheme->groupBodyBg) {
-                if (hSliderBrush) DeleteObject(hSliderBrush);
-                hSliderBrush = CreateSolidBrush(g_currentTheme->groupBodyBg);
-                lastSliderBg = g_currentTheme->groupBodyBg;
-            }
-            return (LRESULT)hSliderBrush;
+        UpdateSliders();
+        UpdatePreview();
+        // Update hex display
+        if (g_state.hEditHex) {
+            wchar_t hex[10];
+            swprintf(hex, 10, L"#%02X%02X%02X", g_state.red, g_state.green, g_state.blue);
+            SetWindowTextW(g_state.hEditHex, hex);
         }
-
-        // Use hollow brush for true transparency over gradient
-        return (LRESULT)GetStockObject(HOLLOW_BRUSH);
-    }
-
-    case WM_CTLCOLOREDIT: {
-        HDC hdc = (HDC)wParam;
-        HWND hCtrl = (HWND)lParam;
-        SetTextColor(hdc, g_currentTheme->textPrimary);
-        SetBkMode(hdc, OPAQUE);  // IMPORTANT: Use OPAQUE to prevent text ghosting
-        SetBkColor(hdc, g_currentTheme->bgControl);
-
-        // Use a solid brush that matches the background
-        static HBRUSH hEditBrush = NULL;
-        static COLORREF lastEditBg = 0;
-        if (!hEditBrush || lastEditBg != g_currentTheme->bgControl) {
-            if (hEditBrush) DeleteObject(hEditBrush);
-            hEditBrush = CreateSolidBrush(g_currentTheme->bgControl);
-            lastEditBg = g_currentTheme->bgControl;
+        // Live preview if enabled
+        if (g_state.autoApply) {
+            KillTimer(hWnd, ID_TIMER_DEBOUNCE);
+            SetTimer(hWnd, ID_TIMER_DEBOUNCE, 300, NULL);
         }
-        return (LRESULT)hEditBrush;
-    }
-
-    case WM_CTLCOLORLISTBOX: {
-        // Style dropdown list (combobox popup)
-        HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, g_currentTheme->textPrimary);
-        SetBkColor(hdc, g_currentTheme->bgControl);
-        static HBRUSH hListBrush = NULL;
-        static COLORREF lastListBg = 0;
-        if (!hListBrush || lastListBg != g_currentTheme->bgControl) {
-            if (hListBrush) DeleteObject(hListBrush);
-            hListBrush = CreateSolidBrush(g_currentTheme->bgControl);
-            lastListBg = g_currentTheme->bgControl;
-        }
-        return (LRESULT)hListBrush;
-    }
-
-    case WM_CTLCOLORBTN: {
-        HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, RGB(220, 225, 235));
-        SetBkMode(hdc, TRANSPARENT);
-        return (LRESULT)GetStockObject(HOLLOW_BRUSH);
+        break;
     }
 
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lParam;
-        if (dis->CtlType == ODT_BUTTON) {
-            wchar_t text[64] = {0};
-            GetWindowTextW(dis->hwndItem, text, 64);
-
-            bool isHovered = g_buttonHover[dis->hwndItem];
-            bool isPressed = (dis->itemState & ODS_SELECTED) != 0;
-            bool isAccent = (dis->CtlID == ID_BTN_APPLY);
-            bool isFocused = (dis->itemState & ODS_FOCUS) != 0;
-
-            DrawModernButton(dis->hDC, &dis->rcItem, text, isHovered, isPressed, isAccent, isFocused);
-            return TRUE;
-        }
-        // Status log border (rounded container)
-        if (dis->CtlID == 9998) {
+        if (dis->CtlID == ID_STATIC_PREVIEW) {
             Gdiplus::Graphics g(dis->hDC);
-            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-
-            int w = dis->rcItem.right - dis->rcItem.left;
-            int h = dis->rcItem.bottom - dis->rcItem.top;
-            float radius = 8.0f;
-
-            // Create rounded rect path
+            g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+            Gdiplus::RectF r(0, 0, (float)(dis->rcItem.right - dis->rcItem.left), (float)(dis->rcItem.bottom - dis->rcItem.top));
+            
+            float radius = 12.0f;
+            Gdiplus::Color color((BYTE)g_state.red, (BYTE)g_state.green, (BYTE)g_state.blue);
+            
+            // Draw background fill with rounded corners
+            DrawRoundedRect(g, r, radius, color, g_mTheme->border, 1.5f);
+            
+            // Add a subtle inner shadow/depth
+            Gdiplus::Color shadowCol(40, 0, 0, 0);
+            Gdiplus::Pen shadowPen(shadowCol, 2.0f);
             Gdiplus::GraphicsPath path;
             float d = radius * 2;
-            path.AddArc(0.0f, 0.0f, d, d, 180, 90);
-            path.AddArc((float)w - d, 0.0f, d, d, 270, 90);
-            path.AddArc((float)w - d, (float)h - d, d, d, 0, 90);
-            path.AddArc(0.0f, (float)h - d, d, d, 90, 90);
-            path.CloseFigure();
-
-            // Fill with slightly lighter background
-            Gdiplus::SolidBrush fillBrush(Gdiplus::Color(255, 22, 26, 36));
-            g.FillPath(&fillBrush, &path);
-
-            // Draw border
-            Gdiplus::Pen borderPen(Gdiplus::Color(255, 60, 70, 90), 1.5f);
-            g.DrawPath(&borderPen, &path);
-
-            return TRUE;
-        }
-        // Logo owner-draw static
-        if (dis->CtlID == 9999 && g_pLogoImage && g_logoWidth > 0 && g_logoHeight > 0) {
-            Gdiplus::Graphics g(dis->hDC);
-            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-
-            // Fill background with group color
-            Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 32, 36, 48));
-            g.FillRectangle(&bgBrush, 0, 0, dis->rcItem.right, dis->rcItem.bottom);
-
-            // Draw logo with slight transparency (watermark effect)
-            Gdiplus::ColorMatrix colorMatrix = {
-                1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-                0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
-                0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
-                0.0f, 0.0f, 0.0f, 0.35f, 0.0f,  // 35% opacity
-                0.0f, 0.0f, 0.0f, 0.0f, 1.0f
-            };
-            Gdiplus::ImageAttributes imgAttr;
-            imgAttr.SetColorMatrix(&colorMatrix, Gdiplus::ColorMatrixFlagsDefault, Gdiplus::ColorAdjustTypeBitmap);
-
-            int w = dis->rcItem.right - dis->rcItem.left;
-            int h = dis->rcItem.bottom - dis->rcItem.top;
-            g.DrawImage(g_pLogoImage,
-                Gdiplus::Rect(0, 0, w, h),
-                0, 0, g_logoWidth, g_logoHeight,
-                Gdiplus::UnitPixel, &imgAttr);
+            path.AddArc(r.X + 1, r.Y + 1, d, d, 180, 90);
+            path.AddLine(r.X + radius + 1, r.Y + 1, r.X + r.Width - radius - 1, r.Y + 1);
+            path.AddArc(r.X + r.Width - d - 1, r.Y + 1, d, d, 270, 90);
+            g.DrawPath(&shadowPen, &path);
+            
             return TRUE;
         }
         break;
     }
 
-    case WM_ERASEBKGND:
-        return 1;  // Prevent flicker, WM_PAINT handles background
-
-    case WM_GETMINMAXINFO: {
-        // Set minimum window size (for potential future resize support)
-        MINMAXINFO* mmi = (MINMAXINFO*)lParam;
-        mmi->ptMinTrackSize.x = 400;
-        mmi->ptMinTrackSize.y = 500;
-        break;  // Let DefWindowProc also handle this
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN: {
+        HDC hdcCtrl = (HDC)wParam;
+        SetTextColor(hdcCtrl, g_currentTheme->textPrimary);
+        SetBkMode(hdcCtrl, TRANSPARENT);
+        return (LRESULT)GetStockObject(HOLLOW_BRUSH);
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC hdcCtrl = (HDC)wParam;
+        SetTextColor(hdcCtrl, g_currentTheme->textPrimary);
+        SetBkMode(hdcCtrl, OPAQUE);
+        SetBkColor(hdcCtrl, g_currentTheme->bgControl);
+        if (!g_hBgBrush) g_hBgBrush = CreateSolidBrush(g_currentTheme->bgControl);
+        return (LRESULT)g_hBgBrush;
     }
 
-    case WM_HSCROLL: {
-        HWND slider = (HWND)lParam;
-        int pos = (int)SendMessage(slider, TBM_GETPOS, 0, 0);
-        bool colorChanged = false;
-        wchar_t valBuf[8];
-
-        if (slider == g_state.hSliderR) {
-            g_state.red = pos;
-            swprintf(valBuf, 8, L"%d", pos);
-            SetWindowTextW(g_state.hLabelRVal, valBuf);
-            UpdatePreview(); UpdateHexEdit(); colorChanged = true;
-        }
-        else if (slider == g_state.hSliderG) {
-            g_state.green = pos;
-            swprintf(valBuf, 8, L"%d", pos);
-            SetWindowTextW(g_state.hLabelGVal, valBuf);
-            UpdatePreview(); UpdateHexEdit(); colorChanged = true;
-        }
-        else if (slider == g_state.hSliderB) {
-            g_state.blue = pos;
-            swprintf(valBuf, 8, L"%d", pos);
-            SetWindowTextW(g_state.hLabelBVal, valBuf);
-            UpdatePreview(); UpdateHexEdit(); colorChanged = true;
-        }
-        else if (slider == g_state.hSliderBrightness) {
-            g_state.brightness = pos;
-            colorChanged = true;
-        }
-        else if (slider == g_state.hSliderSpeed) {
-            g_state.speed = pos;
-            colorChanged = true;
-        }
-
-        // Auto-apply with debouncing (150ms delay)
-        if (colorChanged && g_state.autoApply) {
-            KillTimer(hWnd, ID_TIMER_DEBOUNCE);
-            SetTimer(hWnd, ID_TIMER_DEBOUNCE, 150, NULL);
+    case WM_HOTKEY:
+        switch (wParam) {
+        case ID_HOTKEY_BLUE: SetPresetColor(0, 34, 255); std::thread(ApplyColors).detach(); break;
+        case ID_HOTKEY_RED: SetPresetColor(255, 0, 0); std::thread(ApplyColors).detach(); break;
+        case ID_HOTKEY_GREEN: SetPresetColor(0, 255, 0); std::thread(ApplyColors).detach(); break;
+        case ID_HOTKEY_WHITE: SetPresetColor(255, 255, 255); std::thread(ApplyColors).detach(); break;
+        case ID_HOTKEY_OFF: SetPresetColor(0, 0, 0); std::thread(ApplyColors).detach(); break;
         }
         break;
-    }
 
     case WM_COMMAND: {
         int id = LOWORD(wParam);
@@ -4185,32 +3051,49 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ParseHexColor(hex);
             UpdatePreview();
             UpdateSliders();
+            // Hex-Änderung speichern
+            g_settings.red = g_state.red;
+            g_settings.green = g_state.green;
+            g_settings.blue = g_state.blue;
+            SaveSettings();
         }
         else if (id == ID_COMBO_KB_MODE && code == CBN_SELCHANGE) {
-            int sel = SendMessage(g_state.hComboKbMode, CB_GETCURSEL, 0, 0);
+            int sel = (int)SendMessage(g_state.hComboKbMode, CB_GETCURSEL, 0, 0);
             uint8_t modes[] = {KB_MODE_STATIC, KB_MODE_BREATHING, KB_MODE_SPECTRUM, KB_MODE_WAVE_SHORT,
                                KB_MODE_WAVE_LONG, KB_MODE_COLOR_WHEEL, KB_MODE_REACTIVE, KB_MODE_RIPPLE,
                                KB_MODE_STARLIGHT, KB_MODE_RAINBOW, KB_MODE_HURRICANE};
-            if (sel >= 0 && sel < 11) g_state.kbMode = modes[sel];
+            if (sel >= 0 && sel < 11) {
+                g_state.kbMode = modes[sel];
+                g_settings.effect_keyboard = sel;
+                SaveSettings();
+            }
         }
         else if (id == ID_COMBO_EDGE_MODE && code == CBN_SELCHANGE) {
-            int sel = SendMessage(g_state.hComboEdgeMode, CB_GETCURSEL, 0, 0);
-            if (sel >= 0 && sel <= 5) g_state.edgeMode = sel;
+            int sel = (int)SendMessage(g_state.hComboEdgeMode, CB_GETCURSEL, 0, 0);
+            if (sel >= 0 && sel <= 5) {
+                g_state.edgeMode = sel;
+                g_settings.effect_edge = sel;
+                SaveSettings();
+            }
         }
-        else if (id == ID_CHECK_AURA) g_state.enableAura = (SendMessage(g_state.hCheckAura, BM_GETCHECK, 0, 0) == BST_CHECKED);
-        else if (id == ID_CHECK_MOUSE) g_state.enableMouse = (SendMessage(g_state.hCheckMouse, BM_GETCHECK, 0, 0) == BST_CHECKED);
-        else if (id == ID_CHECK_KEYBOARD) g_state.enableKeyboard = (SendMessage(g_state.hCheckKeyboard, BM_GETCHECK, 0, 0) == BST_CHECKED);
-        else if (id == ID_CHECK_RAM) g_state.enableRAM = (SendMessage(g_state.hCheckRAM, BM_GETCHECK, 0, 0) == BST_CHECKED);
-        else if (id == ID_CHECK_EDGE) g_state.enableEdge = (SendMessage(g_state.hCheckEdge, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        else if (id == ID_CHECK_AURA) { g_state.enableAura = (SendMessage(g_state.hCheckAura, BM_GETCHECK, 0, 0) == BST_CHECKED); SaveSettings(); }
+        else if (id == ID_CHECK_MOUSE) { g_state.enableMouse = (SendMessage(g_state.hCheckMouse, BM_GETCHECK, 0, 0) == BST_CHECKED); SaveSettings(); }
+        else if (id == ID_CHECK_KEYBOARD) { g_state.enableKeyboard = (SendMessage(g_state.hCheckKeyboard, BM_GETCHECK, 0, 0) == BST_CHECKED); SaveSettings(); }
+        else if (id == ID_CHECK_RAM) { g_state.enableRAM = (SendMessage(g_state.hCheckRAM, BM_GETCHECK, 0, 0) == BST_CHECKED); SaveSettings(); }
+        else if (id == ID_CHECK_EDGE) { g_state.enableEdge = (SendMessage(g_state.hCheckEdge, BM_GETCHECK, 0, 0) == BST_CHECKED); SaveSettings(); }
         else if (id == ID_CHECK_AUTOSTART) {
             g_state.autostart = (SendMessage(g_state.hCheckAutostart, BM_GETCHECK, 0, 0) == BST_CHECKED);
             SetAutoStart(g_state.autostart);
+            SaveSettings();
         }
         else if (id == ID_CHECK_MINIMIZE_TRAY) {
             g_state.minimizeToTray = (SendMessage(g_state.hCheckMinimizeTray, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            SaveSettings();
         }
         else if (id == ID_CHECK_AUTO_APPLY) {
             g_state.autoApply = (SendMessage(g_state.hCheckAutoApply, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            g_settings.live_preview = g_state.autoApply;
+            SaveSettings();
         }
         else if (id == ID_BTN_CHANNEL_SETTINGS) {
             // Open integrated Channel Settings dialog
@@ -4420,6 +3303,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             KillTimer(hWnd, ID_TIMER_DEBOUNCE);
             ApplyColors();
         }
+       
         break;
 
     case WM_DESTROY:
@@ -4450,11 +3334,338 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
+// Forward declarations already at top: StaticSubclassProc
+LRESULT CALLBACK StaticSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    if (uMsg == WM_ERASEBKGND) return 1;
+    if (uMsg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT rc; GetClientRect(hWnd, &rc);
+        
+        HDC hdcMem = CreateCompatibleDC(hdc);
+        HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+        HBITMAP hOldBm = (HBITMAP)SelectObject(hdcMem, hbmMem);
+
+        POINT pt = {0, 0};
+        MapWindowPoints(hWnd, GetParent(hWnd), &pt, 1);
+        SetWindowOrgEx(hdcMem, pt.x, pt.y, NULL);
+        SendMessage(GetParent(hWnd), WM_PRINTCLIENT, (WPARAM)hdcMem, PRF_CLIENT);
+        SetWindowOrgEx(hdcMem, 0, 0, NULL);
+        
+        wchar_t text[256];
+        GetWindowTextW(hWnd, text, 256);
+        
+        SetBkMode(hdcMem, TRANSPARENT);
+        SetTextColor(hdcMem, g_currentTheme->textPrimary);
+        HFONT hFont = (HFONT)SendMessage(hWnd, WM_GETFONT, 0, 0);
+        HFONT hOldFont = (HFONT)SelectObject(hdcMem, hFont);
+        
+        DrawTextW(hdcMem, text, -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        
+        SelectObject(hdcMem, hOldFont);
+        BitBlt(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY);
+        SelectObject(hdcMem, hOldBm);
+        DeleteObject(hbmMem);
+        DeleteDC(hdcMem);
+        EndPaint(hWnd, &ps);
+        return 0;
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+LRESULT CALLBACK SliderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    CustomSliderData* data = (CustomSliderData*)dwRefData;
+    ModernSlider& mslider = data->slider;
+    
+    switch (uMsg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            
+            HDC hdcMem = CreateCompatibleDC(hdc);
+            HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+            HBITMAP hOldBm = (HBITMAP)SelectObject(hdcMem, hbmMem);
+            
+            // Ask parent to draw background exactly where we are
+            POINT pt = {0, 0};
+            MapWindowPoints(hWnd, GetParent(hWnd), &pt, 1);
+            SetWindowOrgEx(hdcMem, pt.x, pt.y, NULL);
+            SendMessage(GetParent(hWnd), WM_PRINTCLIENT, (WPARAM)hdcMem, PRF_CLIENT);
+            SetWindowOrgEx(hdcMem, 0, 0, NULL);
+            
+            // Sync value
+            mslider.value = (int)SendMessage(hWnd, TBM_GETPOS, 0, 0);
+            mslider.rect = {10, 10, rc.right - 10, rc.bottom - 10}; // 10px inset for massive slider glow
+            mslider.Draw(hdcMem);
+            
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY);
+            SelectObject(hdcMem, hOldBm);
+            DeleteObject(hbmMem);
+            DeleteDC(hdcMem);
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
+        case WM_MOUSEMOVE:
+            if (!mslider.isHovered) {
+                mslider.isHovered = true;
+                TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hWnd, 0};
+                TrackMouseEvent(&tme);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            break;
+        case WM_MOUSELEAVE:
+            mslider.isHovered = false;
+            InvalidateRect(hWnd, NULL, FALSE);
+            break;
+        case WM_LBUTTONDOWN:
+            mslider.isDragging = true;
+            InvalidateRect(hWnd, NULL, FALSE);
+            break;
+        case WM_LBUTTONUP:
+            mslider.isDragging = false;
+            InvalidateRect(hWnd, NULL, FALSE);
+            break;
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+LRESULT CALLBACK BtnCheckboxSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    switch (uMsg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            
+            HDC hdcMem = CreateCompatibleDC(hdc);
+            HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+            HBITMAP hOldBm = (HBITMAP)SelectObject(hdcMem, hbmMem);
+            
+            // Ask parent to draw background exactly where we are
+            POINT pt = {0, 0};
+            MapWindowPoints(hWnd, GetParent(hWnd), &pt, 1);
+            SetWindowOrgEx(hdcMem, pt.x, pt.y, NULL);
+            SendMessage(GetParent(hWnd), WM_PRINTCLIENT, (WPARAM)hdcMem, PRF_CLIENT);
+            SetWindowOrgEx(hdcMem, 0, 0, NULL);
+            
+            LONG style = GetWindowLong(hWnd, GWL_STYLE) & BS_TYPEMASK;
+            bool isHovered = (bool)GetPropW(hWnd, L"hover");
+            
+            if (style == BS_AUTOCHECKBOX || style == BS_CHECKBOX) {
+                ModernCheckbox cb;
+                cb.rect = {5, 5, rc.right - 5, rc.bottom - 5}; // 5px inset for glow
+                GetWindowTextW(hWnd, cb.text, 64);
+                cb.isChecked = (SendMessage(hWnd, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                cb.isEnabled = IsWindowEnabled(hWnd);
+                cb.isHovered = isHovered;
+                cb.Draw(hdcMem);
+            } else {
+                ModernButton btn;
+                btn.rect = {5, 5, rc.right - 5, rc.bottom - 5}; // 5px inset for glow
+                GetWindowTextW(hWnd, btn.text, 64);
+                btn.isPressed = (SendMessage(hWnd, BM_GETSTATE, 0, 0) & BST_PUSHED);
+                btn.isEnabled = IsWindowEnabled(hWnd);
+                btn.isHovered = isHovered;
+                btn.isAccent = (GetWindowLong(hWnd, GWLP_ID) == ID_BTN_APPLY);
+
+                // Handle custom glows for preset buttons
+                int btnId = GetWindowLong(hWnd, GWLP_ID);
+                btn.hasCustomGlow = false;
+                if (btnId >= ID_BTN_PRESET_BLUE && btnId <= ID_BTN_PRESET_CYAN) {
+                    btn.hasCustomGlow = true;
+                    if (btnId == ID_BTN_PRESET_BLUE) btn.customGlowColor = Gdiplus::Color(255, 0, 34, 255);
+                    else if (btnId == ID_BTN_PRESET_RED) btn.customGlowColor = Gdiplus::Color(255, 255, 0, 0);
+                    else if (btnId == ID_BTN_PRESET_GREEN) btn.customGlowColor = Gdiplus::Color(255, 0, 255, 0);
+                    else if (btnId == ID_BTN_PRESET_CYAN) btn.customGlowColor = Gdiplus::Color(255, 0, 255, 255);
+                    else if (btnId == ID_BTN_PRESET_PURPLE) btn.customGlowColor = Gdiplus::Color(255, 128, 0, 255);
+                    else if (btnId == ID_BTN_PRESET_WHITE) btn.customGlowColor = Gdiplus::Color(255, 255, 255, 255);
+                    else if (btnId == ID_BTN_PRESET_OFF) btn.customGlowColor = Gdiplus::Color(255, 100, 100, 100);
+                }
+
+                btn.Draw(hdcMem);
+            }
+            
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY);
+            SelectObject(hdcMem, hOldBm);
+            DeleteObject(hbmMem);
+            DeleteDC(hdcMem);
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
+        case WM_MOUSEMOVE:
+            if (!GetPropW(hWnd, L"hover")) {
+                SetPropW(hWnd, L"hover", (HANDLE)1);
+                TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hWnd, 0};
+                TrackMouseEvent(&tme);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            break;
+        case WM_MOUSELEAVE:
+            RemovePropW(hWnd, L"hover");
+            InvalidateRect(hWnd, NULL, FALSE);
+            break;
+        // Native button control handles drawing its pushed state via WM_PAINT internally?
+        // We need to invalidate when state changes (e.g. mouse down)
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONUP:
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+        case WM_ENABLE:
+            InvalidateRect(hWnd, NULL, FALSE);
+            break;
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+LRESULT CALLBACK ComboSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    switch (uMsg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+        
+        HDC hdcMem = CreateCompatibleDC(hdc);
+        HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+        HBITMAP hOldBm = (HBITMAP)SelectObject(hdcMem, hbmMem);
+        
+        // Ask parent to draw background exactly where we are
+        POINT pt = {0, 0};
+        MapWindowPoints(hWnd, GetParent(hWnd), &pt, 1);
+        SetWindowOrgEx(hdcMem, pt.x, pt.y, NULL);
+        SendMessage(GetParent(hWnd), WM_PRINTCLIENT, (WPARAM)hdcMem, PRF_CLIENT);
+        SetWindowOrgEx(hdcMem, 0, 0, NULL);
+        
+        ModernCombo combo;
+        combo.rect = {0, 0, rc.right, rc.bottom}; // No inset - combo is not glow-expanded
+        combo.isHovered = (bool)GetPropW(hWnd, L"hover");
+        GetWindowTextW(hWnd, combo.selectedText, 128);
+        combo.Draw(hdcMem);
+        
+        BitBlt(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY);
+        SelectObject(hdcMem, hOldBm);
+        DeleteObject(hbmMem);
+        DeleteDC(hdcMem);
+        EndPaint(hWnd, &ps);
+        return 0; // Skip native rendering wrapper
+    } 
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, RGB(g_mTheme->textPrimary.GetR(), g_mTheme->textPrimary.GetG(), g_mTheme->textPrimary.GetB()));
+        SetBkMode(hdc, TRANSPARENT);
+        // Use bgControl brush (g_hBgBrush is initialized in WndProc::WM_CTLCOLOREDIT)
+        if (!g_hBgBrush) g_hBgBrush = CreateSolidBrush(g_currentTheme->bgControl);
+        return (LRESULT)g_hBgBrush;
+    }
+    case WM_MOUSEMOVE:
+        if (!GetPropW(hWnd, L"hover")) {
+            SetPropW(hWnd, L"hover", (HANDLE)1);
+            TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hWnd, 0};
+            TrackMouseEvent(&tme);
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+        break;
+    case WM_LBUTTONDOWN: {
+        int x = LOWORD(lParam);
+        RECT rc; GetClientRect(hWnd, &rc);
+        // If click is in the arrow area (right side), toggle dropdown
+        if (x > rc.right - 35) {
+            BOOL dropped = (BOOL)SendMessage(hWnd, CB_GETDROPPEDSTATE, 0, 0);
+            SendMessage(hWnd, CB_SHOWDROPDOWN, !dropped, 0);
+            return 0;
+        }
+        break;
+    }
+    case WM_MOUSELEAVE:
+        RemovePropW(hWnd, L"hover");
+        InvalidateRect(hWnd, NULL, FALSE);
+        break;
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    if (uMsg == WM_ERASEBKGND) {
+        // Transparent edit requires parent to draw background
+        return 1;
+    }
+    if (uMsg == WM_PAINT) {
+        // Standard edit controls don't support true transparency easily without help.
+        // But since we handle WM_CTLCOLOREDIT in the parent, native painting works.
+        // We just need to make sure we don't accidentally draw native boundaries.
+    }
+    // No parent invalidation here - it causes full UI flicker on focus changes.
+    // Parent painting is already handled via WM_CTLCOLOREDIT.
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+//=============================================================================
+// CUSTOM UI SUBCLASSES
+//=============================================================================
+
+LRESULT CALLBACK ColorPreviewSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    switch (uMsg) {
+    case WM_SETCURSOR:
+        SetCursor(LoadCursor(NULL, IDC_HAND));
+        return TRUE;
+    case WM_LBUTTONDOWN:
+        PickColor();
+        return 0;
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    switch (uMsg) {
+    case WM_NCPAINT: {
+        // Draw modern rounded border
+        HDC hdc = GetWindowDC(hWnd);
+        RECT rc; GetWindowRect(hWnd, &rc);
+        OffsetRect(&rc, -rc.left, -rc.top);
+        
+        Gdiplus::Graphics g(hdc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+        Gdiplus::RectF r((float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom);
+        
+        // Clear background for rounded corners to work
+        Gdiplus::SolidBrush bgBrush(g_mTheme->bgPrimary);
+        g.FillRectangle(&bgBrush, r);
+        
+        // Draw the themed border
+        DrawRoundedRect(g, r, 6.0f, Gdiplus::Color(0,0,0,0), g_mTheme->border, 1.0f);
+        
+        ReleaseDC(hWnd, hdc);
+        return 0;
+    }
+    case WM_NCCALCSIZE:
+        if (wParam) {
+            NCCALCSIZE_PARAMS* pnc = (NCCALCSIZE_PARAMS*)lParam;
+            pnc->rgrc[0].left += 4;
+            pnc->rgrc[0].top += 4;
+            pnc->rgrc[0].right -= 4;
+            pnc->rgrc[0].bottom -= 4;
+            return 0;
+        }
+        break;
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
 //=============================================================================
 // MAIN
 //=============================================================================
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow) {
+    LogDebug("WinMain started");
     // Check for command line flags
     bool startMinimized = (strstr(lpCmdLine, "--minimized") != nullptr);
     g_skipApplyOnStart = (strstr(lpCmdLine, "--no-apply") != nullptr);
@@ -4464,9 +3675,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     // Initialize GDI+ for PNG loading
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
     Gdiplus::GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, NULL);
+    LogDebug("GDI+ started");
 
     // Load saved settings (language, theme)
     LoadAppSettings();
+    LogDebug("Settings loaded");
+    SyncModernTheme();
+    LogDebug("Modern theme synced");
 
     // Initialize ASUS hardware scan (checks for config changes)
     InitAsusHardware();
@@ -4508,10 +3723,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     AdjustWindowRect(&rc, style, FALSE);
 
     // Create window with saved position
+    LogDebug("Creating Window...");
     g_state.hWnd = CreateWindowW(L"OneClickRGBClass", g_windowTitle,
         style,
         g_windowX, g_windowY, rc.right - rc.left, rc.bottom - rc.top,
         NULL, NULL, hInstance, NULL);
+    LogDebug("Window Created");
+
+    if (!g_state.hWnd) {
+        wchar_t err[256];
+        swprintf_s(err, 256, L"CreateWindowW failed! Error: %lu", GetLastError());
+        MessageBoxW(NULL, err, L"Error", MB_OK);
+        return 1;
+    }
 
     // Register for power setting notifications (resume from sleep)
     GUID GUID_CONSOLE_DISPLAY_STATE = {0x6fe69556, 0x704a, 0x47a0, {0x8f, 0x24, 0x8d, 0x93, 0x6f, 0xda, 0x47}};
@@ -4529,6 +3753,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         MinimizeToTray();
     } else {
         ShowWindow(g_state.hWnd, nCmdShow);
+        LogDebug("Window shown");
 
         // Force foreground when restarting from theme/language change
         if (forceForeground) {
@@ -4548,6 +3773,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     }
     UpdateWindow(g_state.hWnd);
 
+    LogDebug("Entering Message Loop");
     // Message loop with keyboard navigation support
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {

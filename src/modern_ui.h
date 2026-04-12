@@ -8,8 +8,24 @@
 
 #include <windows.h>
 #include <gdiplus.h>
-#include <cmath>
 #include <algorithm>
+#include "themes.h"
+
+// Forward declarations for functions implemented in oneclick_rgb_complete.cpp
+void PickColor();
+void ParseHexColor(const wchar_t* hex);
+void UpdatePreview();
+void UpdateSliders();
+void ShowChannelSettingsDialog(HWND hWnd);
+void ShowAsusTestDialog(HWND hWnd);
+void UpdateAllControls();
+void SetPresetColor(int r, int g, int b);
+void RemoveTrayIcon();
+void RestoreFromTray();
+void ShowTrayMenu(HWND hWnd);
+void MinimizeToTray();
+extern ULONG_PTR g_gdiplusToken;
+LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "msimg32.lib")
@@ -53,68 +69,14 @@ struct ModernTheme {
 };
 
 // Cyberpunk-inspired dark theme
-inline ModernTheme g_modernDark = {
-    // Backgrounds - deep dark with slight blue tint
-    Gdiplus::Color(255, 18, 18, 24),      // bgPrimary
-    Gdiplus::Color(255, 25, 25, 35),      // bgSecondary
-    Gdiplus::Color(255, 35, 35, 50),      // bgTertiary
-    Gdiplus::Color(200, 40, 40, 55),      // bgCard (semi-transparent)
+extern ModernTheme g_modernDark;
 
-    // Accent - electric cyan/blue
-    Gdiplus::Color(255, 0, 200, 255),     // accent
-    Gdiplus::Color(255, 50, 220, 255),    // accentHover
-    Gdiplus::Color(100, 0, 200, 255),     // accentGlow
+extern ModernTheme* g_mTheme;
 
-    // Text
-    Gdiplus::Color(255, 240, 240, 245),   // textPrimary
-    Gdiplus::Color(255, 180, 180, 190),   // textSecondary
-    Gdiplus::Color(255, 100, 100, 120),   // textMuted
+extern AppTheme* g_currentTheme;
 
-    // Border & effects
-    Gdiplus::Color(255, 60, 60, 80),      // border
-    Gdiplus::Color(80, 0, 0, 0),          // shadow
-    Gdiplus::Color(60, 0, 200, 255),      // glow
-
-    // State
-    Gdiplus::Color(255, 0, 255, 136),     // success (neon green)
-    Gdiplus::Color(255, 255, 200, 0),     // warning
-    Gdiplus::Color(255, 255, 60, 100),    // error
-
-    true
-};
-
-// Clean light theme
-inline ModernTheme g_modernLight = {
-    // Backgrounds
-    Gdiplus::Color(255, 250, 250, 252),   // bgPrimary
-    Gdiplus::Color(255, 255, 255, 255),   // bgSecondary
-    Gdiplus::Color(255, 245, 245, 248),   // bgTertiary
-    Gdiplus::Color(230, 255, 255, 255),   // bgCard
-
-    // Accent
-    Gdiplus::Color(255, 0, 120, 215),     // accent
-    Gdiplus::Color(255, 30, 140, 230),    // accentHover
-    Gdiplus::Color(60, 0, 120, 215),      // accentGlow
-
-    // Text
-    Gdiplus::Color(255, 20, 20, 30),      // textPrimary
-    Gdiplus::Color(255, 80, 80, 90),      // textSecondary
-    Gdiplus::Color(255, 140, 140, 150),   // textMuted
-
-    // Border & effects
-    Gdiplus::Color(255, 220, 220, 225),   // border
-    Gdiplus::Color(30, 0, 0, 0),          // shadow
-    Gdiplus::Color(40, 0, 120, 215),      // glow
-
-    // State
-    Gdiplus::Color(255, 0, 180, 100),     // success
-    Gdiplus::Color(255, 240, 180, 0),     // warning
-    Gdiplus::Color(255, 220, 50, 80),     // error
-
-    false
-};
-
-inline ModernTheme* g_mTheme = &g_modernDark;
+// Forward declaration of SyncModernTheme
+inline void SyncModernTheme();
 
 //=============================================================================
 // HELPER FUNCTIONS
@@ -131,6 +93,39 @@ inline Gdiplus::Color BlendColors(Gdiplus::Color c1, Gdiplus::Color c2, float t)
 
 inline Gdiplus::Color ColorFromRGB(COLORREF rgb, BYTE alpha = 255) {
     return Gdiplus::Color(alpha, GetRValue(rgb), GetGValue(rgb), GetBValue(rgb));
+}
+
+// Sync modern theme with current AppTheme
+inline void SyncModernTheme() {
+    if (!g_currentTheme) return;
+    AppTheme* t = g_currentTheme;
+
+    g_modernDark.bgPrimary = ColorFromRGB(t->bgWindowTop);
+    g_modernDark.bgSecondary = ColorFromRGB(t->bgControl);
+    // Approximate bgTertiary as groupBorder for slight contrast
+    g_modernDark.bgTertiary = ColorFromRGB(t->groupBorder); 
+    g_modernDark.bgCard = ColorFromRGB(t->groupBodyBg);
+
+    g_modernDark.accent = ColorFromRGB(t->bgAccent);
+    g_modernDark.accentHover = ColorFromRGB(t->bgAccentHover);
+    g_modernDark.accentGlow = ColorFromRGB(t->bgAccent, 100);
+
+    g_modernDark.textPrimary = ColorFromRGB(t->textPrimary);
+    g_modernDark.textSecondary = ColorFromRGB(t->textSecondary);
+    g_modernDark.textMuted = ColorFromRGB(t->textSecondary, 128); // Semi-transparent
+
+    g_modernDark.border = ColorFromRGB(t->border);
+    // Darker shadow for Light theme is usually 30 opacity, 80 for Dark
+    g_modernDark.shadow = Gdiplus::Color(t->id == 1 ? 30 : 80, 0, 0, 0); 
+    g_modernDark.glow = ColorFromRGB(t->bgAccent, 100);
+
+    g_modernDark.success = Gdiplus::Color(255, 0, 255, 136);
+    g_modernDark.warning = Gdiplus::Color(255, 255, 200, 0);
+    g_modernDark.error = Gdiplus::Color(255, 255, 60, 100);
+
+    g_modernDark.isDark = (t->id != 1); // Not light theme
+
+    g_mTheme = &g_modernDark;
 }
 
 //=============================================================================
@@ -200,7 +195,7 @@ inline void DrawShadow(Gdiplus::Graphics& g, Gdiplus::RectF rect, float radius,
             rect.Width + i * 2 - 4,
             rect.Height + i * 2 - 4
         );
-        DrawRoundedRect(g, shadowRect, radius + i/2, shadowColor);
+        DrawRoundedRect(g, shadowRect, radius + i / 2.0f, shadowColor);
     }
 }
 
@@ -216,7 +211,7 @@ inline void DrawGlow(Gdiplus::Graphics& g, Gdiplus::RectF rect, float radius,
             rect.Width + i * 2,
             rect.Height + i * 2
         );
-        DrawRoundedRect(g, glowRect, radius + i/2, c);
+        DrawRoundedRect(g, glowRect, radius + i / 2.0f, c);
     }
 }
 
@@ -233,6 +228,8 @@ struct ModernButton {
     bool isAccent;  // Use accent color
     bool isEnabled;
     int id;
+    bool hasCustomGlow;
+    Gdiplus::Color customGlowColor;
 
     void Draw(HDC hdc) {
         Gdiplus::Graphics g(hdc);
@@ -275,6 +272,13 @@ struct ModernButton {
             } else if (isHovered) {
                 bgTop = g_mTheme->bgTertiary;
                 bgBottom = g_mTheme->bgSecondary;
+                // Draw custom glow if enabled
+                if (hasCustomGlow) {
+                    DrawGlow(g, r, radius, customGlowColor, 8);
+                } else {
+                    // Standard thin glow for normal buttons
+                    DrawGlow(g, r, radius, Gdiplus::Color(40, g_mTheme->accent.GetR(), g_mTheme->accent.GetG(), g_mTheme->accent.GetB()), 4);
+                }
             } else {
                 bgTop = BlendColors(g_mTheme->bgSecondary, g_mTheme->bgTertiary, 0.5f);
                 bgBottom = g_mTheme->bgSecondary;
@@ -386,7 +390,8 @@ struct ModernSlider {
 
         // Knob shadow
         Gdiplus::Color shadowColor(40, 0, 0, 0);
-        g.FillEllipse(&Gdiplus::SolidBrush(shadowColor),
+        Gdiplus::SolidBrush shadowBrush(shadowColor);
+        g.FillEllipse(&shadowBrush,
                       knobX - knobRadius + 1, knobY - knobRadius + 2, knobRadius * 2, knobRadius * 2);
 
         // Knob
@@ -411,7 +416,8 @@ struct ModernSlider {
 
         // Inner highlight
         Gdiplus::Color highlight(60, 255, 255, 255);
-        g.FillEllipse(&Gdiplus::SolidBrush(highlight),
+        Gdiplus::SolidBrush highlightBrush(highlight);
+        g.FillEllipse(&highlightBrush,
                       knobX - knobRadius/2, knobY - knobRadius/2 - 2, knobRadius, knobRadius/2);
     }
 
@@ -523,7 +529,8 @@ struct ModernColorPreview {
 
         // Shadow
         Gdiplus::Color shadowColor(50, 0, 0, 0);
-        gfx.FillEllipse(&Gdiplus::SolidBrush(shadowColor),
+        Gdiplus::SolidBrush shadowBrush(shadowColor);
+        gfx.FillEllipse(&shadowBrush,
                         cx - radius + 3, cy - radius + 5, radius * 2, radius * 2);
 
         // Main color circle with gradient
@@ -542,7 +549,8 @@ struct ModernColorPreview {
 
         // Inner highlight
         Gdiplus::Color highlight(80, 255, 255, 255);
-        gfx.FillEllipse(&Gdiplus::SolidBrush(highlight),
+        Gdiplus::SolidBrush highlightBrush(highlight);
+        gfx.FillEllipse(&highlightBrush,
                         cx - radius * 0.6f, cy - radius * 0.7f, radius * 1.2f, radius * 0.5f);
 
         // Border
