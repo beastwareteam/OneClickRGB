@@ -150,7 +150,9 @@ if not exist "%BUILD_DIR%\modules" mkdir "%BUILD_DIR%\modules"
 copy /Y "%DEP_DIR%\PawnIO\modules\*.bin" "%BUILD_DIR%\modules\" >nul 2>&1
 
 if not exist "%BUILD_DIR%\config" mkdir "%BUILD_DIR%\config"
-copy /Y "%ROOT_DIR%\config\*.json" "%BUILD_DIR%\config\" >nul 2>&1
+if exist "%ROOT_DIR%\config\*.json" (
+    copy /Y "%ROOT_DIR%\config\*.json" "%BUILD_DIR%\config\" >nul 2>&1
+)
 
 echo.
 echo ================================================
@@ -163,3 +165,4 @@ echo To run: cd build ^&^& OneClickRGB.exe
 echo.
 
 endlocal
+exit /b 0

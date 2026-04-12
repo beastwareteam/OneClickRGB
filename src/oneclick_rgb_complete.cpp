@@ -135,18 +135,97 @@ ModernTheme g_modernDark = {
 
 ModernTheme* g_mTheme = &g_modernDark;
 
-// Unused legacy struct - kept for reference but deprecated
-// AppSettings g_settings; 
+AppSettings g_settings;
 
-void SetTheme(int themeId); // Forward decl
+std::wstring GetSettingsPath() {
+    wchar_t* appdata = nullptr;
+    if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, &appdata) != S_OK) {
+        return L"settings.json";
+    }
+    std::wstring path = appdata;
+    CoTaskMemFree(appdata);
+    path += L"\\OneClickRGB\\settings.json";
+    return path;
+}
 
-// Forward declarations for settings persistence
-void LoadSettings();
-void SaveSettings();
-std::wstring GetSettingsPath();
+void LoadSettings() {
+    std::wstring path = GetSettingsPath();
+    std::ifstream f(path);
+    if (!f) return;
+    try {
+        json j;
+        f >> j;
+        if (j.contains("window")) {
+            g_settings.window_x = j["window"].value("x", -1);
+            g_settings.window_y = j["window"].value("y", -1);
+            g_settings.window_width = j["window"].value("width", 800);
+            g_settings.window_height = j["window"].value("height", 600);
+        }
+        g_settings.autostart_enabled = j.value("autostart_enabled", false);
+        g_settings.minimize_to_tray = j.value("minimize_to_tray", false);
+        g_settings.apply_on_startup = j.value("apply_on_startup", true);
+        g_settings.last_brightness = j.value("last_brightness", 100);
+        g_settings.last_color = j.value("last_color", 255);
+        g_settings.last_profile = j.value("last_profile", "");
+        g_settings.startup_profile = j.value("startup_profile", "");
+        g_settings.show_notifications = j.value("show_notifications", true);
+        g_settings.scan_interval_ms = j.value("scan_interval_ms", 5000);
+        g_settings.start_minimized = j.value("start_minimized", false);
+        // Erweiterte Settings:
+        g_settings.red = j.value("red", 255);
+        g_settings.green = j.value("green", 255);
+        g_settings.blue = j.value("blue", 255);
+        g_settings.effect_keyboard = j.value("effect_keyboard", 0);
+        g_settings.effect_edge = j.value("effect_edge", 0);
+        g_settings.speed = j.value("speed", 50);
+        g_settings.live_preview = j.value("live_preview", false);
+        if (j.contains("channel_r")) for (int i=0;i<8;++i) if (j["channel_r"].size()>i) g_settings.channel_r[i] = j["channel_r"][i].get<int>();
+        if (j.contains("channel_g")) for (int i=0;i<8;++i) if (j["channel_g"].size()>i) g_settings.channel_g[i] = j["channel_g"][i].get<int>();
+        if (j.contains("channel_b")) for (int i=0;i<8;++i) if (j["channel_b"].size()>i) g_settings.channel_b[i] = j["channel_b"][i].get<int>();
+        if (j.contains("channel_active")) for (int i=0;i<8;++i) if (j["channel_active"].size()>i) g_settings.channel_active[i] = j["channel_active"][i].get<bool>();
+    } catch (...) {}
+}
 
-// Implementation of LoadSettings and SaveSettings moved below to satisfy scope requirements
-
+void SaveSettings() {
+    std::wstring path = GetSettingsPath();
+    // Verzeichnis anlegen, falls nicht vorhanden
+    size_t pos = path.find_last_of(L"\\/");
+    if (pos != std::wstring::npos) {
+        std::wstring dir = path.substr(0, pos);
+        SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+    }
+    json j;
+    j["window"] = {
+        {"x", g_settings.window_x},
+        {"y", g_settings.window_y},
+        {"width", g_settings.window_width},
+        {"height", g_settings.window_height}
+    };
+    j["autostart_enabled"] = g_settings.autostart_enabled;
+    j["minimize_to_tray"] = g_settings.minimize_to_tray;
+    j["apply_on_startup"] = g_settings.apply_on_startup;
+    j["last_brightness"] = g_settings.last_brightness;
+    j["last_color"] = g_settings.last_color;
+    j["last_profile"] = g_settings.last_profile;
+    j["startup_profile"] = g_settings.startup_profile;
+    j["show_notifications"] = g_settings.show_notifications;
+    j["scan_interval_ms"] = g_settings.scan_interval_ms;
+    j["start_minimized"] = g_settings.start_minimized;
+    // Erweiterte Settings:
+    j["red"] = g_settings.red;
+    j["green"] = g_settings.green;
+    j["blue"] = g_settings.blue;
+    j["effect_keyboard"] = g_settings.effect_keyboard;
+    j["effect_edge"] = g_settings.effect_edge;
+    j["speed"] = g_settings.speed;
+    j["live_preview"] = g_settings.live_preview;
+    for (int i=0;i<8;++i) j["channel_r"][i] = g_settings.channel_r[i];
+    for (int i=0;i<8;++i) j["channel_g"][i] = g_settings.channel_g[i];
+    for (int i=0;i<8;++i) j["channel_b"][i] = g_settings.channel_b[i];
+    for (int i=0;i<8;++i) j["channel_active"][i] = g_settings.channel_active[i];
+    std::ofstream f(path);
+    if (f) f << std::setw(4) << j;
+}
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -683,115 +762,65 @@ std::wstring GetAppDataPath() {
 // Window position storage
 int g_windowX = CW_USEDEFAULT, g_windowY = CW_USEDEFAULT;
 
-// SaveAppSettings and LoadAppSettings removed in favor of unified LoadSettings/SaveSettings (JSON)
-// and single g_state source of truth.
-
-std::wstring GetSettingsPath() {
-    wchar_t* appdata = nullptr;
-    if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, &appdata) != S_OK) {
-        return L"settings.json";
+void SaveAppSettings() {
+    std::wstring path = GetAppDataPath() + L"\\app_settings.cfg";
+    std::ofstream file(path);
+    if (file.is_open()) {
+        file << "lang=" << (g_lang == LANG_DE ? "de" : "en") << "\n";
+        file << "theme=" << GetThemeId() << "\n";  // 0=Dark, 1=Light, 2=Colorblind
+        // Save last profile
+        if (!g_state.lastProfile.empty()) {
+            std::string profileName;
+            for (wchar_t wc : g_state.lastProfile) profileName += static_cast<char>(wc);
+            file << "lastProfile=" << profileName << "\n";
+        }
+        // Save window position
+        if (g_state.hWnd) {
+            RECT rc;
+            GetWindowRect(g_state.hWnd, &rc);
+            file << "windowX=" << rc.left << "\n";
+            file << "windowY=" << rc.top << "\n";
+        }
+        file.close();
     }
-    std::wstring path = appdata;
-    CoTaskMemFree(appdata);
-    path += L"\\OneClickRGB\\settings.json";
-    return path;
 }
 
-void SaveSettings() {
-    std::wstring path = GetSettingsPath();
-    // Create directory if not exists
-    size_t pos = path.find_last_of(L"\\/");
-    if (pos != std::wstring::npos) {
-        std::wstring dir = path.substr(0, pos);
-        SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
-    }
-    json j;
-    
-    // Window position
-    if (g_state.hWnd) {
-        RECT rc;
-        GetWindowRect(g_state.hWnd, &rc);
-        j["window"] = { {"x", rc.left}, {"y", rc.top} };
-    } else {
-        j["window"] = { {"x", g_windowX}, {"y", g_windowY} };
-    }
-
-    // App Settings
-    j["autostart"] = g_state.autostart;
-    j["minimize_to_tray"] = g_state.minimizeToTray;
-    j["auto_apply"] = g_state.autoApply;
-    j["lang"] = (g_lang == LANG_DE ? "de" : "en");
-    j["theme"] = GetThemeId();
-
-    // RGB State
-    j["red"] = (int)g_state.red;
-    j["green"] = (int)g_state.green;
-    j["blue"] = (int)g_state.blue;
-    j["brightness"] = (int)g_state.brightness;
-    j["speed"] = (int)g_state.speed;
-    j["kbMode"] = (int)g_state.kbMode;
-    j["edgeMode"] = (int)g_state.edgeMode;
-
-    // Device Enables
-    j["enableAura"] = g_state.enableAura;
-    j["enableMouse"] = g_state.enableMouse;
-    j["enableKeyboard"] = g_state.enableKeyboard;
-    j["enableRAM"] = g_state.enableRAM;
-    j["enableEdge"] = g_state.enableEdge;
-
-    if (!g_state.lastProfile.empty()) {
-        std::string profileName;
-        for (wchar_t wc : g_state.lastProfile) profileName += static_cast<char>(wc);
-        j["last_profile"] = profileName;
-    }
-
-    std::ofstream f(path);
-    if (f) f << std::setw(4) << j;
-}
-
-void LoadSettings() {
-    std::wstring path = GetSettingsPath();
-    std::ifstream f(path);
-    if (!f) return;
-    try {
-        json j;
-        f >> j;
-        
-        if (j.contains("window")) {
-            g_windowX = j["window"].value("x", CW_USEDEFAULT);
-            g_windowY = j["window"].value("y", CW_USEDEFAULT);
+void LoadAppSettings() {
+    std::wstring path = GetAppDataPath() + L"\\app_settings.cfg";
+    std::ifstream file(path);
+    if (file.is_open()) {
+        std::string line;
+        while (std::getline(file, line)) {
+            if (line.find("lang=de") != std::string::npos) {
+                g_lang = LANG_DE;
+                g_str = &g_strDE;
+            }
+            // Load theme (0=Dark, 1=Light, 2=Colorblind)
+            if (line.find("theme=") == 0) {
+                int themeId = std::stoi(line.substr(6));
+                SetTheme(themeId);
+            }
+            // Legacy support for old dark= setting
+            else if (line.find("dark=1") != std::string::npos) {
+                SetTheme(0);  // Dark
+            } else if (line.find("dark=0") != std::string::npos) {
+                SetTheme(1);  // Light
+            }
+            // Load last profile name
+            if (line.find("lastProfile=") == 0) {
+                std::string profileName = line.substr(12);
+                g_state.lastProfile = std::wstring(profileName.begin(), profileName.end());
+            }
+            // Load window position
+            if (line.find("windowX=") == 0) {
+                g_windowX = std::stoi(line.substr(8));
+            }
+            if (line.find("windowY=") == 0) {
+                g_windowY = std::stoi(line.substr(8));
+            }
         }
-
-        g_state.autostart = j.value("autostart", false);
-        g_state.minimizeToTray = j.value("minimize_to_tray", true);
-        g_state.autoApply = j.value("auto_apply", true);
-
-        if (j.value("lang", "en") == "de") {
-            g_lang = LANG_DE;
-            g_str = &g_strDE;
-        }
-
-        if (j.contains("theme")) SetTheme(j["theme"]);
-
-        g_state.red = j.value("red", 0);
-        g_state.green = j.value("green", 34);
-        g_state.blue = j.value("blue", 255);
-        g_state.brightness = j.value("brightness", 4);
-        g_state.speed = j.value("speed", 2);
-        g_state.kbMode = j.value("kbMode", (int)KB_MODE_STATIC);
-        g_state.edgeMode = j.value("edgeMode", (int)EDGE_MODE_STATIC);
-
-        g_state.enableAura = j.value("enableAura", true);
-        g_state.enableMouse = j.value("enableMouse", true);
-        g_state.enableKeyboard = j.value("enableKeyboard", true);
-        g_state.enableRAM = j.value("enableRAM", true);
-        g_state.enableEdge = j.value("enableEdge", true);
-
-        if (j.contains("last_profile")) {
-            std::string pn = j["last_profile"];
-            g_state.lastProfile = std::wstring(pn.begin(), pn.end());
-        }
-    } catch (...) {}
+        file.close();
+    }
 }
 
 void AppendStatus(const wchar_t* text) {
@@ -906,7 +935,7 @@ void LoadProfile(const std::wstring& name) {
         file.close();
         g_state.currentProfile = name;
         g_state.lastProfile = name;
-                SaveSettings();  // Remember last profile
+        SaveAppSettings();  // Remember last profile
         AppendStatus((L"Profile loaded: " + name).c_str());
     }
 }
@@ -2030,6 +2059,9 @@ void SetPresetColor(int r, int g, int b) {
         SetWindowTextW(g_state.hEditHex, hex);
     }
     // Save to settings
+    g_settings.red = r;
+    g_settings.green = g;
+    g_settings.blue = b;
     SaveSettings();
     if (g_state.autoApply) {
         std::thread(ApplyColors).detach();
@@ -2928,6 +2960,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Load saved profile if any
         if (!g_state.lastProfile.empty()) {
             LoadProfile(g_state.lastProfile);
+            UpdateAllControls();
         }
 
         // Register global hotkeys
@@ -3082,6 +3115,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ParseHexColor(hex);
             UpdatePreview();
             UpdateSliders();
+            // Hex-Änderung speichern
+            g_settings.red = g_state.red;
+            g_settings.green = g_state.green;
+            g_settings.blue = g_state.blue;
             SaveSettings();
         }
         else if (id == ID_COMBO_KB_MODE && code == CBN_SELCHANGE) {
@@ -3091,6 +3128,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                KB_MODE_STARLIGHT, KB_MODE_RAINBOW, KB_MODE_HURRICANE};
             if (sel >= 0 && sel < 11) {
                 g_state.kbMode = modes[sel];
+                g_settings.effect_keyboard = sel;
                 SaveSettings();
             }
         }
@@ -3098,6 +3136,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int sel = (int)SendMessage(g_state.hComboEdgeMode, CB_GETCURSEL, 0, 0);
             if (sel >= 0 && sel <= 5) {
                 g_state.edgeMode = sel;
+                g_settings.effect_edge = sel;
                 SaveSettings();
             }
         }
@@ -3117,6 +3156,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         else if (id == ID_CHECK_AUTO_APPLY) {
             g_state.autoApply = (SendMessage(g_state.hCheckAutoApply, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            g_settings.live_preview = g_state.autoApply;
             SaveSettings();
         }
         else if (id == ID_BTN_CHANNEL_SETTINGS) {
@@ -3165,7 +3205,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // Cycle through themes: Dark -> Light -> Colorblind -> Dark
             int nextTheme = (GetThemeId() + 1) % 3;
             SetTheme(nextTheme);
-                    SaveSettings();
+            SaveAppSettings();
 
             // Restart application with focus using CreateProcess
             wchar_t exePath[MAX_PATH];
@@ -3188,7 +3228,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // Toggle language and restart app (without re-applying colors)
             g_lang = (g_lang == LANG_EN) ? LANG_DE : LANG_EN;
             g_str = (g_lang == LANG_EN) ? &g_strEN : &g_strDE;
-                    SaveSettings();
+            SaveAppSettings();
 
             // Restart application with focus using CreateProcess
             wchar_t exePath[MAX_PATH];
@@ -3332,7 +3372,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DESTROY:
         // Save window position before exit
-                SaveSettings();
+        SaveAppSettings();
         g_watcherRunning = false;  // Stop resume watcher thread
         // Unregister hotkeys
         UnregisterHotKey(hWnd, ID_HOTKEY_BLUE);
@@ -3701,8 +3741,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     Gdiplus::GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, NULL);
     LogDebug("GDI+ started");
 
-    // Load saved settings (language, theme, colors, enables)
-    LoadSettings();
+    // Load saved settings (language, theme)
+    LoadAppSettings();
     LogDebug("Settings loaded");
     SyncModernTheme();
     LogDebug("Modern theme synced");
