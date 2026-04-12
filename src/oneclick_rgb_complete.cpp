@@ -992,7 +992,7 @@ struct AsusHardwareConfig {
         uint8_t colorB = 255;
         bool enabled = true;
     };
-    Channel channels[8];
+    Channel channels[16];
     int numChannels = 0;
 };
 
@@ -1064,8 +1064,42 @@ void ParseAsusConfig(AsusHardwareConfig& cfg) {
         cfg.numChannels++;
     }
 
+    // Standard RGB headers - use IDs 0x02, 0x03...
+    for (int i = 0; i < cfg.numRGBHeaders && cfg.numChannels < 16; i++) {
+        cfg.channels[cfg.numChannels].present = true;
+        cfg.channels[cfg.numChannels].ledCount = 1;  // Standard headers set as single zone
+        cfg.channels[cfg.numChannels].addressable = false;
+        cfg.channels[cfg.numChannels].directChannel = 0x02 + i;
+        cfg.channels[cfg.numChannels].colorR = 0;
+        cfg.channels[cfg.numChannels].colorG = 34;
+        cfg.channels[cfg.numChannels].colorB = 255;
+        cfg.channels[cfg.numChannels].enabled = true;
+        sprintf(cfg.channels[cfg.numChannels].name, "RGB Header %d", i + 1);
+        cfg.numChannels++;
+    }
+
+    // Diagnostic/Internal zones (Force scan if Mainboard was detected)
+    if (cfg.numMainboardLEDs > 0 && cfg.numChannels < 16) {
+        // Some PCH/IO zones are at 0x0B, 0x0C
+        int extraZones[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x0B, 0x0C };
+        for (int zoneId : extraZones) {
+            bool alreadyExists = false;
+            for (int j = 0; j < cfg.numChannels; j++) {
+                if (cfg.channels[j].directChannel == zoneId) alreadyExists = true;
+            }
+            if (!alreadyExists && cfg.numChannels < 16) {
+                cfg.channels[cfg.numChannels].present = true;
+                cfg.channels[cfg.numChannels].ledCount = 30; // Assume 30 for scan
+                cfg.channels[cfg.numChannels].directChannel = zoneId;
+                cfg.channels[cfg.numChannels].enabled = true;
+                sprintf(cfg.channels[cfg.numChannels].name, "Zone (ID 0x%02X)", zoneId);
+                cfg.numChannels++;
+            }
+        }
+    }
+
     // Addressable headers - use their index as direct_channel
-    for (int i = 0; i < cfg.numAddressableHeaders && cfg.numChannels < 8; i++) {
+    for (int i = 0; i < cfg.numAddressableHeaders && cfg.numChannels < 16; i++) {
         // Addressable channels typically support up to 120 LEDs
         cfg.channels[cfg.numChannels].present = true;
         cfg.channels[cfg.numChannels].ledCount = 120;  // Max per addressable header
@@ -1239,6 +1273,18 @@ hid_device* OpenAsusAura() {
 
 void SetAsusChannel(hid_device* dev, int channel, int numLEDs, uint8_t r, uint8_t g, uint8_t b) {
     if (!dev) return;
+
+    // Force Direct Mode for this channel (Command 0x43)
+    // This is the "Bit" required to take control of internal motherboard LEDs
+    uint8_t modeBuf[65];
+    memset(modeBuf, 0, sizeof(modeBuf));
+    modeBuf[0x00] = 0xEC;
+    modeBuf[0x01] = 0x43;
+    modeBuf[0x02] = channel;
+    modeBuf[0x03] = 0xFF; // Mode "Direct/Software" (some boards use 0x01 Static)
+    hid_write(dev, modeBuf, 65);
+    Sleep(2);
+
     int offset = 0;
 
     while (offset < numLEDs) {
@@ -1291,9 +1337,9 @@ bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
     } else {
         // Fallback: old static config
         struct { int channel; int leds; } channels[] = {
-            {0, 60}, {1, 120}, {2, 120}, {3, 60}, {4, 60}, {5, 60}, {6, 60}, {7, 60}
+            {0x00, 60}, {0x01, 120}, {0x02, 120}, {0x03, 60}, {0x04, 60}, {0x0B, 60}, {0x0C, 60}
         };
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 7; i++) {
             if (g_channels.aura_channels[i].enabled) {
                 uint8_t cr = r, cg = g, cb = b;
                 g_channels.aura_channels[i].ApplyCorrection(cr, cg, cb);
@@ -1487,20 +1533,18 @@ bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode) {
     uint8_t profile = 0;
     EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &profile);
     if (profile > 2) profile = 0;
-    uint16_t edge_offset = profile * 0x40 + 0x01 + 0x1a;
+    
+    // We try multiple known offsets for Side LEDs
+    uint16_t offsets[] = { 
+        (uint16_t)(profile * 0x40 + 0x01 + 0x1a), // Standard Thyrus
+        (uint16_t)(profile * 0x40 + 0x01 + 0x15), // Some Omnis variants
+        (uint16_t)(0x1E)                          // Direct Edge ID
+    };
 
-    // Mode toggle trick: Set to different mode first, then target mode
-    uint8_t firstMode = (mode == EDGE_MODE_STATIC) ? EDGE_MODE_WAVE : EDGE_MODE_STATIC;
-    uint8_t edge1[10] = {firstMode, 0x04, 0x02, 0x00, 0x00, cr, cg, cb, 0x00, 0x01};
-    EVisionQuery(dev, 0x06, edge_offset, edge1, 10, nullptr);
-    EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
-    Sleep(100);
-
-    // Now set target mode
-    EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);
-    Sleep(20);
-    uint8_t edge2[10] = {mode, 0x04, 0x02, 0x00, 0x00, cr, cg, cb, 0x00, 0x01};
-    EVisionQuery(dev, 0x06, edge_offset, edge2, 10, nullptr);
+    for (uint16_t off : offsets) {
+        uint8_t edgeData[10] = {mode, 0x04, 0x02, 0x00, 0x00, cr, cg, cb, 0x00, 0x01};
+        EVisionQuery(dev, 0x06, off, edgeData, 10, nullptr);
+    }
 
     uint8_t unlock[2] = {0x00, 0x00};
     EVisionQuery(dev, 0x06, 0x14, unlock, 2, nullptr);
@@ -2042,7 +2086,24 @@ void UpdateAllControls() {
     if (g_state.hCheckAutoApply) SendMessage(g_state.hCheckAutoApply, BM_SETCHECK, g_state.autoApply ? BST_CHECKED : BST_UNCHECKED, 0);
     if (g_state.hSliderBrightness) SendMessage(g_state.hSliderBrightness, TBM_SETPOS, TRUE, g_state.brightness);
     if (g_state.hSliderSpeed) SendMessage(g_state.hSliderSpeed, TBM_SETPOS, TRUE, g_state.speed);
+    
+    // Sync Combos
+    if (g_state.hComboKbMode) SendMessage(g_state.hComboKbMode, CB_SETCURSEL, -1, 0); // Reset
+    if (g_state.hComboKbMode) {
+        // Map mode to index if needed, for now assume index matches enum or set directly
+        SendMessage(g_state.hComboKbMode, CB_SETCURSEL, g_state.kbMode, 0);
+    }
     if (g_state.hComboEdgeMode) SendMessage(g_state.hComboEdgeMode, CB_SETCURSEL, g_state.edgeMode, 0);
+    
+    // Sync Profile Combo selection
+    if (g_state.hComboProfiles && !g_state.currentProfile.empty()) {
+        int idx = (int)SendMessageW(g_state.hComboProfiles, CB_FINDSTRINGEXACT, -1, (LPARAM)g_state.currentProfile.c_str());
+        if (idx != CB_ERR) {
+            SendMessage(g_state.hComboProfiles, CB_SETCURSEL, idx, 0);
+        } else {
+            SetWindowTextW(g_state.hComboProfiles, g_state.currentProfile.c_str());
+        }
+    }
 }
 
 //=============================================================================
@@ -2908,6 +2969,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         RegisterHotKey(hWnd, ID_HOTKEY_GREEN, MOD_CONTROL | MOD_ALT, 'G');
         RegisterHotKey(hWnd, ID_HOTKEY_WHITE, MOD_CONTROL | MOD_ALT, 'W');
         RegisterHotKey(hWnd, ID_HOTKEY_OFF, MOD_CONTROL | MOD_ALT, '0');
+
+        // Final sync of all UI elements to the loaded config
+        UpdateAllControls();
 
         // Apply colors on startup (unless --no-apply)
         if (!g_skipApplyOnStart) {
