@@ -57,8 +57,9 @@ Makefile
 OneClickRGB_*_Portable/
 
 # Bundled CMake copy: a downloaded toolchain, not source. build_app.bat uses it
-# when present and falls back to cmake on PATH otherwise.
-tools/
+# when present and falls back to cmake on PATH otherwise. Only the toolchain is
+# ignored - tools/ itself holds scripts that belong in the repository.
+tools/cmake/
 
 # Claude Code workspace settings
 .claude/

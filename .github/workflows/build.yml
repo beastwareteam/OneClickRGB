@@ -39,6 +39,31 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      # Starts the binary that was just built and asserts on what it does:
+      # that it runs at all, keeps a single instance, and writes its files
+      # where it claims to. Every defect that reached a user so far was of that
+      # kind - invisible to the unit tests, which never launch the program.
+      - name: Smoke test
+        shell: pwsh
+        run: ./tools/smoke_test.ps1 -Exe build/Release/OneClickRGB.exe
+
+      # Collected via pwsh rather than an expression: %APPDATA% is a runner
+      # environment variable, not something the workflow context resolves.
+      - name: Collect smoke test log
+        if: failure()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force smoke-logs | Out-Null
+          Copy-Item "$env:APPDATA/OneClickRGB/debug.log" smoke-logs/ -ErrorAction SilentlyContinue
+
+      - name: Upload smoke test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-debug-log
+          path: smoke-logs/
+          if-no-files-found: ignore
+
       - name: Stage portable package
         shell: pwsh
         run: |

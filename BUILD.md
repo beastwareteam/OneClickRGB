@@ -77,6 +77,41 @@ source file, add it to **both** `CMakeLists.txt` and the `SOURCE` list in
 
 ---
 
+## Quality gate
+
+```batch
+quality.bat
+```
+
+This is what CI runs, and what should pass before a push. Four stages, each
+stopping the run on failure:
+
+| Stage | Checks |
+|-------|--------|
+| 1. Build tests | Core and tests compile at `/W4 /WX` - a warning fails |
+| 2. Run tests | All unit tests pass |
+| 3. Build app | The GUI compiles; the curated warning list below is errors |
+| 4. Smoke test | The built binary is **started** and asserted on |
+
+The smoke test (`tools\smoke_test.ps1`) exists because the unit tests never
+launch the program, and every defect that reached a user was of that kind: the
+app started a second copy of itself, wrote its files somewhere else, or shipped
+without the DLL it needs. It runs the real binary in `--dry-run` and checks that
+it starts and shows a window, that a second launch exits instead of running
+alongside, that `--debug` writes to `%APPDATA%` and nowhere else, that the
+stored effect modes are values the hardware implements, and that no path with a
+lost separator or a control character in it appears.
+
+These MSVC warnings are errors project-wide, each because it already cost a bug:
+
+| Warning | What it catches |
+|---------|-----------------|
+| `C4129` | Unrecognised escape - `L"\profiles"` silently lost its separator |
+| `C4456`–`C4459` | A declaration hiding another - a local `GUID_CONSOLE_DISPLAY_STATE` hid that the SDK constant was being shadowed by a malformed copy |
+| `C4700` | Use of an uninitialised local |
+| `C4715` | Not all control paths return a value |
+| `C4834` | Discarded `[[nodiscard]]` result |
+
 ## Running the tests
 
 ```batch

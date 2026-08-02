@@ -11,6 +11,22 @@ option(ONECLICKRGB_BUILD_TESTS "Build the unit tests"            ON)
 if(MSVC)
     add_compile_options(/W4 /permissive- /utf-8 /EHsc)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+
+    # Quality gate: warnings that have each already cost a real bug here are
+    # errors everywhere, including the front end, which is otherwise still too
+    # noisy for a blanket /WX.
+    #
+    #   C4129  unrecognised escape sequence - L"\profiles" silently dropped its
+    #          separator and profiles were written to the wrong folder
+    #   C4456  declaration hides a previous local
+    #   C4457  declaration hides a function parameter
+    #   C4458  declaration hides a class member
+    #   C4459  declaration hides a global - a local GUID_CONSOLE_DISPLAY_STATE
+    #          shadowed the SDK symbol and hid that it was malformed
+    #   C4700  use of an uninitialised local
+    #   C4715  not all control paths return a value
+    #   C4834  discarding a [[nodiscard]] result
+    add_compile_options(/we4129 /we4456 /we4457 /we4458 /we4459 /we4700 /we4715 /we4834)
 else()
     add_compile_options(-Wall -Wextra)
 endif()
@@ -34,6 +50,15 @@ add_library(oneclickrgb_core STATIC
 target_include_directories(oneclickrgb_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+
+# The core and the tests are warning-free at /W4 and stay that way: here a
+# warning fails the build. The Win32 front end still carries older warnings and
+# is held to the curated list above instead.
+if(MSVC)
+    target_compile_options(oneclickrgb_core PRIVATE /WX)
+else()
+    target_compile_options(oneclickrgb_core PRIVATE -Werror)
+endif()
 
 # Autostart is Task Scheduler plumbing and only exists on Windows.
 if(WIN32)
@@ -64,6 +89,12 @@ if(ONECLICKRGB_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests
     )
+
+    if(MSVC)
+        target_compile_options(oneclickrgb_tests PRIVATE /WX)
+    else()
+        target_compile_options(oneclickrgb_tests PRIVATE -Werror)
+    endif()
 
     add_test(NAME unit_tests COMMAND oneclickrgb_tests)
 endif()
@@ -97,5 +128,20 @@ if(ONECLICKRGB_BUILD_APP AND WIN32)
 
     set_target_properties(OneClickRGB PROPERTIES
         LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\""
+    )
+
+    # Runtime files next to the exe, so a freshly built binary actually starts.
+    # hidapi.dll is load-time linked: without it Windows refuses to launch the
+    # process at all, with an error that says nothing about RGB. Copying by hand
+    # after every build is exactly the step that gets forgotten.
+    add_custom_command(TARGET OneClickRGB POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/hidapi/hidapi.dll"
+            "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/PawnIO/PawnIOLib.dll"
+            "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/PawnIO/modules/SmbusI801.bin"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/icon.png"
+            "$<TARGET_FILE_DIR:OneClickRGB>"
+        COMMENT "Copying runtime dependencies next to OneClickRGB.exe"
+        VERBATIM
     )
 endif()

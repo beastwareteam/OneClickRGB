@@ -132,7 +132,14 @@ public:
         if (f) f << std::setw(4) << j;
     }
 
+    /// Set by Load() when it had to correct a value read from disk. The caller
+    /// writes the file back, so the repair survives even if the process is
+    /// terminated rather than closed - otherwise a broken config keeps being
+    /// repaired in memory on every start and never actually gets fixed.
+    bool repairedOnLoad = false;
+
     void Load() {
+        repairedOnLoad = false;
         InitNames();  // ensure defaults before overwriting from disk
 
         std::ifstream f(GetPath());
@@ -152,14 +159,18 @@ public:
             // ones a combo index), which would be sent to the keyboard as a
             // mode byte. Anything the protocol does not implement falls back to
             // the default rather than going out on the wire.
-            if (!devices::evision::IsValidKeyboardMode(kbMode))
+            if (!devices::evision::IsValidKeyboardMode(kbMode)) {
                 kbMode = devices::evision::KB_MODE_DEFAULT;
+                repairedOnLoad = true;
+            }
             // FREEZE is a protocol value the UI never offered, so a stored zero
             // can only be the old zero-initialised default rather than a
             // deliberate choice - migrate it instead of sending it.
             if (!devices::evision::IsValidEdgeMode(edgeMode) ||
-                edgeMode == devices::evision::EDGE_MODE_FREEZE)
+                edgeMode == devices::evision::EDGE_MODE_FREEZE) {
                 edgeMode = devices::evision::EDGE_MODE_DEFAULT;
+                repairedOnLoad = true;
+            }
 
             enableAura     = j.value("enableAura",     enableAura);
             enableMouse    = j.value("enableMouse",    enableMouse);

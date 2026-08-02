@@ -672,6 +672,15 @@ struct AppState {
     std::wstring statusLog;
     std::atomic<bool> applying{false};
     std::mutex statusMutex;
+    /// How much of statusLog the edit control already shows, so a refresh can
+    /// append instead of rewriting everything.
+    size_t statusRendered = 0;
+    /// Bumped whenever the log is cleared or trimmed at the front - that is
+    /// when what is on screen stops being a prefix and a full redraw is due.
+    uint32_t statusGeneration = 0;
+    uint32_t statusRenderedGen = 0;
+    /// One outstanding WM_APP_STATUS at a time; refreshes coalesce.
+    std::atomic<bool> statusNotifyPending{false};
 
     // Profiles
     std::vector<std::wstring> profiles;
@@ -774,6 +783,10 @@ void SaveAppSettings() {
 
 void LoadAppSettings() {
     g_config.Load();
+    // A config that had to be corrected is written back straight away rather
+    // than waiting for the user to change something: without that the file on
+    // disk keeps its bad values and every start repairs them again.
+    if (g_config.repairedOnLoad) g_config.Save();
     // Sync unified config → runtime state
     g_state.red        = g_config.red;
     g_state.green      = g_config.green;
@@ -801,22 +814,50 @@ void LoadAppSettings() {
 /// dropped at a line boundary so the control never grows without bound.
 constexpr size_t STATUS_LOG_LIMIT = 16000;
 
-/// Redraws the edit control from the log. UI thread only.
+/// Brings the edit control up to date. UI thread only.
+///
+/// Appends just the text that is new since the last call. Replacing the whole
+/// control on every line - which is what this did before - repaints the entire
+/// log per message, so an apply run visibly rewrote the window ten times over
+/// and threw away the scroll position each time. A full rewrite now happens
+/// only when the history was cleared or trimmed at the front, which is the one
+/// case where the text already on screen is no longer a prefix of the log.
 void RefreshStatusWindow() {
     if (!g_state.hStatus) return;
 
-    std::wstring currentText;
+    std::wstring toAppend;
+    std::wstring fullText;
+    bool rewrite = false;
     {
         std::lock_guard<std::mutex> lock(g_state.statusMutex);
-        currentText = g_state.statusLog;
+        if (g_state.statusGeneration != g_state.statusRenderedGen ||
+            g_state.statusRendered > g_state.statusLog.size()) {
+            rewrite = true;
+            fullText = g_state.statusLog;
+        } else if (g_state.statusRendered < g_state.statusLog.size()) {
+            toAppend = g_state.statusLog.substr(g_state.statusRendered);
+        } else {
+            return;  // nothing new - a coalesced duplicate notification
+        }
+        g_state.statusRendered = g_state.statusLog.size();
+        g_state.statusRenderedGen = g_state.statusGeneration;
     }
 
-    SetWindowTextW(g_state.hStatus, currentText.c_str());
-    SendMessage(g_state.hStatus, EM_SETSEL, currentText.length(), currentText.length());
+    if (rewrite) {
+        SetWindowTextW(g_state.hStatus, fullText.c_str());
+        SendMessage(g_state.hStatus, EM_SETSEL, fullText.length(), fullText.length());
+    } else {
+        // Move the caret past the end, then insert - EM_REPLACESEL with no
+        // selection is an append and repaints only the new lines.
+        const int end = GetWindowTextLengthW(g_state.hStatus);
+        SendMessage(g_state.hStatus, EM_SETSEL, end, end);
+        SendMessageW(g_state.hStatus, EM_REPLACESEL, FALSE, (LPARAM)toAppend.c_str());
+    }
     SendMessage(g_state.hStatus, EM_SCROLLCARET, 0, 0);
 }
 
 void AppendStatus(const wchar_t* text) {
+    bool notify = false;
     {
         std::lock_guard<std::mutex> lock(g_state.statusMutex);
         g_state.statusLog += text;
@@ -825,20 +866,32 @@ void AppendStatus(const wchar_t* text) {
             size_t cut = g_state.statusLog.size() - STATUS_LOG_LIMIT;
             size_t nl = g_state.statusLog.find(L'\n', cut);
             g_state.statusLog.erase(0, nl == std::wstring::npos ? cut : nl + 1);
+            // The visible text is no longer a prefix of the log, so the next
+            // refresh has to redraw the control rather than append to it.
+            ++g_state.statusGeneration;
+            g_state.statusRendered = 0;
         }
+        // One pending notification is enough no matter how many lines arrive
+        // before the UI thread gets round to them; the refresh always renders
+        // everything outstanding. Without this an apply run posts a dozen
+        // messages and the control is reworked a dozen times.
+        notify = !g_state.statusNotifyPending.exchange(true);
     }
 
     // The edit control belongs to the UI thread. Worker threads must not write
     // to it directly: each one rendering its own snapshot of the log means the
     // updates can land out of order and leave a stale, truncated log on screen.
-    if (g_state.hWnd) PostMessage(g_state.hWnd, WM_APP_STATUS, 0, 0);
+    if (notify && g_state.hWnd) PostMessage(g_state.hWnd, WM_APP_STATUS, 0, 0);
 }
 
 void ClearStatus() {
     {
         std::lock_guard<std::mutex> lock(g_state.statusMutex);
         g_state.statusLog.clear();
+        ++g_state.statusGeneration;
+        g_state.statusRendered = 0;
     }
+    g_state.statusNotifyPending = true;
     if (g_state.hWnd) PostMessage(g_state.hWnd, WM_APP_STATUS, 0, 0);
 }
 
@@ -2727,6 +2780,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_APP_STATUS:
+        // Cleared before rendering, so a line arriving during the refresh posts
+        // a fresh notification instead of being left on screen-less.
+        g_state.statusNotifyPending = false;
         RefreshStatusWindow();
         return 0;
 
