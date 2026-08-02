@@ -104,9 +104,17 @@ echo [6/7] Autostart einrichten? (J/N)
 echo     (Startet minimiert im System-Tray)
 set /p CREATE_AUTOSTART="> "
 if /i "%CREATE_AUTOSTART%"=="J" (
-    set "AUTOSTART=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\OneClickRGB.lnk"
-    powershell -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('%AUTOSTART%'); $sc.TargetPath = '%INSTALL_DIR%\OneClickRGB.exe'; $sc.Arguments = '--minimized'; $sc.WorkingDirectory = '%INSTALL_DIR%'; $sc.Save()"
-    echo     Autostart eingerichtet.
+    REM Geplante Aufgabe statt Autostart-Ordner: OneClickRGB fordert
+    REM Administratorrechte an, und solche Programme startet Windows aus dem
+    REM Autostart-Ordner bzw. HKCU\...\Run grundsaetzlich nicht.
+    schtasks /Create /F /TN "OneClickRGB Autostart" ^
+        /TR "\"%INSTALL_DIR%\OneClickRGB.exe\" --minimized" ^
+        /SC ONLOGON /RL HIGHEST /DELAY 0000:10 >nul 2>&1
+    if errorlevel 1 (
+        echo     [WARNUNG] Geplante Aufgabe konnte nicht erstellt werden.
+    ) else (
+        echo     Autostart eingerichtet ^(geplante Aufgabe, als Administrator^).
+    )
 ) else (
     echo     Uebersprungen.
 )

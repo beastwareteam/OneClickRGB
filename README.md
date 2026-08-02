@@ -56,12 +56,22 @@
 ```batch
 git clone https://github.com/beastwareteam/OneClickRGB.git
 cd OneClickRGB
-build_native.bat
+build_app.bat
 ```
 
 **Requirements**: Visual Studio 2019/2022 Build Tools
 
+`build_native.bat` still works and builds without CMake.
 See [BUILD.md](BUILD.md) for detailed instructions.
+
+### Running the tests
+
+```batch
+run_tests.bat
+```
+
+The tests use fake HID and SMBus backends, so no RGB hardware and no
+administrator rights are required.
 
 ---
 
@@ -132,14 +142,28 @@ Settings are stored in `%APPDATA%\OneClickRGB\`:
 
 | File | Description |
 |------|-------------|
-| `app_settings.cfg` | Window position, language, theme |
-| `profiles/*.json` | Saved color profiles |
+| `config.json` | Colors, devices, window position, language, theme, per-zone correction |
+| `profiles/*.rgb` | Saved color profiles |
+| `asus_hw_config.bin` | Cached ASUS channel layout (re-scanned when the board changes) |
+
+Settings from older versions (`app_settings.cfg`, `channels.cfg`) are migrated
+into `config.json` automatically on first start.
 
 ---
 
 ## Version History
 
-### v3.5 (Current)
+### v3.6 (Current)
+- **Fix: Autostart now runs as administrator** via a scheduled task, so the RAM
+  color is applied at logon. A `Run` key entry can never start an elevated app.
+- **Fix: Windows key is no longer left locked** after applying a profile, and
+  the result is verified by reading the register back
+- Fix: `--dry-run` no longer touches hardware on startup
+- Fix: RAM retries briefly while the PawnIO service is still starting
+- Device protocols split into testable modules behind a hardware abstraction
+- Unit test suite (88 tests), CMake build, working CI
+
+### v3.5
 - Info tooltips on all controls
 - Theme system (Dark/Light/Colorblind)
 - Keyboard accessibility
@@ -177,6 +201,18 @@ See [ROADMAP.md](ROADMAP.md) for planned features.
 - Run `PawnIO_setup.exe` once as Administrator
 - Restart PC after driver installation
 - Check `PawnIOLib.dll` and `SmbusI801.bin` are present
+- The status log names the exact cause (driver not running, DLL missing, ...)
+
+### "RAM color is not applied after logging in"
+- Enable **Autostart** in the application. This registers a scheduled task that
+  runs with administrator rights - required for the SMBus driver.
+- A shortcut in the Startup folder will *not* work: Windows refuses to
+  auto-elevate programs started that way.
+- Verify with: `schtasks /Query /TN "OneClickRGB Autostart"`
+
+### "Windows key does not work"
+- Apply any color once; the keyboard's key lock is cleared on every apply.
+- The status log reports whether the keyboard confirmed the unlock.
 
 ### "Colors don't persist after sleep"
 - Enable "Autostart" in settings
@@ -188,12 +224,32 @@ See [ROADMAP.md](ROADMAP.md) for planned features.
 
 ```
 src/
-├── oneclick_rgb_complete.cpp   Main application (all-in-one)
+├── oneclick_rgb_complete.cpp   Win32 front end (window, tray, hotkeys)
+├── hal/                        Hardware abstraction
+│   ├── hid_backend.h             USB HID interface
+│   ├── hid_backend_hidapi.*      Real backend (hidapi)
+│   ├── hid_backend_dryrun.h      Logging backend for --dry-run
+│   ├── smbus_backend.h           SMBus interface
+│   └── smbus_backend_pawnio.*    Real backend (PawnIO)
+├── devices/                    Device protocols
+│   ├── asus_aura.*               ASUS Aura mainboard
+│   ├── evision.*                 EVision keyboard + edge zone
+│   ├── gskill_ram.*              G.Skill Trident Z5 over SMBus
+│   └── steelseries.*             SteelSeries Rival 600
+├── autostart.*                 Scheduled task at logon (elevated)
+├── profile.*                   Colour profile storage
+├── app_config.h                Unified settings (config.json)
+├── channel_config.h            Per-zone colour correction
 ├── themes.h                    Theme definitions
-├── channel_config.h            Channel configuration
 ├── modern_ui.h                 UI components
-└── OneClickRGB.ico/rc/res      Resources
+└── OneClickRGB.ico/rc          Resources
+
+tests/                          Unit tests (fake backends, no hardware)
 ```
+
+The device protocols talk to the interfaces in `src/hal` rather than to hidapi
+or PawnIO directly. That is what lets `tests/` assert the exact bytes each
+protocol puts on the wire without any hardware attached.
 
 ---
 

@@ -80,27 +80,25 @@ if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 echo Compiling OneClickRGB (Native GUI)...
 echo.
 
-REM Source file (all-in-one native GUI with all features)
-REM Use oneclick_rgb_complete.cpp for full version with:
-REM   - Resume/Standby detection
-REM   - Global hotkeys
-REM   - System tray
-REM   - All device support
+REM Source files.
+REM The Win32 front end plus the device protocol modules, the profile store,
+REM the autostart task and the two real HAL backends. Keep this list in sync
+REM with the OneClickRGB target in CMakeLists.txt.
 set SOURCE="%SRC_DIR%\oneclick_rgb_complete.cpp"
+set SOURCE=%SOURCE% "%SRC_DIR%\devices\asus_aura.cpp"
+set SOURCE=%SOURCE% "%SRC_DIR%\devices\evision.cpp"
+set SOURCE=%SOURCE% "%SRC_DIR%\devices\gskill_ram.cpp"
+set SOURCE=%SOURCE% "%SRC_DIR%\devices\steelseries.cpp"
+set SOURCE=%SOURCE% "%SRC_DIR%\hal\hid_backend_hidapi.cpp"
+set SOURCE=%SOURCE% "%SRC_DIR%\hal\smbus_backend.cpp"
+set SOURCE=%SOURCE% "%SRC_DIR%\hal\smbus_backend_pawnio.cpp"
+set SOURCE=%SOURCE% "%SRC_DIR%\autostart.cpp"
+set SOURCE=%SOURCE% "%SRC_DIR%\profile.cpp"
 
-REM Fallback to simpler version if complete doesn't exist
-if not exist %SOURCE% (
-    set SOURCE="%SRC_DIR%\oneclick_gui.cpp"
-)
-
-REM Check if source exists
-if not exist %SOURCE% (
-    echo ERROR: Source file not found!
-    echo Tried: oneclick_rgb_complete.cpp and oneclick_gui.cpp
+if not exist "%SRC_DIR%\oneclick_rgb_complete.cpp" (
+    echo ERROR: Source file not found: oneclick_rgb_complete.cpp
     exit /b 1
 )
-
-echo Using source: %SOURCE%
 
 REM Compiler flags
 set CFLAGS=/nologo /EHsc /std:c++17 /O2 /MD /W3
@@ -111,6 +109,7 @@ set INCLUDES=/I"%SRC_DIR%" /I"%DEP_DIR%\hidapi" /I"%DEP_DIR%"
 
 REM Libraries
 set LIBS=shell32.lib advapi32.lib setupapi.lib comctl32.lib comdlg32.lib user32.lib gdi32.lib
+set LIBS=%LIBS% ole32.lib gdiplus.lib wtsapi32.lib powrprof.lib uxtheme.lib dwmapi.lib
 set LIBS=%LIBS% "%DEP_DIR%\hidapi\hidapi.lib"
 
 REM Resource file (icon)
@@ -126,11 +125,11 @@ if exist "%SRC_DIR%\OneClickRGB.rc" (
 REM Output
 set OUTPUT=%BUILD_DIR%\OneClickRGB.exe
 
-echo Source: %SOURCE%
 echo Output: %OUTPUT%
 echo.
 
-cl.exe %CFLAGS% %INCLUDES% %SOURCE% %RES_FILE% /Fe"%OUTPUT%" /link %LIBS%
+REM /Fo with a trailing backslash keeps the .obj files out of the source tree.
+cl.exe %CFLAGS% %INCLUDES% %SOURCE% %RES_FILE% /Fo"%BUILD_DIR%\\" /Fe"%OUTPUT%" /link %LIBS%
 
 if errorlevel 1 (
     echo.

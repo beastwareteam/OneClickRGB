@@ -41,6 +41,27 @@
 build/
 !build/.gitkeep
 production/build/
+build_app/
+build_tests/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.lib
+*.exe
+!portable/*.exe
+
+# Release archives and the staged portable package - build artifacts, published
+# via GitHub Releases rather than committed (see .github/workflows/release.yml).
+*.zip
+OneClickRGB_*_Portable/
+
+# Bundled CMake copy: a downloaded toolchain, not source. build_app.bat uses it
+# when present and falls back to cmake on PATH otherwise.
+tools/
+
+# Claude Code workspace settings
+.claude/
 
 # IDE
 .vs/
@@ -52,6 +73,9 @@ production/build/
 *.log
 *.txt
 !README.txt
+# The blanket *.txt rule above would otherwise swallow the build files.
+!CMakeLists.txt
+!**/CMakeLists.txt
 *.res
 
 # Generated resources

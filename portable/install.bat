@@ -52,8 +52,23 @@ set "STARTMENU=%ProgramData%\Microsoft\Windows\Start Menu\Programs\OneClickRGB.l
 powershell -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('%STARTMENU%'); $sc.TargetPath = '%INSTALL_DIR%\OneClickRGB.exe'; $sc.WorkingDirectory = '%INSTALL_DIR%'; $sc.Save()"
 
 echo [6/6] Richte Autostart ein...
-set "AUTOSTART=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\OneClickRGB.lnk"
-powershell -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('%AUTOSTART%'); $sc.TargetPath = '%INSTALL_DIR%\OneClickRGB.exe'; $sc.Arguments = '--minimized'; $sc.WorkingDirectory = '%INSTALL_DIR%'; $sc.Save()"
+REM OneClickRGB fordert Administratorrechte an (PawnIO-Treiber fuer G.Skill-RAM).
+REM Windows startet solche Programme NICHT aus dem Autostart-Ordner oder aus
+REM HKCU\...\Run - solche Eintraege werden beim Anmelden stillschweigend
+REM uebersprungen. Deshalb eine geplante Aufgabe mit hoechsten Rechten.
+set "AUTOSTART_OLD=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\OneClickRGB.lnk"
+if exist "%AUTOSTART_OLD%" del /f /q "%AUTOSTART_OLD%"
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v OneClickRGB /f >nul 2>&1
+
+schtasks /Create /F /TN "OneClickRGB Autostart" ^
+    /TR "\"%INSTALL_DIR%\OneClickRGB.exe\" --minimized" ^
+    /SC ONLOGON /RL HIGHEST /DELAY 0000:10 >nul 2>&1
+if errorlevel 1 (
+    echo     [WARNUNG] Geplante Aufgabe konnte nicht erstellt werden.
+    echo     Autostart bitte in der Anwendung aktivieren.
+) else (
+    echo     Geplante Aufgabe "OneClickRGB Autostart" erstellt ^(als Administrator^).
+)
 
 echo.
 echo ============================================================

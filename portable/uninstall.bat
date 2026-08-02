@@ -33,7 +33,10 @@ taskkill /F /IM OneClickRGB.exe 2>nul
 timeout /t 2 /nobreak >nul
 
 echo [2/5] Entferne Autostart...
+schtasks /Delete /F /TN "OneClickRGB Autostart" >nul 2>&1
+REM Altlasten frueherer Versionen mit entfernen.
 del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\OneClickRGB.lnk" 2>nul
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v OneClickRGB /f >nul 2>&1
 
 echo [3/5] Entferne Startmenue-Eintrag...
 del "%ProgramData%\Microsoft\Windows\Start Menu\Programs\OneClickRGB.lnk" 2>nul
