@@ -7,6 +7,7 @@
 | [README.md](../README.md) | Quick start and feature overview |
 | [BUILD.md](../BUILD.md) | Building from source |
 | [GUIDE.md](GUIDE.md) | User guide and tips |
+| [CHANGELOG.md](../CHANGELOG.md) | Release history and fixed defects |
 
 ## Technical Documentation
 
@@ -14,6 +15,7 @@
 |----------|-------------|
 | [GSkill_Trident_Z5_RGB_DDR5_Protocol.md](GSkill_Trident_Z5_RGB_DDR5_Protocol.md) | G.Skill RAM SMBus protocol |
 | [SMBus_Implementation_Guide.md](SMBus_Implementation_Guide.md) | SMBus driver implementation |
+| [TESTING.md](TESTING.md) | Test suite: layout, how to run, what is covered |
 
 ## Source Code Reference
 
@@ -21,10 +23,16 @@
 
 | File | Description |
 |------|-------------|
-| `src/oneclick_rgb_complete.cpp` | Main application (4300+ lines) |
+| `src/oneclick_rgb_complete.cpp` | Win32 front end: window, tray, hotkeys, dialogs |
+| `src/hal/` | Hardware abstraction (HID, SMBus) - real, dry-run and fake backends |
+| `src/devices/` | Device protocols, testable without hardware |
+| `src/autostart.cpp` | Elevated scheduled task at logon |
+| `src/profile.cpp` | Color profile serialization and storage |
+| `src/app_config.h` | Unified settings (`config.json`) |
 | `src/themes.h` | Theme system (Dark/Light/Colorblind) |
 | `src/channel_config.h` | Per-channel color correction |
 | `src/modern_ui.h` | Custom UI components |
+| `tests/` | Unit tests + fake backends |
 
 ### Dependencies
 
@@ -114,8 +122,12 @@ Location: `%APPDATA%\OneClickRGB\`
 
 | File | Format | Contents |
 |------|--------|----------|
-| `app_settings.cfg` | Key=Value | Theme, language, window position, last profile |
-| `profiles/*.json` | JSON | Saved color configurations |
+| `config.json` | JSON | Colors, devices, theme, language, window position, per-zone correction |
+| `profiles/*.rgb` | Key=Value | Saved color configurations |
+| `asus_hw_config.bin` | Binary | Cached ASUS channel layout |
+
+`app_settings.cfg` and `channels.cfg` from earlier versions are migrated into
+`config.json` on first start (see `RGBConfig::MigrateLegacy`).
 
 ## Hardware Communication
 
@@ -125,9 +137,11 @@ Location: `%APPDATA%\OneClickRGB\`
 - No driver installation needed
 
 ### SMBus (G.Skill RAM)
-- Requires PawnIO driver
+- Requires PawnIO driver **and administrator rights**
 - Intel SMBus controller (I801)
-- Addresses: 0x77-0x7A (modules 1-4)
+- Probed addresses: 0x70-0x77
+- The driver is opened with a short retry, because at logon the PawnIO service
+  is often still starting
 
 ## Screenshots
 

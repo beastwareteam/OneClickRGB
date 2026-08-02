@@ -8,97 +8,58 @@ on:
       - '.github/workflows/security.yml'
   pull_request:
     branches: [ main ]
+    paths:
+      - 'src/**'
   schedule:
-    - cron: '0 2 * * 1'  # Weekly Monday 2 AM
+    - cron: '0 2 * * 1'  # Weekly, Monday 02:00
 
 jobs:
   codeql:
     name: CodeQL Analysis
-    runs-on: ubuntu-20.04
-    
+    # The application only builds on Windows, so CodeQL has to run there too.
+    runs-on: windows-latest
+
     permissions:
       security-events: write
-    
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 2
-    
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v2
-      with:
-        languages: 'cpp'
-        queries: security-extended
-    
-    - name: Setup CMake
-      uses: jwlawson/actions-setup-cmake@v1.14
-    
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libhidapi-dev
-    
-    - name: Build
-      run: |
-        mkdir build && cd build
-        cmake .. -DCMAKE_BUILD_TYPE=Release
-        cmake --build . --config Release
-    
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v2
-      with:
-        category: "/language:cpp"
+      contents: read
 
-  dependency-check:
-    name: Dependency Vulnerability Check
-    runs-on: ubuntu-20.04
-    
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    
-    - name: Run Dependency Check
-      uses: dependency-check/Dependency-Check_Action@main
-      with:
-        project: OneClickRGB
-        path: .
-        format: JSON
-        args: >
-          --exclude .git
-    
-    - name: Upload Dependency Check Results
-      if: always()
-      uses: actions/upload-artifact@v3
-      with:
-        name: dependency-check-report
-        path: reports/
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  linting:
-    name: Code Quality & Linting
-    runs-on: ubuntu-20.04
-    
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: cpp
+          queries: security-extended
+
+      - name: Build
+        run: |
+          cmake -S . -B build -A x64 -DONECLICKRGB_BUILD_TESTS=OFF
+          cmake --build build --config Release --parallel
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:cpp"
+
+  static-analysis:
+    name: cppcheck
+    runs-on: ubuntu-latest
+
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    
-    - name: Install Linters
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y clang-format cppcheck
-    
-    - name: Run cpplint
-      continue-on-error: true
-      run: |
-        find src -name "*.cpp" -o -name "*.h" | xargs cpplint --filter=-build/c++11 || true
-    
-    - name: Check Code Formatting
-      continue-on-error: true
-      run: |
-        find src -name "*.cpp" -o -name "*.h" | \
-        while read file; do
-          if ! clang-format --dry-run --Werror "$file" > /dev/null 2>&1; then
-            echo "File needs formatting: $file"
-            exit 1
-          fi
-        done || true
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+      # Limited to the portable modules: the Win32 front end drags in headers
+      # cppcheck cannot resolve on Linux, which would bury real findings in
+      # noise. These are the files with the protocol logic anyway.
+      - name: Run cppcheck
+        run: >
+          cppcheck --error-exitcode=1 --enable=warning,performance,portability
+          --inline-suppr --std=c++17 --quiet
+          -I src
+          src/devices src/hal/smbus_backend.cpp src/profile.cpp

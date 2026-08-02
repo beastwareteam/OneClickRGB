@@ -54,11 +54,23 @@
 #include <powrprof.h>
 #include <uxtheme.h>
 #include <dwmapi.h>
-#include "hidapi.h"
 #include "channel_config.h"
 #include "app_config.h"
 #include "themes.h"
 #include "modern_ui.h"
+
+// Device protocols, profile storage and autostart now live in their own
+// modules so they can be tested without a window or attached hardware
+// (see tests/ and CMakeLists.txt). This file is the Win32 front end.
+#include "autostart.h"
+#include "profile.h"
+#include "devices/asus_aura.h"
+#include "devices/evision.h"
+#include "devices/gskill_ram.h"
+#include "devices/steelseries.h"
+#include "hal/hid_backend_dryrun.h"
+#include "hal/hid_backend_hidapi.h"
+#include "hal/smbus_backend_pawnio.h"
 
 using json = nlohmann::json;
 
@@ -139,8 +151,10 @@ LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 //=============================================================================
 
 #define APP_NAME L"OneClickRGB"
-#define APP_VERSION L"3.5.1"
-#define APP_VERSION_A "3.5.1"  // ANSI version for resources
+// Keep in sync with CMakeLists.txt (project VERSION), src/OneClickRGB.rc
+// (FILEVERSION/PRODUCTVERSION) and installer/OneClickRGB.iss (MyAppVersion).
+#define APP_VERSION L"3.6.0"
+#define APP_VERSION_A "3.6.0"  // ANSI version for resources
 
 // Layout constants (responsive)
 #define WINDOW_WIDTH 640
@@ -528,47 +542,28 @@ wchar_t g_windowTitle[256] = {0};
 // DEVICE CONSTANTS
 //=============================================================================
 
-namespace Devices {
-    constexpr uint16_t ASUS_VID = 0x0B05;
-    constexpr uint16_t ASUS_AURA_PID = 0x19AF;
-    constexpr uint16_t ASUS_USAGE_PAGE = 0xFF72;
+// Device ids and protocol constants are owned by the device modules; these
+// aliases keep the UI code below reading the same as before.
+namespace Devices = devices::ids;
 
-    constexpr uint16_t STEELSERIES_VID = 0x1038;
-    constexpr uint16_t RIVAL_600_PID = 0x1724;
+using devices::evision::KB_MODE_STATIC;
+using devices::evision::KB_MODE_BREATHING;
+using devices::evision::KB_MODE_SPECTRUM;
+using devices::evision::KB_MODE_WAVE_SHORT;
+using devices::evision::KB_MODE_WAVE_LONG;
+using devices::evision::KB_MODE_COLOR_WHEEL;
+using devices::evision::KB_MODE_REACTIVE;
+using devices::evision::KB_MODE_RIPPLE;
+using devices::evision::KB_MODE_STARLIGHT;
+using devices::evision::KB_MODE_RAINBOW;
+using devices::evision::KB_MODE_HURRICANE;
 
-    constexpr uint16_t EVISION_VID = 0x3299;
-    constexpr uint16_t EVISION_PID = 0x4E9F;
-    constexpr uint16_t EVISION_USAGE_PAGE = 0xFF1C;
-}
-
-// EVision constants
-constexpr uint8_t EVISION_V2_REPORT_ID = 4;
-constexpr uint8_t EVISION_V2_PACKET_SIZE = 64;
-
-// Keyboard modes
-enum KeyboardMode {
-    KB_MODE_STATIC = 0x06,
-    KB_MODE_BREATHING = 0x05,
-    KB_MODE_SPECTRUM = 0x04,
-    KB_MODE_WAVE_SHORT = 0x01,
-    KB_MODE_WAVE_LONG = 0x02,
-    KB_MODE_COLOR_WHEEL = 0x03,
-    KB_MODE_REACTIVE = 0x07,
-    KB_MODE_RIPPLE = 0x08,
-    KB_MODE_STARLIGHT = 0x0A,
-    KB_MODE_RAINBOW = 0x0C,
-    KB_MODE_HURRICANE = 0x0D
-};
-
-// Edge modes (Endorfy)
-enum EdgeMode {
-    EDGE_MODE_FREEZE = 0x00,
-    EDGE_MODE_WAVE = 0x01,
-    EDGE_MODE_SPECTRUM = 0x02,
-    EDGE_MODE_BREATHING = 0x03,
-    EDGE_MODE_STATIC = 0x04,
-    EDGE_MODE_OFF = 0x05
-};
+using devices::evision::EDGE_MODE_FREEZE;
+using devices::evision::EDGE_MODE_WAVE;
+using devices::evision::EDGE_MODE_SPECTRUM;
+using devices::evision::EDGE_MODE_BREATHING;
+using devices::evision::EDGE_MODE_STATIC;
+using devices::evision::EDGE_MODE_OFF;
 
 //=============================================================================
 // GLOBAL STATE
@@ -732,34 +727,92 @@ void ClearStatus() {
 }
 
 //=============================================================================
+// STATUS BRIDGE
+//
+// The device modules report progress as narrow strings; the log is wide.
+//=============================================================================
+
+void AppendStatusNarrow(const std::string& text) {
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, NULL, 0);
+    if (needed <= 0) return;
+    std::wstring wide(needed, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &wide[0], needed);
+    if (!wide.empty() && wide.back() == L'\0') wide.pop_back();
+    AppendStatus(wide.c_str());
+}
+
+/// Passed to every device module call.
+const devices::StatusFn g_status = AppendStatusNarrow;
+
+//=============================================================================
+// HARDWARE BACKENDS
+//
+// --dry-run swaps in backends that log instead of transmitting, so *every*
+// protocol path is inert - including the startup reset, which used to touch
+// real hardware even in dry-run mode.
+//=============================================================================
+
+hal::DryRunHidBackend g_dryRunHid(AppendStatusNarrow);
+
+/// Registers one virtual device per supported product so the dry run exercises
+/// the full protocol rather than bailing out at "device not found".
+void InitDryRunDevices() {
+    hal::HidDeviceInfo aura;
+    aura.path = "dryrun:aura";
+    aura.vendor_id = Devices::ASUS_VID;
+    aura.product_id = Devices::ASUS_AURA_PID;
+    aura.usage_page = Devices::ASUS_USAGE_PAGE;
+    g_dryRunHid.AddVirtualDevice(aura);
+
+    hal::HidDeviceInfo mouse;
+    mouse.path = "dryrun:rival600";
+    mouse.vendor_id = Devices::STEELSERIES_VID;
+    mouse.product_id = Devices::RIVAL_600_PID;
+    mouse.interface_number = devices::steelseries::CONTROL_INTERFACE;
+    g_dryRunHid.AddVirtualDevice(mouse);
+
+    hal::HidDeviceInfo kbd;
+    kbd.path = "dryrun:evision";
+    kbd.vendor_id = Devices::EVISION_VID;
+    kbd.product_id = Devices::EVISION_PID;
+    kbd.usage_page = Devices::EVISION_USAGE_PAGE;
+    g_dryRunHid.AddVirtualDevice(kbd);
+}
+
+hal::IHidBackend& Hid() {
+    if (g_state.dryRun) return g_dryRunHid;
+    return hal::RealHid();
+}
+
+//=============================================================================
 // AUTOSTART
+//
+// Delegates to src/autostart.cpp, which registers a scheduled task instead of
+// a Run-key entry. See the comment at the top of autostart.h for why: an app
+// manifested as requireAdministrator is never launched from HKCU\...\Run, so
+// the previous implementation meant the app simply did not start at logon and
+// the RAM kept whatever colour it had.
 //=============================================================================
 
 bool IsAutoStartEnabled() {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-                      0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD type, size = 0;
-        bool exists = RegQueryValueExW(hKey, APP_NAME, NULL, &type, NULL, &size) == ERROR_SUCCESS;
-        RegCloseKey(hKey);
-        return exists;
-    }
-    return false;
+    return autostart::Query() != autostart::Status::Disabled;
 }
 
 void SetAutoStart(bool enable) {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-                      0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
-        if (enable) {
-            wchar_t path[MAX_PATH];
-            GetModuleFileNameW(NULL, path, MAX_PATH);
-            std::wstring cmd = std::wstring(L"\"") + path + L"\" --minimized";
-            RegSetValueExW(hKey, APP_NAME, 0, REG_SZ, (BYTE*)cmd.c_str(), (DWORD)(cmd.length() + 1) * sizeof(wchar_t));
+    if (enable) {
+        if (autostart::Enable()) {
+            AppendStatus(L"Autostart enabled (scheduled task, runs as administrator)");
         } else {
-            RegDeleteValueW(hKey, APP_NAME);
+            AppendStatus(L"[ERROR] Could not enable autostart");
+            AppendStatus(autostart::LastError());
         }
-        RegCloseKey(hKey);
+    } else {
+        if (autostart::Disable()) {
+            AppendStatus(L"Autostart disabled");
+        } else {
+            AppendStatus(L"[ERROR] Could not disable autostart");
+            AppendStatus(autostart::LastError());
+        }
     }
 }
 
@@ -767,74 +820,88 @@ void SetAutoStart(bool enable) {
 // PROFILE MANAGEMENT
 //=============================================================================
 
-void SaveProfile(const std::wstring& name) {
-    std::wstring path = GetAppDataPath() + L"\\profiles\\" + name + L".rgb";
-    CreateDirectoryW((GetAppDataPath() + L"\\profiles").c_str(), NULL);
+// Serialisation lives in src/profile.cpp; this layer only converts between the
+// wide UI strings and the narrow storage API.
 
-    std::ofstream file(path);
-    if (file.is_open()) {
-        file << "red=" << (int)g_state.red << "\n";
-        file << "green=" << (int)g_state.green << "\n";
-        file << "blue=" << (int)g_state.blue << "\n";
-        file << "brightness=" << (int)g_state.brightness << "\n";
-        file << "speed=" << (int)g_state.speed << "\n";
-        file << "kbMode=" << (int)g_state.kbMode << "\n";
-        file << "edgeMode=" << (int)g_state.edgeMode << "\n";
-        file << "enableAura=" << g_state.enableAura << "\n";
-        file << "enableMouse=" << g_state.enableMouse << "\n";
-        file << "enableKeyboard=" << g_state.enableKeyboard << "\n";
-        file << "enableRAM=" << g_state.enableRAM << "\n";
-        file << "enableEdge=" << g_state.enableEdge << "\n";
-        file.close();
+namespace {
+
+std::string NarrowUtf8(const std::wstring& w) {
+    if (w.empty()) return std::string();
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(),
+                                           NULL, 0, NULL, NULL);
+    if (needed <= 0) return std::string();
+    std::string out(needed, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &out[0], needed, NULL, NULL);
+    return out;
+}
+
+std::wstring WidenUtf8(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), NULL, 0);
+    if (needed <= 0) return std::wstring();
+    std::wstring out(needed, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &out[0], needed);
+    return out;
+}
+
+std::string ProfileDir() {
+    return NarrowUtf8(GetAppDataPath() + L"\profiles");
+}
+
+}  // namespace
+
+void SaveProfile(const std::wstring& name) {
+    profile::Profile p;
+    p.red             = g_state.red;
+    p.green           = g_state.green;
+    p.blue            = g_state.blue;
+    p.brightness      = g_state.brightness;
+    p.speed           = g_state.speed;
+    p.kb_mode         = g_state.kbMode;
+    p.edge_mode       = g_state.edgeMode;
+    p.enable_aura     = g_state.enableAura;
+    p.enable_mouse    = g_state.enableMouse;
+    p.enable_keyboard = g_state.enableKeyboard;
+    p.enable_ram      = g_state.enableRAM;
+    p.enable_edge     = g_state.enableEdge;
+
+    if (profile::Save(ProfileDir(), NarrowUtf8(name), p)) {
         AppendStatus((L"Profile saved: " + name).c_str());
+    } else {
+        AppendStatus((L"[ERROR] Could not save profile: " + name).c_str());
     }
 }
 
 void LoadProfile(const std::wstring& name) {
-    std::wstring path = GetAppDataPath() + L"\\profiles\\" + name + L".rgb";
-    std::ifstream file(path);
-    if (file.is_open()) {
-        std::string line;
-        while (std::getline(file, line)) {
-            size_t pos = line.find('=');
-            if (pos != std::string::npos) {
-                std::string key = line.substr(0, pos);
-                int val = std::stoi(line.substr(pos + 1));
-                if (key == "red") g_state.red = val;
-                else if (key == "green") g_state.green = val;
-                else if (key == "blue") g_state.blue = val;
-                else if (key == "brightness") g_state.brightness = val;
-                else if (key == "speed") g_state.speed = val;
-                else if (key == "kbMode") g_state.kbMode = val;
-                else if (key == "edgeMode") g_state.edgeMode = val;
-                else if (key == "enableAura") g_state.enableAura = val;
-                else if (key == "enableMouse") g_state.enableMouse = val;
-                else if (key == "enableKeyboard") g_state.enableKeyboard = val;
-                else if (key == "enableRAM") g_state.enableRAM = val;
-                else if (key == "enableEdge") g_state.enableEdge = val;
-            }
-        }
-        file.close();
-        g_state.currentProfile = name;
-        g_state.lastProfile = name;
-        SaveAppSettings();  // Remember last profile
-        AppendStatus((L"Profile loaded: " + name).c_str());
+    profile::Profile p;
+    if (!profile::Load(ProfileDir(), NarrowUtf8(name), p)) {
+        AppendStatus((L"[ERROR] Could not load profile: " + name).c_str());
+        return;
     }
+
+    g_state.red            = p.red;
+    g_state.green          = p.green;
+    g_state.blue           = p.blue;
+    g_state.brightness     = p.brightness;
+    g_state.speed          = p.speed;
+    g_state.kbMode         = p.kb_mode;
+    g_state.edgeMode       = p.edge_mode;
+    g_state.enableAura     = p.enable_aura;
+    g_state.enableMouse    = p.enable_mouse;
+    g_state.enableKeyboard = p.enable_keyboard;
+    g_state.enableRAM      = p.enable_ram;
+    g_state.enableEdge     = p.enable_edge;
+
+    g_state.currentProfile = name;
+    g_state.lastProfile    = name;
+    SaveAppSettings();  // Remember last profile
+    AppendStatus((L"Profile loaded: " + name).c_str());
 }
 
 void RefreshProfileList() {
     g_state.profiles.clear();
-    std::wstring searchPath = GetAppDataPath() + L"\\profiles\\*.rgb";
-    WIN32_FIND_DATAW fd;
-    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &fd);
-    if (hFind != INVALID_HANDLE_VALUE) {
-        do {
-            std::wstring name = fd.cFileName;
-            name = name.substr(0, name.length() - 4);  // Remove .rgb
-            g_state.profiles.push_back(name);
-        } while (FindNextFileW(hFind, &fd));
-        FindClose(hFind);
-    }
+    for (const auto& n : profile::List(ProfileDir()))
+        g_state.profiles.push_back(WidenUtf8(n));
 
     if (g_state.hComboProfiles) {
         SendMessage(g_state.hComboProfiles, CB_RESETCONTENT, 0, 0);
@@ -845,782 +912,154 @@ void RefreshProfileList() {
 }
 
 //=============================================================================
-// DEVICE CONTROL - ASUS AURA
-// Direct HID control with 65-byte buffer (Report ID 0xEC)
+// DEVICE CONTROL
+//
+// The protocols themselves now live in src/devices/ and talk to the HAL in
+// src/hal/, so they are covered by tests/ without hardware. What remains here
+// is the glue: UI state in, status log out.
 //=============================================================================
 
-#define ASUS_LEDS_PER_PACKET 20
-#define AURA_REQUEST_FIRMWARE_VERSION 0x82
-#define AURA_REQUEST_CONFIG_TABLE 0xB0
+// Layout reported by the board, plus the per-channel colour/enable state that
+// only the test dialog uses.
+devices::aura::HardwareConfig g_auraHw;
 
-// Hardware configuration from device scan
-struct AsusHardwareConfig {
-    bool valid = false;
-    char firmware[17] = {0};
-    uint8_t configTable[60] = {0};
-    int numMainboardLEDs = 0;
-    int numRGBHeaders = 0;
-    int numAddressableHeaders = 0;
-
-    struct Channel {
-        bool present = false;
-        int ledCount = 0;
-        bool addressable = false;
-        int directChannel = 0;  // The actual channel number to send to device
-        char name[64] = {0};
-        // Saved color settings
-        uint8_t colorR = 0;
-        uint8_t colorG = 34;
-        uint8_t colorB = 255;
-        bool enabled = true;
-    };
-    Channel channels[16];
-    int numChannels = 0;
+struct AuraChannelUi {
+    uint8_t r = 0, g = 34, b = 255;
+    bool enabled = true;
 };
+AuraChannelUi g_auraUi[devices::aura::MAX_CHANNELS];
 
-AsusHardwareConfig g_asusHwConfig;
+//--- Hardware layout cache ---------------------------------------------------
+//
+// Probing the board costs a few hundred milliseconds, so the result is cached
+// and only re-scanned when the firmware or config table actually changed.
 
-// Read firmware version from device
-bool ReadAsusFirmware(hid_device* dev, char* firmware) {
-    uint8_t buf[65];
-    memset(buf, 0, sizeof(buf));
-    buf[0x00] = 0xEC;
-    buf[0x01] = AURA_REQUEST_FIRMWARE_VERSION;
+namespace {
 
-    if (hid_write(dev, buf, 65) < 0) return false;
-    if (hid_read_timeout(dev, buf, 65, 1000) < 0) return false;
-
-    if (buf[1] == 0x02) {
-        memcpy(firmware, &buf[2], 16);
-        firmware[16] = 0;
-        return true;
-    }
-    return false;
+std::wstring AuraCachePath() {
+    return GetAppDataPath() + L"\asus_hw_config.bin";
 }
 
-// Read config table from device
-bool ReadAsusConfigTable(hid_device* dev, uint8_t* configTable) {
-    uint8_t buf[65];
-    memset(buf, 0, sizeof(buf));
-    buf[0x00] = 0xEC;
-    buf[0x01] = AURA_REQUEST_CONFIG_TABLE;
+/// Signature guarding the cache file against layout changes between versions.
+constexpr uint32_t kAuraCacheMagic = 0x41555230;  // "AUR0"
 
-    if (hid_write(dev, buf, 65) < 0) return false;
-    if (hid_read_timeout(dev, buf, 65, 1000) < 0) return false;
+}  // namespace
 
-    if (buf[1] == 0x30) {
-        memcpy(configTable, &buf[4], 60);
-        return true;
-    }
-    return false;
-}
-
-// Parse config table to determine channels (like OpenRGB)
-void ParseAsusConfig(AsusHardwareConfig& cfg) {
-    // From OpenRGB AsusAuraMainboardController:
-    // config_table[0x1B] = num_total_mainboard_leds
-    // config_table[0x1D] = num_rgb_headers
-    // config_table[0x02] = num_addressable_headers
-
-    cfg.numMainboardLEDs = cfg.configTable[0x1B];
-    cfg.numRGBHeaders = cfg.configTable[0x1D];
-    cfg.numAddressableHeaders = cfg.configTable[0x02];
-
-    if (cfg.numMainboardLEDs < cfg.numRGBHeaders) {
-        cfg.numRGBHeaders = 0;
-    }
-
-    cfg.numChannels = 0;
-
-    // Mainboard fixed LEDs - uses direct_channel 0x04 (from OpenRGB)
-    if (cfg.numMainboardLEDs > 0) {
-        cfg.channels[cfg.numChannels].present = true;
-        cfg.channels[cfg.numChannels].ledCount = cfg.numMainboardLEDs;
-        cfg.channels[cfg.numChannels].addressable = false;
-        cfg.channels[cfg.numChannels].directChannel = 0x04;  // Mainboard uses channel 4
-        cfg.channels[cfg.numChannels].colorR = 0;
-        cfg.channels[cfg.numChannels].colorG = 34;
-        cfg.channels[cfg.numChannels].colorB = 255;
-        cfg.channels[cfg.numChannels].enabled = true;
-        sprintf(cfg.channels[cfg.numChannels].name, "Mainboard (%d LEDs)", cfg.numMainboardLEDs);
-        cfg.numChannels++;
-    }
-
-    // Standard RGB headers - use IDs 0x02, 0x03...
-    for (int i = 0; i < cfg.numRGBHeaders && cfg.numChannels < 16; i++) {
-        cfg.channels[cfg.numChannels].present = true;
-        cfg.channels[cfg.numChannels].ledCount = 1;  // Standard headers set as single zone
-        cfg.channels[cfg.numChannels].addressable = false;
-        cfg.channels[cfg.numChannels].directChannel = 0x02 + i;
-        cfg.channels[cfg.numChannels].colorR = 0;
-        cfg.channels[cfg.numChannels].colorG = 34;
-        cfg.channels[cfg.numChannels].colorB = 255;
-        cfg.channels[cfg.numChannels].enabled = true;
-        sprintf(cfg.channels[cfg.numChannels].name, "RGB Header %d", i + 1);
-        cfg.numChannels++;
-    }
-
-    // Diagnostic/Internal zones (Force scan if Mainboard was detected)
-    if (cfg.numMainboardLEDs > 0 && cfg.numChannels < 16) {
-        // Some PCH/IO zones are at 0x0B, 0x0C
-        int extraZones[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x0B, 0x0C };
-        for (int zoneId : extraZones) {
-            bool alreadyExists = false;
-            for (int j = 0; j < cfg.numChannels; j++) {
-                if (cfg.channels[j].directChannel == zoneId) alreadyExists = true;
-            }
-            if (!alreadyExists && cfg.numChannels < 16) {
-                cfg.channels[cfg.numChannels].present = true;
-                cfg.channels[cfg.numChannels].ledCount = 30; // Assume 30 for scan
-                cfg.channels[cfg.numChannels].directChannel = zoneId;
-                cfg.channels[cfg.numChannels].enabled = true;
-                sprintf(cfg.channels[cfg.numChannels].name, "Zone (ID 0x%02X)", zoneId);
-                cfg.numChannels++;
-            }
-        }
-    }
-
-    // Addressable headers - use their index as direct_channel
-    for (int i = 0; i < cfg.numAddressableHeaders && cfg.numChannels < 16; i++) {
-        // Addressable channels typically support up to 120 LEDs
-        cfg.channels[cfg.numChannels].present = true;
-        cfg.channels[cfg.numChannels].ledCount = 120;  // Max per addressable header
-        cfg.channels[cfg.numChannels].addressable = true;
-        cfg.channels[cfg.numChannels].directChannel = i;  // Addressable uses 0, 1, 2...
-        cfg.channels[cfg.numChannels].colorR = 0;
-        cfg.channels[cfg.numChannels].colorG = 34;
-        cfg.channels[cfg.numChannels].colorB = 255;
-        cfg.channels[cfg.numChannels].enabled = true;
-        sprintf(cfg.channels[cfg.numChannels].name, "Addressable %d (max 120 LEDs)", i + 1);
-        cfg.numChannels++;
-    }
-
-    cfg.valid = (cfg.numChannels > 0);
-}
-
-// Full hardware scan
 bool ScanAsusHardware() {
-    hid_init();
-
-    hid_device* dev = nullptr;
-    struct hid_device_info* devs = hid_enumerate(Devices::ASUS_VID, Devices::ASUS_AURA_PID);
-    for (auto* cur = devs; cur; cur = cur->next) {
-        if (cur->usage_page == Devices::ASUS_USAGE_PAGE) {
-            dev = hid_open_path(cur->path);
-            break;
-        }
-    }
-    hid_free_enumeration(devs);
-
-    if (!dev) {
-        hid_exit();
-        g_asusHwConfig.valid = false;
-        return false;
-    }
-
-    // Read firmware
-    if (!ReadAsusFirmware(dev, g_asusHwConfig.firmware)) {
-        hid_close(dev);
-        hid_exit();
-        g_asusHwConfig.valid = false;
-        return false;
-    }
-
-    // Read config table
-    if (!ReadAsusConfigTable(dev, g_asusHwConfig.configTable)) {
-        hid_close(dev);
-        hid_exit();
-        g_asusHwConfig.valid = false;
-        return false;
-    }
-
-    hid_close(dev);
-    hid_exit();
-
-    // Parse configuration
-    ParseAsusConfig(g_asusHwConfig);
-
-    return g_asusHwConfig.valid;
+    hal::IHidBackend& hid = Hid();
+    hid.Init();
+    const bool ok = devices::aura::Scan(hid, g_auraHw);
+    hid.Exit();
+    return ok;
 }
 
-// Save hardware config to file
 void SaveAsusHardwareConfig() {
-    wchar_t path[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, path))) {
-        wcscat(path, L"\\OneClickRGB");
-        CreateDirectoryW(path, NULL);
-        wcscat(path, L"\\asus_hw_config.bin");
-
-        FILE* f = _wfopen(path, L"wb");
-        if (f) {
-            fwrite(&g_asusHwConfig, sizeof(g_asusHwConfig), 1, f);
-            fclose(f);
-        }
-    }
+    FILE* f = _wfopen(AuraCachePath().c_str(), L"wb");
+    if (!f) return;
+    fwrite(&kAuraCacheMagic, sizeof(kAuraCacheMagic), 1, f);
+    fwrite(&g_auraHw, sizeof(g_auraHw), 1, f);
+    fclose(f);
 }
 
-// Load hardware config from file
 bool LoadAsusHardwareConfig() {
-    wchar_t path[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, path))) {
-        wcscat(path, L"\\OneClickRGB\\asus_hw_config.bin");
+    FILE* f = _wfopen(AuraCachePath().c_str(), L"rb");
+    if (!f) return false;
 
-        FILE* f = _wfopen(path, L"rb");
-        if (f) {
-            size_t read = fread(&g_asusHwConfig, sizeof(g_asusHwConfig), 1, f);
-            fclose(f);
-            return (read == 1 && g_asusHwConfig.valid);
-        }
-    }
-    return false;
+    uint32_t magic = 0;
+    const bool ok = fread(&magic, sizeof(magic), 1, f) == 1 &&
+                    magic == kAuraCacheMagic &&
+                    fread(&g_auraHw, sizeof(g_auraHw), 1, f) == 1 &&
+                    g_auraHw.valid;
+    fclose(f);
+    if (!ok) g_auraHw.valid = false;
+    return ok;
 }
 
-// Check if hardware config has changed
 bool HasAsusHardwareChanged() {
-    AsusHardwareConfig current;
-
-    hid_init();
-    hid_device* dev = nullptr;
-    struct hid_device_info* devs = hid_enumerate(Devices::ASUS_VID, Devices::ASUS_AURA_PID);
-    for (auto* cur = devs; cur; cur = cur->next) {
-        if (cur->usage_page == Devices::ASUS_USAGE_PAGE) {
-            dev = hid_open_path(cur->path);
-            break;
-        }
-    }
-    hid_free_enumeration(devs);
-
+    hal::IHidBackend& hid = Hid();
+    hid.Init();
+    auto dev = devices::aura::Open(hid);
     if (!dev) {
-        hid_exit();
-        return !g_asusHwConfig.valid;  // Changed if we had valid config but no device now
+        hid.Exit();
+        // A previously valid config with no device present counts as a change.
+        return g_auraHw.valid;
     }
 
-    ReadAsusFirmware(dev, current.firmware);
-    ReadAsusConfigTable(dev, current.configTable);
-    hid_close(dev);
-    hid_exit();
+    char firmware[17] = {0};
+    uint8_t table[60] = {0};
+    devices::aura::ReadFirmware(*dev, firmware);
+    devices::aura::ReadConfigTable(*dev, table);
+    dev.reset();
+    hid.Exit();
 
-    // Compare firmware and config table
-    if (strcmp(g_asusHwConfig.firmware, current.firmware) != 0) return true;
-    if (memcmp(g_asusHwConfig.configTable, current.configTable, 60) != 0) return true;
-
+    if (strcmp(g_auraHw.firmware, firmware) != 0) return true;
+    if (memcmp(g_auraHw.config_table, table, sizeof(table)) != 0) return true;
     return false;
 }
 
-// Initialize ASUS hardware on startup
 void InitAsusHardware() {
     bool needScan = true;
-
-    // Try to load saved config
-    if (LoadAsusHardwareConfig()) {
-        // Check if hardware changed
-        if (!HasAsusHardwareChanged()) {
-            needScan = false;  // Config still valid
-        }
-    }
-
-    if (needScan) {
-        if (ScanAsusHardware()) {
-            SaveAsusHardwareConfig();
-        }
-    }
+    if (LoadAsusHardwareConfig() && !HasAsusHardwareChanged()) needScan = false;
+    if (needScan && ScanAsusHardware()) SaveAsusHardwareConfig();
 }
 
-hid_device* OpenAsusAura() {
-    hid_device* dev = nullptr;
-    struct hid_device_info* devs = hid_enumerate(Devices::ASUS_VID, Devices::ASUS_AURA_PID);
-    for (auto* cur = devs; cur; cur = cur->next) {
-        if (cur->usage_page == Devices::ASUS_USAGE_PAGE) {
-            dev = hid_open_path(cur->path);
-            break;
-        }
-    }
-    hid_free_enumeration(devs);
-
-    // SetGen1() - Required initialization before Direct Mode (from OpenRGB)
-    if (dev) {
-        uint8_t buf[65];
-        memset(buf, 0, sizeof(buf));
-        buf[0x00] = 0xEC;
-        buf[0x01] = 0x52;
-        buf[0x02] = 0x53;
-        buf[0x03] = 0x00;
-        buf[0x04] = 0x01;
-        hid_write(dev, buf, 65);
-        Sleep(5);
-    }
-
-    return dev;
-}
-
-void SetAsusChannel(hid_device* dev, int channel, int numLEDs, uint8_t r, uint8_t g, uint8_t b) {
-    if (!dev) return;
-
-    // Force Direct Mode for this channel (Command 0x43)
-    // This is the "Bit" required to take control of internal motherboard LEDs
-    uint8_t modeBuf[65];
-    memset(modeBuf, 0, sizeof(modeBuf));
-    modeBuf[0x00] = 0xEC;
-    modeBuf[0x01] = 0x43;
-    modeBuf[0x02] = channel;
-    modeBuf[0x03] = 0xFF; // Mode "Direct/Software" (some boards use 0x01 Static)
-    hid_write(dev, modeBuf, 65);
-    Sleep(2);
-
-    int offset = 0;
-
-    while (offset < numLEDs) {
-        int count = ASUS_LEDS_PER_PACKET;
-        if (offset + count > numLEDs) count = numLEDs - offset;
-        bool last = (offset + count >= numLEDs);
-
-        // OpenRGB-style: 65-byte buffer with 0xEC as Report ID
-        uint8_t buf[65];
-        memset(buf, 0, sizeof(buf));
-
-        buf[0x00] = 0xEC;  // Report ID
-        buf[0x01] = 0x40;  // Direct mode
-        buf[0x02] = (last ? 0x80 : 0x00) | channel;
-        buf[0x03] = offset;
-        buf[0x04] = count;
-
-        for (int i = 0; i < count; i++) {
-            buf[0x05 + i*3 + 0] = r;
-            buf[0x05 + i*3 + 1] = g;
-            buf[0x05 + i*3 + 2] = b;
-        }
-
-        hid_write(dev, buf, 65);
-        Sleep(2);
-        offset += count;
-    }
-}
+//--- Apply ------------------------------------------------------------------
 
 bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
-    hid_device* dev = OpenAsusAura();
-    if (!dev) {
-        AppendStatus(L"[ASUS Aura] Not found");
-        return false;
-    }
-
-    int setCount = 0;
-
-    // Use hardware config if available
-    if (g_asusHwConfig.valid) {
-        for (int i = 0; i < g_asusHwConfig.numChannels; i++) {
-            if (g_config.aura[i].enabled) {
-                uint8_t cr = r, cg = g, cb = b;
-                g_config.aura[i].ApplyCorrection(cr, cg, cb);
-                SetAsusChannel(dev, g_asusHwConfig.channels[i].directChannel,
-                              g_asusHwConfig.channels[i].ledCount, cr, cg, cb);
-                setCount++;
-            }
-        }
-    } else {
-        // Fallback: old static config
-        struct { int channel; int leds; } channels[] = {
-            {0x00, 60}, {0x01, 120}, {0x02, 120}, {0x03, 60}, {0x04, 60}, {0x0B, 60}, {0x0C, 60}
-        };
-        for (int i = 0; i < 7; i++) {
-            if (g_config.aura[i].enabled) {
-                uint8_t cr = r, cg = g, cb = b;
-                g_config.aura[i].ApplyCorrection(cr, cg, cb);
-                SetAsusChannel(dev, channels[i].channel, channels[i].leds, cr, cg, cb);
-                setCount++;
-            }
-        }
-    }
-
-    hid_close(dev);
-
-    wchar_t buf[64];
-    swprintf(buf, 64, L"[ASUS Aura] %d channels set", setCount);
-    AppendStatus(buf);
-    return true;
+    hal::IHidBackend& hid = Hid();
+    return devices::aura::SetAll(hid, g_auraHw, g_config.aura, 8, r, g, b, g_status) >= 0;
 }
-
-// Quick update for live preview (single call, no status messages)
-void SetAsusAuraQuick(uint8_t r, uint8_t g, uint8_t b) {
-    hid_init();
-    hid_device* dev = OpenAsusAura();
-    if (!dev) {
-        hid_exit();
-        return;
-    }
-
-    // Use hardware config if available
-    if (g_asusHwConfig.valid) {
-        for (int i = 0; i < g_asusHwConfig.numChannels; i++) {
-            if (g_config.aura[i].enabled) {
-                uint8_t cr = r, cg = g, cb = b;
-                g_config.aura[i].ApplyCorrection(cr, cg, cb);
-                SetAsusChannel(dev, g_asusHwConfig.channels[i].directChannel,
-                              g_asusHwConfig.channels[i].ledCount, cr, cg, cb);
-            }
-        }
-    } else {
-        // Fallback
-        struct { int channel; int leds; } channels[] = {
-            {0, 60}, {1, 120}, {2, 120}, {3, 60}, {4, 60}, {5, 60}, {6, 60}, {7, 60}
-        };
-        for (int i = 0; i < 8; i++) {
-            if (g_config.aura[i].enabled) {
-                uint8_t cr = r, cg = g, cb = b;
-                g_config.aura[i].ApplyCorrection(cr, cg, cb);
-                SetAsusChannel(dev, channels[i].channel, channels[i].leds, cr, cg, cb);
-            }
-        }
-    }
-
-    hid_close(dev);
-    hid_exit();
-}
-
-//=============================================================================
-// DEVICE CONTROL - STEELSERIES
-//=============================================================================
 
 bool SetSteelSeries(uint8_t r, uint8_t g, uint8_t b) {
-    hid_device* dev = nullptr;
-    struct hid_device_info* devs = hid_enumerate(Devices::STEELSERIES_VID, Devices::RIVAL_600_PID);
-    for (auto* cur = devs; cur; cur = cur->next) {
-        if (cur->interface_number == 0) {
-            dev = hid_open_path(cur->path);
-            break;
-        }
-    }
-    hid_free_enumeration(devs);
-
-    if (!dev) {
-        AppendStatus(L"[SteelSeries] Not found");
-        return false;
-    }
-
-    // Apply color correction for SteelSeries
-    uint8_t cr = r, cg = g, cb = b;
-    g_config.steelseries.ApplyCorrection(cr, cg, cb);
-
-    for (int i = 0; i < 8; i++) {
-        uint8_t pkt[8] = {0x1C, 0x27, 0x00, (uint8_t)(1 << i), cr, cg, cb, 0};
-        hid_write(dev, pkt, 7);
-        Sleep(10);
-    }
-    uint8_t save[10] = {0x09};
-    hid_write(dev, save, 9);
-    hid_close(dev);
-    AppendStatus(L"[SteelSeries] Rival 600 set");
-    return true;
+    return devices::steelseries::SetColor(Hid(), g_config.steelseries, r, g, b, g_status);
 }
 
-//=============================================================================
-// DEVICE CONTROL - EVISION KEYBOARD
-//=============================================================================
-
-int EVisionQuery(hid_device* dev, uint8_t cmd, uint16_t offset, const uint8_t* idata, uint8_t size, uint8_t* odata) {
-    uint8_t buffer[EVISION_V2_PACKET_SIZE];
-    memset(buffer, 0, sizeof(buffer));
-    buffer[0] = EVISION_V2_REPORT_ID;
-    buffer[3] = cmd; buffer[4] = size;
-    buffer[5] = offset & 0xff; buffer[6] = (offset >> 8) & 0xff;
-    if (idata && size > 0) memcpy(buffer + 8, idata, size);
-    uint16_t chksum = 0;
-    for (int i = 3; i < EVISION_V2_PACKET_SIZE; i++) chksum += buffer[i];
-    buffer[1] = chksum & 0xff; buffer[2] = (chksum >> 8) & 0xff;
-    if (hid_write(dev, buffer, sizeof(buffer)) < 0) return -1;
-    int bytes_read, retries = 10;
-    do { bytes_read = hid_read_timeout(dev, buffer, sizeof(buffer), 100); retries--; }
-    while (bytes_read > 0 && buffer[0] != EVISION_V2_REPORT_ID && retries > 0);
-    if (bytes_read != sizeof(buffer)) return -2;
-    if (buffer[7] != 0) return -buffer[7];
-    if (odata && buffer[4] > 0) memcpy(odata, buffer + 8, buffer[4]);
-    return buffer[4];
-}
-
-bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode, uint8_t brightness, uint8_t speed) {
-    hid_device* dev = nullptr;
-    struct hid_device_info* devs = hid_enumerate(Devices::EVISION_VID, Devices::EVISION_PID);
-    for (auto* cur = devs; cur; cur = cur->next) {
-        if (cur->usage_page == Devices::EVISION_USAGE_PAGE) {
-            dev = hid_open_path(cur->path);
-            break;
-        }
-    }
-    hid_free_enumeration(devs);
-
-    if (!dev) {
-        AppendStatus(L"[EVision] Keyboard not found");
-        return false;
-    }
-
-    EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);  // Begin configure
-    Sleep(20);
-
-    // Apply keyboard color correction
-    uint8_t cr = r, cg = g, cb = b;
-    g_config.keyboard.ApplyCorrection(cr, cg, cb);
-
-    uint8_t profile = 0;
-    EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &profile);
-    if (profile > 2) profile = 0;
-    uint16_t profile_offset = profile * 0x40 + 0x01;
-
-    // Build keyboard config (18 bytes)
-    uint8_t config[18] = {0};
-    config[0] = mode;           // Mode
-    config[1] = brightness;     // Brightness (0-4)
-    config[2] = speed;          // Speed (0-5, inverted)
-    config[3] = 0;              // Direction
-    config[4] = 0;              // Random color off
-    config[5] = cr;             // Red (corrected)
-    config[6] = cg;             // Green (corrected)
-    config[7] = cb;             // Blue (corrected)
-    config[8] = 0;              // Color offset
-
-    EVisionQuery(dev, 0x06, profile_offset, config, 18, nullptr);
-    Sleep(10);
-
-    // Unlock Windows key
-    uint8_t unlock[2] = {0x00, 0x00};
-    EVisionQuery(dev, 0x06, 0x14, unlock, 2, nullptr);
-
-    EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);  // End configure
-    hid_close(dev);
-
-    wchar_t buf[64];
-    swprintf(buf, 64, L"[EVision] Keyboard set (Mode: 0x%02X)", mode);
-    AppendStatus(buf);
-    return true;
+bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode,
+                        uint8_t brightness, uint8_t speed) {
+    devices::evision::KeyboardSettings settings;
+    settings.mode = mode;
+    settings.brightness = brightness;
+    settings.speed = speed;
+    return devices::evision::SetKeyboard(Hid(), g_config.keyboard, r, g, b, settings,
+                                         g_status);
 }
 
 bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode) {
-    hid_device* dev = nullptr;
-    struct hid_device_info* devs = hid_enumerate(Devices::EVISION_VID, Devices::EVISION_PID);
-    for (auto* cur = devs; cur; cur = cur->next) {
-        if (cur->usage_page == Devices::EVISION_USAGE_PAGE) {
-            dev = hid_open_path(cur->path);
-            break;
-        }
-    }
-    hid_free_enumeration(devs);
-
-    if (!dev) return false;
-
-    EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);
-    Sleep(20);
-
-    // Apply edge color correction
-    uint8_t cr = r, cg = g, cb = b;
-    g_config.edge.ApplyCorrection(cr, cg, cb);
-
-    uint8_t profile = 0;
-    EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &profile);
-    if (profile > 2) profile = 0;
-    
-    // We try multiple known offsets for Side LEDs
-    uint16_t offsets[] = { 
-        (uint16_t)(profile * 0x40 + 0x01 + 0x1a), // Standard Thyrus
-        (uint16_t)(profile * 0x40 + 0x01 + 0x15), // Some Omnis variants
-        (uint16_t)(0x1E)                          // Direct Edge ID
-    };
-
-    for (uint16_t off : offsets) {
-        uint8_t edgeData[10] = {mode, 0x04, 0x02, 0x00, 0x00, cr, cg, cb, 0x00, 0x01};
-        EVisionQuery(dev, 0x06, off, edgeData, 10, nullptr);
-    }
-
-    uint8_t unlock[2] = {0x00, 0x00};
-    EVisionQuery(dev, 0x06, 0x14, unlock, 2, nullptr);
-    EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
-
-    hid_close(dev);
-
-    wchar_t buf[64];
-    swprintf(buf, 64, L"[EVision] Edge set (Mode: 0x%02X)", mode);
-    AppendStatus(buf);
-    return true;
+    return devices::evision::SetEdge(Hid(), g_config.edge, r, g, b, mode, g_status);
 }
 
-//=============================================================================
-// DEVICE CONTROL - G.SKILL RAM
-//=============================================================================
+//--- G.Skill RAM ------------------------------------------------------------
 
-typedef HRESULT (__stdcall *pawnio_open_t)(PHANDLE);
-typedef HRESULT (__stdcall *pawnio_load_t)(HANDLE, const UCHAR*, SIZE_T);
-typedef HRESULT (__stdcall *pawnio_execute_t)(HANDLE, PCSTR, const ULONG64*, SIZE_T, PULONG64, SIZE_T, PSIZE_T);
-typedef HRESULT (__stdcall *pawnio_close_t)(HANDLE);
+bool SetGSkillRAM(uint8_t r, uint8_t g, uint8_t b) {
+    if (g_state.dryRun) {
+        AppendStatus(L"[DRY] G.Skill RAM: skipped (SMBus not touched)");
+        return false;
+    }
 
-union i2c_smbus_data { uint8_t byte; uint16_t word; uint8_t block[34]; };
+    hal::PawnIoBackend& bus = hal::RealSmbus();
 
-// Helper to get exe directory as narrow string
-static std::string GetExeDirA() {
-    char path[MAX_PATH];
-    GetModuleFileNameA(NULL, path, MAX_PATH);
-    std::string dir(path);
-    size_t pos = dir.find_last_of("\\/");
-    return pos != std::string::npos ? dir.substr(0, pos) : ".";
+    // At logon the PawnIO service is regularly still starting, so a single
+    // attempt loses the race and the RAM keeps its old colour. Retry briefly
+    // before giving up - but only for a driver that is not up yet, never for a
+    // missing file.
+    if (!bus.OpenWithRetry(5, 1000)) {
+        std::string msg = "[G.Skill] ";
+        msg += hal::SmbusErrorText(bus.LastError());
+        AppendStatusNarrow(msg);
+        if (bus.LastError() == hal::SmbusError::DriverNotRunning && !IsRunningAsAdmin())
+            AppendStatus(L"[G.Skill] Start OneClickRGB as administrator, or enable autostart");
+        return false;
+    }
+
+    const devices::gskill::Result result =
+        devices::gskill::SetColor(bus, g_config.ram, 4, r, g, b, g_status);
+    bus.Close();
+    return result.modules_set > 0;
 }
-
-// Forward declaration
-bool SetGSkillRAM(uint8_t r, uint8_t g, uint8_t b);
 
 // Reset G.Skill RAM to a known state (turn off LEDs)
 bool ResetGSkillRAM() {
-    return SetGSkillRAM(0, 0, 0);  // Turn off all LEDs
-}
-
-bool SetGSkillRAM(uint8_t r, uint8_t g, uint8_t b) {
-    std::string exeDir = GetExeDirA();
-
-    // Try multiple paths for PawnIOLib.dll
-    HMODULE dll = NULL;
-    std::string dllPaths[] = {
-        exeDir + "\\PawnIOLib.dll",
-        exeDir + "\\dependencies\\PawnIO\\PawnIOLib.dll",
-        "PawnIOLib.dll"
-    };
-
-    for (const auto& path : dllPaths) {
-        dll = LoadLibraryA(path.c_str());
-        if (dll) break;
-    }
-
-    if (!dll) {
-        AppendStatus(L"[G.Skill] PawnIOLib.dll not found");
-        return false;
-    }
-
-    auto p_open = (pawnio_open_t)GetProcAddress(dll, "pawnio_open");
-    auto p_load = (pawnio_load_t)GetProcAddress(dll, "pawnio_load");
-    auto p_exec = (pawnio_execute_t)GetProcAddress(dll, "pawnio_execute");
-    auto p_close = (pawnio_close_t)GetProcAddress(dll, "pawnio_close");
-
-    if (!p_open || !p_load || !p_exec || !p_close) {
-        FreeLibrary(dll);
-        return false;
-    }
-
-    HANDLE handle;
-    if (p_open(&handle) != S_OK) {
-        AppendStatus(L"[G.Skill] PawnIO driver not running");
-        FreeLibrary(dll);
-        return false;
-    }
-
-    // Try multiple paths for SmbusI801.bin
-    HANDLE hFile = INVALID_HANDLE_VALUE;
-    std::string binPaths[] = {
-        exeDir + "\\SmbusI801.bin",
-        exeDir + "\\modules\\SmbusI801.bin",
-        exeDir + "\\dependencies\\PawnIO\\modules\\SmbusI801.bin",
-        "SmbusI801.bin"
-    };
-
-    for (const auto& path : binPaths) {
-        hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-        if (hFile != INVALID_HANDLE_VALUE) break;
-    }
-
-    if (hFile == INVALID_HANDLE_VALUE) {
-        AppendStatus(L"[G.Skill] SmbusI801.bin not found");
-        p_close(handle);
-        FreeLibrary(dll);
-        return false;
-    }
-
-    DWORD size = GetFileSize(hFile, NULL);
-    std::vector<uint8_t> blob(size);
-    ReadFile(hFile, blob.data(), size, &size, NULL);
-    CloseHandle(hFile);
-
-    if (p_load(handle, blob.data(), blob.size()) != S_OK) {
-        AppendStatus(L"[G.Skill] Failed to load SMBus module");
-        p_close(handle);
-        FreeLibrary(dll);
-        return false;
-    }
-
-    auto smbus_xfer = [&](uint8_t addr, char rw, uint8_t cmd, int sz, i2c_smbus_data* data) -> int {
-        ULONG64 in[9] = {addr, (ULONG64)rw, cmd, (ULONG64)sz};
-        if (data) memcpy(&in[4], data, sizeof(i2c_smbus_data));
-        ULONG64 out[5] = {0}; SIZE_T ret_sz;
-        HRESULT hr = p_exec(handle, "ioctl_smbus_xfer", in, 9, out, 5, &ret_sz);
-        if (data) memcpy(data, &out[0], sizeof(i2c_smbus_data));
-        return hr == S_OK ? 0 : -1;
-    };
-
-    auto read_byte = [&](uint8_t addr) -> int {
-        i2c_smbus_data d; return smbus_xfer(addr, 1, 0, 1, &d) < 0 ? -1 : d.byte;
-    };
-
-    auto write_word = [&](uint8_t addr, uint8_t cmd, uint16_t val) {
-        i2c_smbus_data d; d.word = val; smbus_xfer(addr, 0, cmd, 3, &d);
-    };
-
-    auto write_byte = [&](uint8_t addr, uint8_t cmd, uint8_t val) {
-        i2c_smbus_data d; d.byte = val; smbus_xfer(addr, 0, cmd, 2, &d);
-    };
-
-    auto ene_write = [&](uint8_t addr, uint16_t reg, uint8_t val) {
-        uint16_t sw = ((reg << 8) & 0xFF00) | ((reg >> 8) & 0x00FF);
-        write_word(addr, 0x00, sw); Sleep(1);
-        write_byte(addr, 0x01, val); Sleep(1);
-    };
-
-    auto ene_read = [&](uint8_t addr, uint16_t reg) -> uint8_t {
-        uint16_t sw = ((reg << 8) & 0xFF00) | ((reg >> 8) & 0x00FF);
-        write_word(addr, 0x00, sw); Sleep(1);
-        i2c_smbus_data d;
-        smbus_xfer(addr, 1, 0x81, 2, &d);
-        return d.byte;
-    };
-
-    int found = 0;
-    int slot = 0;  // Track which RAM slot (0-3)
-    uint8_t addrs[] = {0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77};
-
-    for (uint8_t addr : addrs) {
-        if (read_byte(addr) < 0) continue;
-
-        char name[17] = {0};
-        for (int i = 0; i < 16; i++) name[i] = ene_read(addr, 0x1000 + i);
-
-        if (strstr(name, "AUDA") || strstr(name, "DIMM") || strstr(name, "Trident")) {
-            // Apply per-slot color correction
-            uint8_t cr = r, cg = g, cb = b;
-            if (slot < 4) {
-                g_config.ram[slot].ApplyCorrection(cr, cg, cb);
-            }
-
-            uint8_t led_count = ene_read(addr, 0x1C02);
-            if (led_count == 0 || led_count > 20) led_count = 8;
-
-            ene_write(addr, 0x8020, 0x01); Sleep(5);
-
-            for (int i = 0; i < led_count; i++) {
-                uint16_t reg = 0x8100 + (i * 3);
-                ene_write(addr, reg + 0, cr);
-                ene_write(addr, reg + 1, cb);  // ENE uses RBG
-                ene_write(addr, reg + 2, cg);
-            }
-            Sleep(5);
-            ene_write(addr, 0x80A0, 0x01);
-            found++;
-            slot++;
-        }
-    }
-
-    p_close(handle);
-    FreeLibrary(dll);
-
-    if (found > 0) {
-        wchar_t buf[64];
-        swprintf(buf, 64, L"[G.Skill] %d module(s) set", found);
-        AppendStatus(buf);
-        return true;
-    }
-
-    AppendStatus(L"[G.Skill] No RAM modules found on SMBus");
-    return false;
+    return SetGSkillRAM(0, 0, 0);
 }
 
 //=============================================================================
@@ -1702,82 +1141,28 @@ void SystemRestart() {
 void FullHIDReset() {
     AppendStatus(L"Resetting all RGB devices...");
 
-    // === 1. Reset ASUS Aura (HID) ===
-    hid_exit();
-    Sleep(500);
-    if (hid_init() != 0) {
+    // Resume from standby leaves the USB stack re-enumerated, so the real
+    // backend is town down and re-initialised. In dry-run mode Hid() returns
+    // the logging backend and nothing is touched at all.
+    if (!g_state.dryRun) {
+        hal::RealHid().HardReset();
+    }
+
+    hal::IHidBackend& hid = Hid();
+    if (!hid.Init()) {
         AppendStatus(L"[ERROR] HID init failed");
         return;
     }
-    Sleep(200);
 
-    // Open ASUS Aura device
-    hid_device* dev = nullptr;
-    struct hid_device_info* devs = hid_enumerate(Devices::ASUS_VID, Devices::ASUS_AURA_PID);
-    for (auto* cur = devs; cur; cur = cur->next) {
-        if (cur->usage_page == Devices::ASUS_USAGE_PAGE) {
-            dev = hid_open_path(cur->path);
-            break;
-        }
-    }
-    hid_free_enumeration(devs);
+    devices::aura::ResetToDirectMode(hid, g_status);
+    hid.Exit();
 
-    if (dev) {
-        uint8_t buf[65];
-
-        // Request Config Table (0xB0)
-        memset(buf, 0, sizeof(buf));
-        buf[0x00] = 0xEC;
-        buf[0x01] = 0xB0;
-        hid_write(dev, buf, 65);
-        hid_read_timeout(dev, buf, 65, 500);
-        Sleep(20);
-
-        // SetGen1 - Required before Direct Mode
-        memset(buf, 0, sizeof(buf));
-        buf[0x00] = 0xEC;
-        buf[0x01] = 0x52;
-        buf[0x02] = 0x53;
-        buf[0x03] = 0x00;
-        buf[0x04] = 0x01;
-        hid_write(dev, buf, 65);
-        Sleep(50);
-
-        // Switch all channels to Direct Mode (0x35 with mode 0xFF)
-        for (int ch = 0; ch < 8; ch++) {
-            memset(buf, 0, sizeof(buf));
-            buf[0x00] = 0xEC;
-            buf[0x01] = 0x35;
-            buf[0x02] = ch;
-            buf[0x03] = 0x00;
-            buf[0x04] = 0x00;
-            buf[0x05] = 0xFF;
-            hid_write(dev, buf, 65);
-            Sleep(5);
-        }
-
-        hid_close(dev);
-        AppendStatus(L"ASUS Aura reset OK");
-    } else {
-        AppendStatus(L"[WARN] ASUS Aura not found");
-    }
-
-    hid_exit();
-
-    // === 2. Reset G.Skill RAM (SMBus) ===
-    // G.Skill RAM uses SMBus, not HID - reset separately
+    // G.Skill sits on SMBus rather than HID and needs its own pulse.
     if (g_state.enableRAM) {
         AppendStatus(L"Resetting G.Skill RAM...");
-        // Brief reset pulse: turn off, wait, then ApplyColors will set correct color
-        SetGSkillRAM(0, 0, 0);
-        Sleep(100);
-        AppendStatus(L"G.Skill RAM reset OK");
+        if (ResetGSkillRAM()) AppendStatus(L"G.Skill RAM reset OK");
     }
 }
-
-//=============================================================================
-// APPLY ALL COLORS
-//=============================================================================
 
 void ApplyColors() {
     if (g_state.applying.exchange(true)) return;
@@ -1808,43 +1193,22 @@ void ApplyColors() {
     swprintf(buf, 128, L"Color: #%02X%02X%02X", r, g, b);
     AppendStatus(buf);
 
-    // Skip hardware communication in dry-run mode
-    if (dryRun) {
-        if (doAura) AppendStatus(L"[DRY] ASUS Aura: skipped");
-        if (doMouse) AppendStatus(L"[DRY] SteelSeries: skipped");
-        if (doKeyboard) {
-            swprintf(buf, 128, L"[DRY] Keyboard mode %d: skipped", kbMode);
-            AppendStatus(buf);
-        }
-        if (doEdge) AppendStatus(L"[DRY] Edge LEDs: skipped");
-        if (doRAM) AppendStatus(L"[DRY] G.Skill RAM: skipped");
-        AppendStatus(L"=== DRY RUN Complete ===");
-        g_state.applying = false;
-        return;
-    }
+    // No early return for dry runs any more: Hid() hands back a backend that
+    // logs the protocol instead of transmitting it, so the real code path runs
+    // end to end and every device - present and future - is covered.
+    hal::IHidBackend& hid = Hid();
+    hid.Init();
 
-    hid_init();
+    if (doAura)     SetAsusAura(r, g, b);
+    if (doMouse)    SetSteelSeries(r, g, b);
+    if (doKeyboard) SetEVisionKeyboard(r, g, b, (uint8_t)kbMode, (uint8_t)brightness,
+                                       (uint8_t)speed);
+    if (doEdge)     SetEVisionEdge(r, g, b, (uint8_t)edgeMode);
+    if (doRAM)      SetGSkillRAM(r, g, b);
 
-    // ASUS Aura - direct HID control
-    if (doAura) {
-        SetAsusAura(r, g, b);
-    }
-    if (doMouse) {
-        SetSteelSeries(r, g, b);
-    }
-    if (doKeyboard) {
-        SetEVisionKeyboard(r, g, b, kbMode, brightness, speed);
-    }
-    if (doEdge) {
-        SetEVisionEdge(r, g, b, edgeMode);
-    }
-    if (doRAM) {
-        SetGSkillRAM(r, g, b);
-    }
+    hid.Exit();
 
-    hid_exit();
-
-    AppendStatus(L"=== Done! ===");
+    AppendStatus(dryRun ? L"=== DRY RUN Complete ===" : L"=== Done! ===");
 
     g_state.applying = false;
 }
@@ -2150,10 +1514,11 @@ AsusTestDialog* g_asusTest = nullptr;
 // Test a single ASUS channel with a specific color
 // 'channel' is the UI index (0, 1, 2...), we map it to the actual direct_channel
 bool TestAsusChannel(int channel, uint8_t r, uint8_t g, uint8_t b) {
-    hid_init();
-    hid_device* dev = OpenAsusAura();
+    hal::IHidBackend& hid = Hid();
+    hid.Init();
+    auto dev = devices::aura::Open(hid);
     if (!dev) {
-        hid_exit();
+        hid.Exit();
         return false;
     }
 
@@ -2161,15 +1526,15 @@ bool TestAsusChannel(int channel, uint8_t r, uint8_t g, uint8_t b) {
     int ledCount = 120;
     int directChannel = channel;  // Default: use index as channel
 
-    if (g_asusHwConfig.valid && channel < g_asusHwConfig.numChannels) {
-        ledCount = g_asusHwConfig.channels[channel].ledCount;
-        directChannel = g_asusHwConfig.channels[channel].directChannel;
+    if (g_auraHw.valid && channel < g_auraHw.num_channels) {
+        ledCount = g_auraHw.channels[channel].led_count;
+        directChannel = g_auraHw.channels[channel].direct_channel;
     }
 
-    SetAsusChannel(dev, directChannel, ledCount, r, g, b);
+    devices::aura::SetChannel(hid, *dev, directChannel, ledCount, r, g, b);
 
-    hid_close(dev);
-    hid_exit();
+    dev.reset();
+    hid.Exit();
     return true;
 }
 
@@ -2217,18 +1582,18 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         g_asusTest->hDlg = hWnd;
 
         // Use scanned hardware config or fallback
-        int numCh = g_asusHwConfig.valid ? g_asusHwConfig.numChannels : 3;
+        int numCh = g_auraHw.valid ? g_auraHw.num_channels : 3;
         if (numCh > 8) numCh = 8;
         if (numCh < 1) numCh = 1;
         g_asusTest->numChannels = numCh;
 
         // Load saved colors from hardware config
         for (int i = 0; i < numCh; i++) {
-            if (g_asusHwConfig.valid && i < g_asusHwConfig.numChannels) {
-                g_asusTest->channelR[i] = g_asusHwConfig.channels[i].colorR;
-                g_asusTest->channelG[i] = g_asusHwConfig.channels[i].colorG;
-                g_asusTest->channelB[i] = g_asusHwConfig.channels[i].colorB;
-                g_asusTest->channelActive[i] = g_asusHwConfig.channels[i].enabled;
+            if (g_auraHw.valid && i < g_auraHw.num_channels) {
+                g_asusTest->channelR[i] = g_auraUi[i].r;
+                g_asusTest->channelG[i] = g_auraUi[i].g;
+                g_asusTest->channelB[i] = g_auraUi[i].b;
+                g_asusTest->channelActive[i] = g_auraUi[i].enabled;
             } else {
                 g_asusTest->channelR[i] = g_state.red;
                 g_asusTest->channelG[i] = g_state.green;
@@ -2239,9 +1604,9 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 
         // Title with firmware info
         wchar_t title[128];
-        if (g_asusHwConfig.valid) {
+        if (g_auraHw.valid) {
             wchar_t fw[32];
-            MultiByteToWideChar(CP_UTF8, 0, g_asusHwConfig.firmware, -1, fw, 32);
+            MultiByteToWideChar(CP_UTF8, 0, g_auraHw.firmware, -1, fw, 32);
             swprintf(title, 128, L"ASUS Aura - %s (%d Kan\x00E4le)", fw, numCh);
         } else {
             wcscpy(title, L"ASUS Aura Kanalsteuerung");
@@ -2254,9 +1619,9 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         for (int i = 0; i < numCh; i++) {
             // Build channel name from hardware config
             wchar_t chName[128];
-            if (g_asusHwConfig.valid && i < g_asusHwConfig.numChannels) {
+            if (g_auraHw.valid && i < g_auraHw.num_channels) {
                 wchar_t name[64];
-                MultiByteToWideChar(CP_ACP, 0, g_asusHwConfig.channels[i].name, -1, name, 64);
+                MultiByteToWideChar(CP_ACP, 0, g_auraHw.channels[i].name, -1, name, 64);
                 swprintf(chName, 128, L"Kanal %d - %s", i, name);
             } else {
                 swprintf(chName, 128, L"Kanal %d", i);
@@ -2418,12 +1783,12 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         else if (id == ID_ASUS_CLOSE) {
             // Save colors back to hardware config
-            if (g_asusHwConfig.valid) {
-                for (int i = 0; i < g_asusTest->numChannels && i < g_asusHwConfig.numChannels; i++) {
-                    g_asusHwConfig.channels[i].colorR = g_asusTest->channelR[i];
-                    g_asusHwConfig.channels[i].colorG = g_asusTest->channelG[i];
-                    g_asusHwConfig.channels[i].colorB = g_asusTest->channelB[i];
-                    g_asusHwConfig.channels[i].enabled = g_asusTest->channelActive[i];
+            if (g_auraHw.valid) {
+                for (int i = 0; i < g_asusTest->numChannels && i < g_auraHw.num_channels; i++) {
+                    g_auraUi[i].r = g_asusTest->channelR[i];
+                    g_auraUi[i].g = g_asusTest->channelG[i];
+                    g_auraUi[i].b = g_asusTest->channelB[i];
+                    g_auraUi[i].enabled = g_asusTest->channelActive[i];
                 }
                 SaveAsusHardwareConfig();
             }
@@ -2458,7 +1823,7 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 
 void ShowAsusTestDialog(HWND hWnd) {
     // Calculate dialog size based on number of channels
-    int numCh = g_asusHwConfig.valid ? g_asusHwConfig.numChannels : 3;
+    int numCh = g_auraHw.valid ? g_auraHw.num_channels : 3;
     if (numCh > 8) numCh = 8;
     if (numCh < 1) numCh = 1;
     int dlgHeight = 35 + numCh * 105 + 80;
@@ -3189,14 +2554,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (wParam == PBT_APMSUSPEND) {
             ClearStatus();
             AppendStatus(L"System entering standby...");
-            // Turn off all RGB devices for clean state
-            hid_init();
+            // Turn off all RGB devices for clean state.
+            // Goes through Hid() like every other path, so a dry run does not
+            // reconfigure the hardware on the way into standby either.
+            hal::IHidBackend& hid = Hid();
+            hid.Init();
             if (g_state.enableAura) SetAsusAura(0, 0, 0);
             if (g_state.enableMouse) SetSteelSeries(0, 0, 0);
-            if (g_state.enableKeyboard) SetEVisionKeyboard(0, 0, 0, 0, 0, 0);
-            if (g_state.enableEdge) SetEVisionEdge(0, 0, 0, 0);
+            if (g_state.enableKeyboard)
+                SetEVisionKeyboard(0, 0, 0, KB_MODE_STATIC, 0, 0);
+            if (g_state.enableEdge) SetEVisionEdge(0, 0, 0, EDGE_MODE_OFF);
             if (g_state.enableRAM) SetGSkillRAM(0, 0, 0);
-            hid_exit();
+            hid.Exit();
             AppendStatus(L"Devices off - ready for standby");
         }
         // Handle RESUME from sleep/hibernate
@@ -3609,6 +2978,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     g_state.dryRun = (strstr(lpCmdLine, "--dry-run") != nullptr);
     bool forceForeground = (strstr(lpCmdLine, "--foreground") != nullptr);
 
+    // In dry-run mode every device is simulated so the protocols run end to end
+    // and their bytes land in the status log, without touching hardware.
+    if (g_state.dryRun) InitDryRunDevices();
+
     // Initialize GDI+ for PNG loading
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
     Gdiplus::GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, NULL);
@@ -3619,6 +2992,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     LogDebug("Settings loaded");
     SyncModernTheme();
     LogDebug("Modern theme synced");
+
+    // Upgrade path: earlier versions registered autostart under HKCU\...\Run,
+    // which Windows refuses to launch for an app requiring elevation. Replace
+    // any such leftover with a scheduled task, otherwise autostart silently
+    // keeps not working after an update.
+    if (!g_state.dryRun && autostart::MigrateLegacyIfPresent())
+        LogDebug("Autostart migrated from Run key to scheduled task");
 
     // Initialize ASUS hardware scan (checks for config changes)
     InitAsusHardware();

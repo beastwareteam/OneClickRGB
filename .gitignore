@@ -41,6 +41,19 @@
 build/
 !build/.gitkeep
 production/build/
+build_app/
+build_tests/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.lib
+*.exe
+!portable/*.exe
+
+# Release archives - these are build artifacts, published via GitHub Releases
+# rather than committed (see .github/workflows/release.yml).
+*.zip
 
 # IDE
 .vs/
@@ -52,6 +65,9 @@ production/build/
 *.log
 *.txt
 !README.txt
+# The blanket *.txt rule above would otherwise swallow the build files.
+!CMakeLists.txt
+!**/CMakeLists.txt
 *.res
 
 # Generated resources

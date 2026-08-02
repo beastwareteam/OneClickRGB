@@ -1,6 +1,6 @@
 # OneClickRGB Roadmap
 
-## Current Version: 3.4
+## Current Version: 3.6
 
 ### Completed Features ✅
 
@@ -22,22 +22,28 @@
 - [x] Button hover effects with mouse tracking
 - [x] Accent styling for primary actions
 
+- [x] Installer - Inno Setup based installer with uninstall support
+- [x] Autostart toggle in settings (scheduled task, runs elevated)
+- [x] Theme system (Dark/Light/Colorblind) and keyboard accessibility
+- [x] Hardware abstraction layer + unit test suite
+- [x] CMake build and working CI
+
 ---
 
-## Next Release: v3.5
+## Next Release: v3.7
 
 ### Planned Features
 
-- [ ] **Installer** - Inno Setup based installer with uninstall support
-- [ ] **Autostart toggle** - Easy enable/disable in settings
 - [ ] **Tray icon tooltip** - Show current color/profile
 - [ ] **Custom hotkey configuration** - User-definable shortcuts
+- [ ] **Split the Win32 front end** - `oneclick_rgb_complete.cpp` is still
+      ~3000 lines; the window procedure and the dialogs should follow the
+      device protocols out of it
 
 ### Bug Fixes
 
-- [ ] Window resize edge detection improvement
 - [ ] Better error messages when devices not found
-- [ ] USB reconnection handling
+- [ ] USB reconnection handling (currently only handled on resume from standby)
 
 ---
 
@@ -107,7 +113,20 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for guidelines.
 
 ## Version History
 
-### v3.4 (Current)
+### v3.6 (Current)
+- Fix: autostart runs elevated via scheduled task (RAM color at logon)
+- Fix: Windows key no longer left locked, with read-back verification
+- Fix: --dry-run no longer touches hardware
+- Device protocols extracted behind a hardware abstraction layer
+- Unit test suite (88 tests), CMake build, repaired CI
+
+See [CHANGELOG.md](CHANGELOG.md) for details.
+
+### v3.5
+- Info tooltips, theme system, keyboard accessibility
+- Portable package with installers
+
+### v3.4
 - Production-ready build system
 - Fixed RAM control paths
 - Repository cleanup
