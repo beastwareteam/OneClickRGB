@@ -47,6 +47,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <objidl.h>
 #include <nlohmann/json.hpp>
 #include <gdiplus.h>
@@ -134,6 +135,29 @@ LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
 LRESULT CALLBACK ColorPreviewSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 
+// Shared helper: paint control background.
+// For popup dialogs (ChanSettingsDlg, AsusTestDlg) use solid dark fill.
+// For the main window use WM_PRINTCLIENT to get the gradient background.
+static inline void FillCtrlBackground(HDC hdcMem, HWND hCtrl, const RECT& rc) {
+    wchar_t cls[64] = {};
+    GetClassNameW(GetParent(hCtrl), cls, 64);
+    bool isPopup = (wcscmp(cls, L"ChanSettingsDlg") == 0 ||
+                    wcscmp(cls, L"AsusTestDlg")     == 0 ||
+                    wcscmp(cls, L"#32770")           == 0);
+    if (isPopup) {
+        RECT rf = {0, 0, rc.right - rc.left, rc.bottom - rc.top};
+        HBRUSH hBr = CreateSolidBrush(RGB(30, 34, 46));
+        FillRect(hdcMem, &rf, hBr);
+        DeleteObject(hBr);
+    } else {
+        POINT pt = {0, 0};
+        MapWindowPoints(hCtrl, GetParent(hCtrl), &pt, 1);
+        SetWindowOrgEx(hdcMem, pt.x, pt.y, NULL);
+        SendMessage(GetParent(hCtrl), WM_PRINTCLIENT, (WPARAM)hdcMem, PRF_CLIENT);
+        SetWindowOrgEx(hdcMem, 0, 0, NULL);
+    }
+}
+
 //=============================================================================
 // CONSTANTS & LAYOUT
 //=============================================================================
@@ -184,6 +208,9 @@ LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 #define ID_TRAY_RESTART 3017
 #define ID_TIMER_RESUME 3020
 #define ID_TIMER_DEBOUNCE 3021
+#define APPLY_DEBOUNCE_MS 180
+#define WM_APP_STATUS_APPEND (WM_APP + 10)
+#define WM_APP_STATUS_CLEAR (WM_APP + 11)
 
 // Custom titlebar buttons
 #define ID_BTN_MINIMIZE 3030
@@ -241,6 +268,7 @@ LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 HBRUSH g_hBgBrush = NULL;
 HBRUSH g_hCtrlBrush = NULL;
 HBRUSH g_hBtnBrush = NULL;
+HBRUSH g_hWndBgBrush = NULL; // Window-class background brush (dunkles Theme, verhindert weißen Blitz)
 
 // Trackbar background brush matching the dark theme
 HBRUSH g_hTrackbarBrush = NULL;
@@ -413,7 +441,7 @@ Strings g_strEN = {
     // Edge modes
     L"Static", L"Breathing", L"Wave", L"Spectrum", L"Off",
     // Channel settings dialog
-    L"Channel Color Correction", L"Save && Close", L"Reset All",
+    L"Channel Color Correction", L"Save", L"Reset All",
     L"100% = no change. Adjust to correct color deviation.",
     // Tooltips
     L"Red channel (0-255)\nAdjust the red color intensity",
@@ -470,7 +498,7 @@ Strings g_strDE = {
     // Edge modes
     L"Statisch", L"Atmend", L"Welle", L"Spektrum", L"Aus",
     // Channel settings dialog
-    L"Kanal-Farbkorrektur", L"Speichern && Schlie\x00DFen", L"Alle zur\x00FCcksetzen",
+    L"Kanal-Farbkorrektur", L"Speichern", L"Zur\x00FCcksetzen",
     L"100% = keine \x00C4nderung. Anpassen um Farbabweichungen zu korrigieren.",
     // Tooltips
     L"Rotkanal (0-255)\nRote Farbintensit\x00E4t einstellen",
@@ -560,15 +588,69 @@ enum KeyboardMode {
     KB_MODE_HURRICANE = 0x0D
 };
 
+// Maps KB_MODE_* enum values to ComboBox indices (order must match WM_CREATE combo population)
+static const uint8_t KB_MODE_TABLE[] = {
+    KB_MODE_STATIC, KB_MODE_BREATHING, KB_MODE_SPECTRUM, KB_MODE_WAVE_SHORT,
+    KB_MODE_WAVE_LONG, KB_MODE_COLOR_WHEEL, KB_MODE_REACTIVE, KB_MODE_RIPPLE,
+    KB_MODE_STARLIGHT, KB_MODE_RAINBOW, KB_MODE_HURRICANE
+};
+static const int KB_MODE_COUNT = 11;
+
+// Returns ComboBox index for a given kbMode byte value (-1 if not found)
+inline int KbModeToIndex(uint8_t mode) {
+    for (int i = 0; i < KB_MODE_COUNT; i++)
+        if (KB_MODE_TABLE[i] == mode) return i;
+    return 0; // fallback: Static
+}
+
+// Returns kbMode byte value for a given ComboBox index
+inline uint8_t IndexToKbMode(int idx) {
+    if (idx >= 0 && idx < KB_MODE_COUNT) return KB_MODE_TABLE[idx];
+    return KB_MODE_STATIC;
+}
+
 // Edge modes (Endorfy)
 enum EdgeMode {
     EDGE_MODE_FREEZE = 0x00,
     EDGE_MODE_WAVE = 0x01,
     EDGE_MODE_SPECTRUM = 0x02,
     EDGE_MODE_BREATHING = 0x03,
-    EDGE_MODE_STATIC = 0x04,
+    // On Endorfy EVision edge strips, solid color is encoded as 0x00.
+    // Keep the STATIC symbol for UI semantics, but map it to FREEZE.
+    EDGE_MODE_STATIC = EDGE_MODE_FREEZE,
     EDGE_MODE_OFF = 0x05
 };
+
+// Maps ComboBox edge indices to hardware byte values
+// ComboBox order: Static(0), Breathing(1), Wave(2), Spectrum(3), Off(4)
+static const uint8_t EDGE_MODE_TABLE[] = {
+    EDGE_MODE_STATIC, EDGE_MODE_BREATHING, EDGE_MODE_WAVE, EDGE_MODE_SPECTRUM, EDGE_MODE_OFF
+};
+static const int EDGE_MODE_COUNT = 5;
+
+inline int EdgeModeToIndex(uint8_t mode) {
+    for (int i = 0; i < EDGE_MODE_COUNT; i++)
+        if (EDGE_MODE_TABLE[i] == mode) return i;
+    return 0; // fallback: Static
+}
+
+inline uint8_t IndexToEdgeMode(int idx) {
+    if (idx >= 0 && idx < EDGE_MODE_COUNT) return EDGE_MODE_TABLE[idx];
+    return EDGE_MODE_STATIC;
+}
+
+inline uint8_t NormalizeEdgeMode(uint8_t mode) {
+    // Legacy configs used 0x04 for "static" and often produced rainbow-only behavior.
+    if (mode == 0x04) return EDGE_MODE_STATIC;
+    if (mode == EDGE_MODE_OFF ||
+        mode == EDGE_MODE_STATIC ||
+        mode == EDGE_MODE_BREATHING ||
+        mode == EDGE_MODE_WAVE ||
+        mode == EDGE_MODE_SPECTRUM) {
+        return mode;
+    }
+    return EDGE_MODE_STATIC;
+}
 
 //=============================================================================
 // GLOBAL STATE
@@ -622,8 +704,20 @@ struct AppState {
 
     // Status
     std::wstring statusLog;
+    std::wstring lastStatusLine;
+    ULONGLONG lastStatusTick = 0;
     std::atomic<bool> applying{false};
     std::mutex statusMutex;
+
+    // Serialize all hardware adapter I/O across apply/reset/power/test paths
+    std::mutex deviceIoMutex;
+
+    // Apply queue (single worker)
+    std::mutex applyMutex;
+    std::condition_variable applyCv;
+    bool applyWorkerRunning = false;
+    bool applyRequested = false;
+    std::thread applyWorker;
 
     // Profiles
     std::vector<std::wstring> profiles;
@@ -689,7 +783,8 @@ void LoadAppSettings() {
     g_state.brightness = g_config.brightness;
     g_state.speed      = g_config.speed;
     g_state.kbMode     = g_config.kbMode;
-    g_state.edgeMode   = g_config.edgeMode;
+    g_state.edgeMode   = NormalizeEdgeMode(g_config.edgeMode);
+    g_config.edgeMode  = g_state.edgeMode;
     g_state.enableAura     = g_config.enableAura;
     g_state.enableMouse    = g_config.enableMouse;
     g_state.enableKeyboard = g_config.enableKeyboard;
@@ -697,7 +792,7 @@ void LoadAppSettings() {
     g_state.enableEdge     = g_config.enableEdge;
     g_state.autostart      = g_config.autostart;
     g_state.minimizeToTray = g_config.minimizeToTray;
-    g_state.autoApply      = g_config.autoApply;
+    g_state.autoApply      = true;
     g_state.lastProfile    = std::wstring(g_config.lastProfile.begin(), g_config.lastProfile.end());
     g_windowX = (g_config.windowX != -1) ? g_config.windowX : CW_USEDEFAULT;
     g_windowY = (g_config.windowY != -1) ? g_config.windowY : CW_USEDEFAULT;
@@ -706,10 +801,31 @@ void LoadAppSettings() {
 }
 
 void AppendStatus(const wchar_t* text) {
+    DWORD uiThreadId = 0;
+    if (g_state.hWnd) {
+        uiThreadId = GetWindowThreadProcessId(g_state.hWnd, NULL);
+    }
+
+    if (g_state.hWnd && uiThreadId != 0 && GetCurrentThreadId() != uiThreadId) {
+        std::wstring* msg = new std::wstring(text ? text : L"");
+        if (!PostMessage(g_state.hWnd, WM_APP_STATUS_APPEND, 0, (LPARAM)msg)) {
+            delete msg;
+        }
+        return;
+    }
+
     std::wstring currentText;
     {
         std::lock_guard<std::mutex> lock(g_state.statusMutex);
-        g_state.statusLog += text;
+        const wchar_t* safeText = text ? text : L"";
+        ULONGLONG now = GetTickCount64();
+        if (g_state.lastStatusLine == safeText && (now - g_state.lastStatusTick) < 150) {
+            return;
+        }
+        g_state.lastStatusLine = safeText;
+        g_state.lastStatusTick = now;
+
+        g_state.statusLog += safeText;
         g_state.statusLog += L"\r\n";
         currentText = g_state.statusLog;
     }
@@ -724,9 +840,21 @@ void AppendStatus(const wchar_t* text) {
 }
 
 void ClearStatus() {
+    DWORD uiThreadId = 0;
+    if (g_state.hWnd) {
+        uiThreadId = GetWindowThreadProcessId(g_state.hWnd, NULL);
+    }
+
+    if (g_state.hWnd && uiThreadId != 0 && GetCurrentThreadId() != uiThreadId) {
+        PostMessage(g_state.hWnd, WM_APP_STATUS_CLEAR, 0, 0);
+        return;
+    }
+
     {
         std::lock_guard<std::mutex> lock(g_state.statusMutex);
         g_state.statusLog.clear();
+        g_state.lastStatusLine.clear();
+        g_state.lastStatusTick = 0;
     }
     if (g_state.hStatus) SetWindowTextW(g_state.hStatus, L"");
 }
@@ -790,36 +918,74 @@ void SaveProfile(const std::wstring& name) {
     }
 }
 
-void LoadProfile(const std::wstring& name) {
+bool LoadProfile(const std::wstring& name) {
     std::wstring path = GetAppDataPath() + L"\\profiles\\" + name + L".rgb";
     std::ifstream file(path);
-    if (file.is_open()) {
-        std::string line;
-        while (std::getline(file, line)) {
-            size_t pos = line.find('=');
-            if (pos != std::string::npos) {
-                std::string key = line.substr(0, pos);
-                int val = std::stoi(line.substr(pos + 1));
-                if (key == "red") g_state.red = val;
-                else if (key == "green") g_state.green = val;
-                else if (key == "blue") g_state.blue = val;
-                else if (key == "brightness") g_state.brightness = val;
-                else if (key == "speed") g_state.speed = val;
-                else if (key == "kbMode") g_state.kbMode = val;
-                else if (key == "edgeMode") g_state.edgeMode = val;
-                else if (key == "enableAura") g_state.enableAura = val;
-                else if (key == "enableMouse") g_state.enableMouse = val;
-                else if (key == "enableKeyboard") g_state.enableKeyboard = val;
-                else if (key == "enableRAM") g_state.enableRAM = val;
-                else if (key == "enableEdge") g_state.enableEdge = val;
-            }
-        }
-        file.close();
-        g_state.currentProfile = name;
-        g_state.lastProfile = name;
-        SaveAppSettings();  // Remember last profile
-        AppendStatus((L"Profile loaded: " + name).c_str());
+    if (!file.is_open()) {
+        return false;
     }
+
+    uint8_t red = g_state.red;
+    uint8_t green = g_state.green;
+    uint8_t blue = g_state.blue;
+    uint8_t brightness = g_state.brightness;
+    uint8_t speed = g_state.speed;
+    uint8_t kbMode = g_state.kbMode;
+    uint8_t edgeMode = g_state.edgeMode;
+    bool enableAura = g_state.enableAura;
+    bool enableMouse = g_state.enableMouse;
+    bool enableKeyboard = g_state.enableKeyboard;
+    bool enableRAM = g_state.enableRAM;
+    bool enableEdge = g_state.enableEdge;
+
+    std::string line;
+    while (std::getline(file, line)) {
+        size_t pos = line.find('=');
+        if (pos != std::string::npos) {
+            std::string key = line.substr(0, pos);
+            std::string value = line.substr(pos + 1);
+            int val = 0;
+            try {
+                val = std::stoi(value);
+            } catch (...) {
+                continue;
+            }
+
+            if (key == "red") red = (uint8_t)val;
+            else if (key == "green") green = (uint8_t)val;
+            else if (key == "blue") blue = (uint8_t)val;
+            else if (key == "brightness") brightness = (uint8_t)val;
+            else if (key == "speed") speed = (uint8_t)val;
+            else if (key == "kbMode") kbMode = (uint8_t)val;
+            else if (key == "edgeMode") edgeMode = (uint8_t)val;
+            else if (key == "enableAura") enableAura = (val != 0);
+            else if (key == "enableMouse") enableMouse = (val != 0);
+            else if (key == "enableKeyboard") enableKeyboard = (val != 0);
+            else if (key == "enableRAM") enableRAM = (val != 0);
+            else if (key == "enableEdge") enableEdge = (val != 0);
+        }
+    }
+
+    file.close();
+
+    // Atomic commit: apply loaded snapshot in one state update
+    g_state.red = red;
+    g_state.green = green;
+    g_state.blue = blue;
+    g_state.brightness = brightness;
+    g_state.speed = speed;
+    g_state.kbMode = kbMode;
+    g_state.edgeMode = NormalizeEdgeMode(edgeMode);
+    g_state.enableAura = enableAura;
+    g_state.enableMouse = enableMouse;
+    g_state.enableKeyboard = enableKeyboard;
+    g_state.enableRAM = enableRAM;
+    g_state.enableEdge = enableEdge;
+    g_state.currentProfile = name;
+    g_state.lastProfile = name;
+
+    AppendStatus((L"Profile loaded: " + name).c_str());
+    return true;
 }
 
 void RefreshProfileList() {
@@ -852,6 +1018,7 @@ void RefreshProfileList() {
 #define ASUS_LEDS_PER_PACKET 20
 #define AURA_REQUEST_FIRMWARE_VERSION 0x82
 #define AURA_REQUEST_CONFIG_TABLE 0xB0
+#define AURA_CONFIG_CHANNELS 8
 
 // Hardware configuration from device scan
 struct AsusHardwareConfig {
@@ -946,45 +1113,12 @@ void ParseAsusConfig(AsusHardwareConfig& cfg) {
         cfg.numChannels++;
     }
 
-    // Standard RGB headers - use IDs 0x02, 0x03...
-    for (int i = 0; i < cfg.numRGBHeaders && cfg.numChannels < 16; i++) {
-        cfg.channels[cfg.numChannels].present = true;
-        cfg.channels[cfg.numChannels].ledCount = 1;  // Standard headers set as single zone
-        cfg.channels[cfg.numChannels].addressable = false;
-        cfg.channels[cfg.numChannels].directChannel = 0x02 + i;
-        cfg.channels[cfg.numChannels].colorR = 0;
-        cfg.channels[cfg.numChannels].colorG = 34;
-        cfg.channels[cfg.numChannels].colorB = 255;
-        cfg.channels[cfg.numChannels].enabled = true;
-        sprintf(cfg.channels[cfg.numChannels].name, "RGB Header %d", i + 1);
-        cfg.numChannels++;
-    }
-
-    // Diagnostic/Internal zones (Force scan if Mainboard was detected)
-    if (cfg.numMainboardLEDs > 0 && cfg.numChannels < 16) {
-        // Some PCH/IO zones are at 0x0B, 0x0C
-        int extraZones[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x0B, 0x0C };
-        for (int zoneId : extraZones) {
-            bool alreadyExists = false;
-            for (int j = 0; j < cfg.numChannels; j++) {
-                if (cfg.channels[j].directChannel == zoneId) alreadyExists = true;
-            }
-            if (!alreadyExists && cfg.numChannels < 16) {
-                cfg.channels[cfg.numChannels].present = true;
-                cfg.channels[cfg.numChannels].ledCount = 30; // Assume 30 for scan
-                cfg.channels[cfg.numChannels].directChannel = zoneId;
-                cfg.channels[cfg.numChannels].enabled = true;
-                sprintf(cfg.channels[cfg.numChannels].name, "Zone (ID 0x%02X)", zoneId);
-                cfg.numChannels++;
-            }
-        }
-    }
-
-    // Addressable headers - use their index as direct_channel
+    // OpenRGB-like: only onboard zone + addressable headers as direct channels.
+    // (Legacy RGB/diagnostic zone scan removed: it caused channel drift and config mismatch.)
     for (int i = 0; i < cfg.numAddressableHeaders && cfg.numChannels < 16; i++) {
-        // Addressable channels typically support up to 120 LEDs
+        // OpenRGB Mainboard-Controller: addressable headers are treated as one logical LED target
         cfg.channels[cfg.numChannels].present = true;
-        cfg.channels[cfg.numChannels].ledCount = 120;  // Max per addressable header
+        cfg.channels[cfg.numChannels].ledCount = 1;
         cfg.channels[cfg.numChannels].addressable = true;
         cfg.channels[cfg.numChannels].directChannel = i;  // Addressable uses 0, 1, 2...
         cfg.channels[cfg.numChannels].colorR = 0;
@@ -1000,6 +1134,8 @@ void ParseAsusConfig(AsusHardwareConfig& cfg) {
 
 // Full hardware scan
 bool ScanAsusHardware() {
+    std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
+
     hid_init();
 
     hid_device* dev = nullptr;
@@ -1079,6 +1215,8 @@ bool LoadAsusHardwareConfig() {
 bool HasAsusHardwareChanged() {
     AsusHardwareConfig current;
 
+    std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
+
     hid_init();
     hid_device* dev = nullptr;
     struct hid_device_info* devs = hid_enumerate(Devices::ASUS_VID, Devices::ASUS_AURA_PID);
@@ -1156,16 +1294,7 @@ hid_device* OpenAsusAura() {
 void SetAsusChannel(hid_device* dev, int channel, int numLEDs, uint8_t r, uint8_t g, uint8_t b) {
     if (!dev) return;
 
-    // Force Direct Mode for this channel (Command 0x43)
-    // This is the "Bit" required to take control of internal motherboard LEDs
-    uint8_t modeBuf[65];
-    memset(modeBuf, 0, sizeof(modeBuf));
-    modeBuf[0x00] = 0xEC;
-    modeBuf[0x01] = 0x43;
-    modeBuf[0x02] = channel;
-    modeBuf[0x03] = 0xFF; // Mode "Direct/Software" (some boards use 0x01 Static)
-    hid_write(dev, modeBuf, 65);
-    Sleep(2);
+    if (numLEDs < 1) numLEDs = 1;
 
     int offset = 0;
 
@@ -1196,6 +1325,23 @@ void SetAsusChannel(hid_device* dev, int channel, int numLEDs, uint8_t r, uint8_
     }
 }
 
+static void ApplyAsusChannelColor(hid_device* dev, int auraIndex, int directChannel, int ledCount,
+                                  uint8_t baseR, uint8_t baseG, uint8_t baseB, bool applyCorrection,
+                                  bool respectGlobalEnable,
+                                  int& setCount) {
+    if (!dev) return;
+    if (auraIndex < 0 || auraIndex >= AURA_CONFIG_CHANNELS) return;
+    if (respectGlobalEnable && !g_config.aura[auraIndex].enabled) return;
+
+    uint8_t cr = baseR, cg = baseG, cb = baseB;
+    if (applyCorrection) {
+        g_config.aura[auraIndex].ApplyCorrection(cr, cg, cb);
+    }
+
+    SetAsusChannel(dev, directChannel, ledCount, cr, cg, cb);
+    setCount++;
+}
+
 bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
     hid_device* dev = OpenAsusAura();
     if (!dev) {
@@ -1207,14 +1353,16 @@ bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
 
     // Use hardware config if available
     if (g_asusHwConfig.valid) {
-        for (int i = 0; i < g_asusHwConfig.numChannels; i++) {
-            if (g_config.aura[i].enabled) {
-                uint8_t cr = r, cg = g, cb = b;
-                g_config.aura[i].ApplyCorrection(cr, cg, cb);
-                SetAsusChannel(dev, g_asusHwConfig.channels[i].directChannel,
-                              g_asusHwConfig.channels[i].ledCount, cr, cg, cb);
-                setCount++;
-            }
+        int maxAuraChannels = g_asusHwConfig.numChannels;
+        if (maxAuraChannels > AURA_CONFIG_CHANNELS) maxAuraChannels = AURA_CONFIG_CHANNELS;
+        for (int i = 0; i < maxAuraChannels; i++) {
+            ApplyAsusChannelColor(dev, i,
+                g_asusHwConfig.channels[i].directChannel,
+                g_asusHwConfig.channels[i].ledCount,
+                r, g, b,
+                true,
+                true,
+                setCount);
         }
     } else {
         // Fallback: old static config
@@ -1222,12 +1370,7 @@ bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
             {0x00, 60}, {0x01, 120}, {0x02, 120}, {0x03, 60}, {0x04, 60}, {0x0B, 60}, {0x0C, 60}
         };
         for (int i = 0; i < 7; i++) {
-            if (g_config.aura[i].enabled) {
-                uint8_t cr = r, cg = g, cb = b;
-                g_config.aura[i].ApplyCorrection(cr, cg, cb);
-                SetAsusChannel(dev, channels[i].channel, channels[i].leds, cr, cg, cb);
-                setCount++;
-            }
+            ApplyAsusChannelColor(dev, i, channels[i].channel, channels[i].leds, r, g, b, true, true, setCount);
         }
     }
 
@@ -1241,6 +1384,8 @@ bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
 
 // Quick update for live preview (single call, no status messages)
 void SetAsusAuraQuick(uint8_t r, uint8_t g, uint8_t b) {
+    std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
+
     hid_init();
     hid_device* dev = OpenAsusAura();
     if (!dev) {
@@ -1250,13 +1395,17 @@ void SetAsusAuraQuick(uint8_t r, uint8_t g, uint8_t b) {
 
     // Use hardware config if available
     if (g_asusHwConfig.valid) {
-        for (int i = 0; i < g_asusHwConfig.numChannels; i++) {
-            if (g_config.aura[i].enabled) {
-                uint8_t cr = r, cg = g, cb = b;
-                g_config.aura[i].ApplyCorrection(cr, cg, cb);
-                SetAsusChannel(dev, g_asusHwConfig.channels[i].directChannel,
-                              g_asusHwConfig.channels[i].ledCount, cr, cg, cb);
-            }
+        int maxAuraChannels = g_asusHwConfig.numChannels;
+        if (maxAuraChannels > AURA_CONFIG_CHANNELS) maxAuraChannels = AURA_CONFIG_CHANNELS;
+        for (int i = 0; i < maxAuraChannels; i++) {
+            int ignoredCount = 0;
+            ApplyAsusChannelColor(dev, i,
+                g_asusHwConfig.channels[i].directChannel,
+                g_asusHwConfig.channels[i].ledCount,
+                r, g, b,
+                true,
+                true,
+                ignoredCount);
         }
     } else {
         // Fallback
@@ -1264,11 +1413,8 @@ void SetAsusAuraQuick(uint8_t r, uint8_t g, uint8_t b) {
             {0, 60}, {1, 120}, {2, 120}, {3, 60}, {4, 60}, {5, 60}, {6, 60}, {7, 60}
         };
         for (int i = 0; i < 8; i++) {
-            if (g_config.aura[i].enabled) {
-                uint8_t cr = r, cg = g, cb = b;
-                g_config.aura[i].ApplyCorrection(cr, cg, cb);
-                SetAsusChannel(dev, channels[i].channel, channels[i].leds, cr, cg, cb);
-            }
+            int ignoredCount = 0;
+            ApplyAsusChannelColor(dev, i, channels[i].channel, channels[i].leds, r, g, b, true, true, ignoredCount);
         }
     }
 
@@ -1309,6 +1455,79 @@ bool SetSteelSeries(uint8_t r, uint8_t g, uint8_t b) {
     hid_write(dev, save, 9);
     hid_close(dev);
     AppendStatus(L"[SteelSeries] Rival 600 set");
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Per-zone SteelSeries control (Rival 600, 8 zones from g_config.mouseZones)
+// Zone identity/layout comes from the SteelSeries GG DB; see docs/Mouse_Protocol.md.
+// Same wire format as SetSteelSeries: per-zone {0x1C,0x27,0x00,zoneBit,r,g,b} + save 0x09.
+// ---------------------------------------------------------------------------
+static hid_device* OpenRival600() {
+    hid_device* dev = nullptr;
+    struct hid_device_info* devs = hid_enumerate(Devices::STEELSERIES_VID, Devices::RIVAL_600_PID);
+    for (auto* cur = devs; cur; cur = cur->next) {
+        if (cur->interface_number == 0) { dev = hid_open_path(cur->path); break; }
+    }
+    hid_free_enumeration(devs);
+    return dev;
+}
+
+static void SSWriteZone(hid_device* dev, uint8_t zoneBit, uint8_t r, uint8_t g, uint8_t b) {
+    uint8_t pkt[8] = {0x1C, 0x27, 0x00, zoneBit, r, g, b, 0};
+    hid_write(dev, pkt, 7);
+    Sleep(10);
+}
+static void SSSave(hid_device* dev) { uint8_t save[10] = {0x09}; hid_write(dev, save, 9); }
+
+// Write each mouse zone its own (corrected) colour.
+bool SetSteelSeriesZones() {
+    hid_device* dev = OpenRival600();
+    if (!dev) { AppendStatus(L"[SteelSeries] Not found"); return false; }
+    int n = 0;
+    for (const auto& z : g_config.mouseZones) {
+        uint8_t cr = z.color.r, cg = z.color.g, cb = z.color.b;
+        g_config.steelseries.ApplyCorrection(cr, cg, cb);  // global mouse enable/correction
+        if (!z.enabled) { cr = cg = cb = 0; }
+        SSWriteZone(dev, (uint8_t)z.hwIndex, cr, cg, cb);
+        n++;
+    }
+    SSSave(dev);
+    hid_close(dev);
+    wchar_t buf[64]; swprintf(buf, 64, L"[SteelSeries] %d zones set", n); AppendStatus(buf);
+    return true;
+}
+
+// Identify: blink exactly one mouse zone white<->off for ~durationMs, all others
+// off, then restore every zone's real colour. Used to verify the zoneBit ->
+// physical-zone mapping against the SteelSeries DB names. Self-contained
+// (own hid_init/exit + deviceIoMutex); do not call while holding that mutex.
+bool IdentifyMouseZone(int idx, int durationMs = 3000) {
+    if (idx < 0 || idx >= (int)g_config.mouseZones.size()) return false;
+    std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
+    hid_init();
+    hid_device* dev = OpenRival600();
+    if (!dev) { hid_exit(); AppendStatus(L"[SteelSeries] Identify: device not found"); return false; }
+
+    uint8_t bit = (uint8_t)g_config.mouseZones[idx].hwIndex;
+    int elapsed = 0; bool on = true;
+    while (elapsed < durationMs) {
+        for (const auto& z : g_config.mouseZones) SSWriteZone(dev, (uint8_t)z.hwIndex, 0, 0, 0);
+        if (on) SSWriteZone(dev, bit, 255, 255, 255);
+        SSSave(dev);
+        Sleep(350); elapsed += 350; on = !on;
+    }
+    // restore real colours
+    for (const auto& z : g_config.mouseZones) {
+        uint8_t cr = z.color.r, cg = z.color.g, cb = z.color.b;
+        g_config.steelseries.ApplyCorrection(cr, cg, cb);
+        if (!z.enabled) { cr = cg = cb = 0; }
+        SSWriteZone(dev, (uint8_t)z.hwIndex, cr, cg, cb);
+    }
+    SSSave(dev);
+    hid_close(dev);
+    hid_exit();
+    AppendStatus(L"[SteelSeries] Identify done");
     return true;
 }
 
@@ -1364,8 +1583,15 @@ bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode, uint8_t b
     if (profile > 2) profile = 0;
     uint16_t profile_offset = profile * 0x40 + 0x01;
 
-    // Build keyboard config (18 bytes)
+    // Read existing keyboard profile first, then patch only known fields.
+    // This preserves unknown bytes that may store vendor-specific layout/profile state.
     uint8_t config[18] = {0};
+    int readRes = EVisionQuery(dev, 0x05, profile_offset, nullptr, 18, config);
+    if (readRes < 0) {
+        memset(config, 0, sizeof(config));
+    }
+
+    // Update known keyboard fields
     config[0] = mode;           // Mode
     config[1] = brightness;     // Brightness (0-4)
     config[2] = speed;          // Speed (0-5, inverted)
@@ -1379,10 +1605,6 @@ bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode, uint8_t b
     EVisionQuery(dev, 0x06, profile_offset, config, 18, nullptr);
     Sleep(10);
 
-    // Unlock Windows key
-    uint8_t unlock[2] = {0x00, 0x00};
-    EVisionQuery(dev, 0x06, 0x14, unlock, 2, nullptr);
-
     EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);  // End configure
     hid_close(dev);
 
@@ -1392,52 +1614,163 @@ bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode, uint8_t b
     return true;
 }
 
-bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode) {
-    hid_device* dev = nullptr;
-    struct hid_device_info* devs = hid_enumerate(Devices::EVISION_VID, Devices::EVISION_PID);
-    for (auto* cur = devs; cur; cur = cur->next) {
-        if (cur->usage_page == Devices::EVISION_USAGE_PAGE) {
-            dev = hid_open_path(cur->path);
-            break;
+// ---------------------------------------------------------------------------
+// EVision Edge LED helper – enumerates the HID device and logs the path
+// ---------------------------------------------------------------------------
+static hid_device* OpenEVisionEdgeDev(char* pathOut, int pathMax) {
+    // Try primary usage page 0xFF1C, then optional fallback 0xFF00
+    const uint16_t tryPages[] = {
+        Devices::EVISION_USAGE_PAGE, // 0xFF1C
+        0xFF00,                      // fallback for some firmware variants
+    };
+    for (uint16_t page : tryPages) {
+        struct hid_device_info* devs = hid_enumerate(
+            Devices::EVISION_VID, Devices::EVISION_PID);
+        for (auto* cur = devs; cur; cur = cur->next) {
+            if (cur->usage_page == page) {
+                hid_device* d = hid_open_path(cur->path);
+                if (d) {
+                    if (pathOut && pathMax > 0)
+                        snprintf(pathOut, pathMax, "%s", cur->path);
+                    hid_free_enumeration(devs);
+                    return d;
+                }
+            }
         }
+        hid_free_enumeration(devs);
     }
-    hid_free_enumeration(devs);
+    return nullptr;
+}
 
-    if (!dev) return false;
+bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode) {
+    char devPath[256] = "<not opened>";
+    hid_device* dev = OpenEVisionEdgeDev(devPath, sizeof(devPath));
 
-    EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);
-    Sleep(20);
+    if (!dev) {
+        AppendStatus(L"[EVision] Edge: device not found (VID=0x3299 PID=0x4E9F)");
+        LogDebug("[EVision] Edge: device not found – check USB connection");
+        return false;
+    }
 
-    // Apply edge color correction
+    char dbg[256];
+    snprintf(dbg, sizeof(dbg), "[EVision] Edge: opened path=%s mode=0x%02X rgb=%d,%d,%d",
+             devPath, mode, r, g, b);
+    LogDebug(dbg);
+
+    // ------------------------------------------------------------------
+    // Color correction – skip for OFF (force all zeros for certainty)
+    // ------------------------------------------------------------------
     uint8_t cr = r, cg = g, cb = b;
-    g_config.edge.ApplyCorrection(cr, cg, cb);
+    if (mode == EDGE_MODE_OFF) {
+        cr = cg = cb = 0;
+    } else {
+        g_config.edge.ApplyCorrection(cr, cg, cb);
+    }
 
+    // ------------------------------------------------------------------
+    // Begin configure session
+    // ------------------------------------------------------------------
+    int wakeRes = EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);
+    Sleep(25);
+    snprintf(dbg, sizeof(dbg), "[EVision] Edge: wake result=%d", wakeRes);
+    LogDebug(dbg);
+
+    // Read active profile (0-2); clamp to valid range
     uint8_t profile = 0;
     EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &profile);
     if (profile > 2) profile = 0;
-    
-    // We try multiple known offsets for Side LEDs
-    uint16_t offsets[] = { 
-        (uint16_t)(profile * 0x40 + 0x01 + 0x1a), // Standard Thyrus
-        (uint16_t)(profile * 0x40 + 0x01 + 0x15), // Some Omnis variants
-        (uint16_t)(0x1E)                          // Direct Edge ID
+    snprintf(dbg, sizeof(dbg), "[EVision] Edge: active profile=%d", (int)profile);
+    LogDebug(dbg);
+
+    // ------------------------------------------------------------------
+    // Build 10-byte edge payload
+    // Layout: [mode, brightness, speed, direction, random, R, G, B, colorOff, save]
+    // ------------------------------------------------------------------
+    uint8_t bright = (mode == EDGE_MODE_OFF) ? 0 : 4;  // 0-4 brightness steps
+    uint8_t speed  = 2;                                  // 0-5 speed
+    uint8_t edgeData[10] = {
+        mode,        // [0] effect mode
+        bright,      // [1] brightness
+        speed,       // [2] speed
+        0x00,        // [3] direction
+        0x00,        // [4] random color = off (use given color)
+        cr, cg, cb,  // [5][6][7] RGB
+        0x00,        // [8] color offset
+        0x01         // [9] commit/save to flash
     };
 
-    for (uint16_t off : offsets) {
-        uint8_t edgeData[10] = {mode, 0x04, 0x02, 0x00, 0x00, cr, cg, cb, 0x00, 0x01};
-        EVisionQuery(dev, 0x06, off, edgeData, 10, nullptr);
+    // ------------------------------------------------------------------
+    // Write to ALL known offset families across all 3 profile slots.
+    // Endorfy Thock / Thyrus / Omnis variants use different offsets.
+    // We try every known one and log each result so we can diagnose
+    // which offset actually controls the edge bar on this keyboard.
+    //
+    // Offset naming: "P<profile>+<hex offset within profile block>"
+    //   Profile base: profile * 0x40
+    //   Keyboard zone: profile_base + 0x01 (18 bytes → through +0x12)
+    //   Edge zone candidates (4 known chip revisions):
+    //     +0x12: right after keyboard block (18 + 1 byte = 0x13)
+    //     +0x15: Thyrus older revision
+    //     +0x18: Omnis TKL revision
+    //     +0x1A: Thyrus newer revision
+    //     +0x1D: Direct "edge slot" address (also expressed as 0x1E globally)
+    // ------------------------------------------------------------------
+    struct EdgeOffEntry { uint16_t off; const char* label; };
+    const EdgeOffEntry candidates[] = {
+        // ---- Profile 0 (base 0x00) ----
+        {0x13, "P0+0x12"},
+        {0x16, "P0+0x15"},
+        {0x19, "P0+0x18"},
+        {0x1B, "P0+0x1A"},
+        {0x1E, "P0-direct"},
+        // ---- Profile 1 (base 0x40) ----
+        {0x53, "P1+0x12"},
+        {0x56, "P1+0x15"},
+        {0x59, "P1+0x18"},
+        {0x5B, "P1+0x1A"},
+        {0x5E, "P1-direct"},
+        // ---- Profile 2 (base 0x80) ----
+        {0x93, "P2+0x12"},
+        {0x96, "P2+0x15"},
+        {0x99, "P2+0x18"},
+        {0x9B, "P2+0x1A"},
+        {0x9E, "P2-direct"},
+    };
+
+    int ok = 0;
+    for (const EdgeOffEntry& e : candidates) {
+        int res = EVisionQuery(dev, 0x06, e.off, edgeData, 10, nullptr);
+        snprintf(dbg, sizeof(dbg),
+                 "[EVision] Edge write off=0x%02X (%s) res=%d mode=0x%02X rgb=%d,%d,%d",
+                 (unsigned)e.off, e.label, res, (unsigned)mode,
+                 (unsigned)cr, (unsigned)cg, (unsigned)cb);
+        LogDebug(dbg);
+        Sleep(3);
+        if (res >= 0) ok++;
     }
 
-    uint8_t unlock[2] = {0x00, 0x00};
-    EVisionQuery(dev, 0x06, 0x14, unlock, 2, nullptr);
+    // ------------------------------------------------------------------
+    // End configure session
+    // ------------------------------------------------------------------
     EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
 
     hid_close(dev);
 
-    wchar_t buf[64];
-    swprintf(buf, 64, L"[EVision] Edge set (Mode: 0x%02X)", mode);
-    AppendStatus(buf);
-    return true;
+    snprintf(dbg, sizeof(dbg),
+             "[EVision] Edge done: profile=%d mode=0x%02X rgb=%d,%d,%d ok=%d/%d offsets",
+             (int)profile, (unsigned)mode,
+             (unsigned)cr, (unsigned)cg, (unsigned)cb,
+             ok, (int)(sizeof(candidates)/sizeof(candidates[0])));
+    LogDebug(dbg);
+
+    wchar_t wbuf[128];
+    swprintf(wbuf, 128,
+             L"[EVision] Edge: mode=0x%02X rgb=%d,%d,%d ok=%d/%d offsets",
+             mode, cr, cg, cb, ok,
+             (int)(sizeof(candidates)/sizeof(candidates[0])));
+    AppendStatus(wbuf);
+
+    return ok > 0;
 }
 
 //=============================================================================
@@ -1702,6 +2035,8 @@ void SystemRestart() {
 void FullHIDReset() {
     AppendStatus(L"Resetting all RGB devices...");
 
+    std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
+
     // === 1. Reset ASUS Aura (HID) ===
     hid_exit();
     Sleep(500);
@@ -1823,30 +2158,84 @@ void ApplyColors() {
         return;
     }
 
-    hid_init();
+    {
+        std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
 
-    // ASUS Aura - direct HID control
-    if (doAura) {
-        SetAsusAura(r, g, b);
-    }
-    if (doMouse) {
-        SetSteelSeries(r, g, b);
-    }
-    if (doKeyboard) {
-        SetEVisionKeyboard(r, g, b, kbMode, brightness, speed);
-    }
-    if (doEdge) {
-        SetEVisionEdge(r, g, b, edgeMode);
-    }
-    if (doRAM) {
-        SetGSkillRAM(r, g, b);
-    }
+        hid_init();
 
-    hid_exit();
+        // Deterministic adapter order
+        if (doAura) {
+            SetAsusAura(r, g, b);
+        }
+        if (doMouse) {
+            SetSteelSeries(r, g, b);
+        }
+        if (doKeyboard) {
+            SetEVisionKeyboard(r, g, b, kbMode, brightness, speed);
+        }
+        if (doEdge) {
+            SetEVisionEdge(r, g, b, edgeMode);
+        }
+        if (doRAM) {
+            SetGSkillRAM(r, g, b);
+        }
+
+        hid_exit();
+    }
 
     AppendStatus(L"=== Done! ===");
 
     g_state.applying = false;
+}
+
+void ApplyWorkerLoop() {
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(g_state.applyMutex);
+            g_state.applyCv.wait(lock, [] {
+                return !g_state.applyWorkerRunning || g_state.applyRequested;
+            });
+            if (!g_state.applyWorkerRunning) {
+                break;
+            }
+            g_state.applyRequested = false;
+        }
+        ApplyColors();
+    }
+}
+
+void StartApplyWorker() {
+    std::lock_guard<std::mutex> lock(g_state.applyMutex);
+    if (g_state.applyWorkerRunning) return;
+    g_state.applyWorkerRunning = true;
+    g_state.applyRequested = false;
+    g_state.applyWorker = std::thread(ApplyWorkerLoop);
+}
+
+void StopApplyWorker() {
+    {
+        std::lock_guard<std::mutex> lock(g_state.applyMutex);
+        g_state.applyWorkerRunning = false;
+        g_state.applyRequested = false;
+    }
+    g_state.applyCv.notify_all();
+    if (g_state.applyWorker.joinable()) {
+        g_state.applyWorker.join();
+    }
+}
+
+void RequestApplyColors(bool force) {
+    (void)force;
+    {
+        std::lock_guard<std::mutex> lock(g_state.applyMutex);
+        g_state.applyRequested = true;
+    }
+    g_state.applyCv.notify_one();
+}
+
+void CommitStateAndApply(bool forceApply) {
+    SaveSettings();
+    RequestApplyColors(forceApply);
 }
 
 //=============================================================================
@@ -1941,10 +2330,7 @@ void SetPresetColor(int r, int g, int b) {
         SetWindowTextW(g_state.hEditHex, hex);
     }
     // Save to settings
-    SaveSettings();
-    if (g_state.autoApply) {
-        std::thread(ApplyColors).detach();
-    }
+    CommitStateAndApply(false);
 }
 
 void UpdateAllControls() {
@@ -1962,17 +2348,14 @@ void UpdateAllControls() {
     if (g_state.hCheckEdge) SendMessage(g_state.hCheckEdge, BM_SETCHECK, g_state.enableEdge ? BST_CHECKED : BST_UNCHECKED, 0);
     if (g_state.hCheckAutostart) SendMessage(g_state.hCheckAutostart, BM_SETCHECK, g_state.autostart ? BST_CHECKED : BST_UNCHECKED, 0);
     if (g_state.hCheckMinimizeTray) SendMessage(g_state.hCheckMinimizeTray, BM_SETCHECK, g_state.minimizeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
-    if (g_state.hCheckAutoApply) SendMessage(g_state.hCheckAutoApply, BM_SETCHECK, g_state.autoApply ? BST_CHECKED : BST_UNCHECKED, 0);
     if (g_state.hSliderBrightness) SendMessage(g_state.hSliderBrightness, TBM_SETPOS, TRUE, g_state.brightness);
     if (g_state.hSliderSpeed) SendMessage(g_state.hSliderSpeed, TBM_SETPOS, TRUE, g_state.speed);
     
     // Sync Combos
-    if (g_state.hComboKbMode) SendMessage(g_state.hComboKbMode, CB_SETCURSEL, -1, 0); // Reset
     if (g_state.hComboKbMode) {
-        // Map mode to index if needed, for now assume index matches enum or set directly
-        SendMessage(g_state.hComboKbMode, CB_SETCURSEL, g_state.kbMode, 0);
+        SendMessage(g_state.hComboKbMode, CB_SETCURSEL, KbModeToIndex(g_state.kbMode), 0);
     }
-    if (g_state.hComboEdgeMode) SendMessage(g_state.hComboEdgeMode, CB_SETCURSEL, g_state.edgeMode, 0);
+    if (g_state.hComboEdgeMode) SendMessage(g_state.hComboEdgeMode, CB_SETCURSEL, EdgeModeToIndex(g_state.edgeMode), 0);
     
     // Sync Profile Combo selection
     if (g_state.hComboProfiles && !g_state.currentProfile.empty()) {
@@ -2037,80 +2420,280 @@ void ShowTrayMenu(HWND hWnd) {
 }
 
 //=============================================================================
-// CHANNEL SETTINGS DIALOG
+// CHANNEL SETTINGS DIALOG - Proper WndProc-based popup (not DialogBoxIndirect)
 //=============================================================================
 
-INT_PTR CALLBACK ChannelSettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+// Per-channel slider handles stored as window user data
+struct ChanDlgData {
+    HWND hSliderR[8];
+    HWND hSliderG[8];
+    HWND hSliderB[8];
+    HWND hValR[8];
+    HWND hValG[8];
+    HWND hValB[8];
+    HWND hParent;
+};
+
+static LRESULT CALLBACK ChanSettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    ChanDlgData* d = (ChanDlgData*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
+
     switch (msg) {
-    case WM_INITDIALOG: {
-        SetWindowTextW(hDlg, g_str->csTitle);
-        // Create channel correction controls
-        int y = 30;
+    case WM_CREATE: {
+        d = new ChanDlgData();
+        memset(d, 0, sizeof(ChanDlgData));
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)d);
+
+        HINSTANCE hInst = GetModuleHandleW(NULL);
+        // Column layout: label(90) | R-lbl(18)+slider(110)+val(32) | G | B
+        int colLabel = 10;
+        int colR = 104, colG = 268, colB = 432;
+        int sliderW = 110;
+        int y = 36;
+
+        // Header labels
+        CreateWindowW(L"STATIC", L"Channel",  WS_CHILD|WS_VISIBLE, colLabel, 10, 90,  18, hWnd, NULL, hInst, NULL);
+        CreateWindowW(L"STATIC", L"Red (0-200)",   WS_CHILD|WS_VISIBLE, colR,   10, 140, 18, hWnd, NULL, hInst, NULL);
+        CreateWindowW(L"STATIC", L"Green (0-200)", WS_CHILD|WS_VISIBLE, colG,   10, 140, 18, hWnd, NULL, hInst, NULL);
+        CreateWindowW(L"STATIC", L"Blue (0-200)",  WS_CHILD|WS_VISIBLE, colB,   10, 140, 18, hWnd, NULL, hInst, NULL);
+
         for (int i = 0; i < 8; i++) {
-            wchar_t label[64];
-            swprintf(label, 64, L"ASUS Ch %d", i);
-            CreateWindowW(L"STATIC", label, WS_CHILD | WS_VISIBLE, 10, y, 100, 20, hDlg, NULL, NULL, NULL);
+            wchar_t label[32];
+            swprintf(label, 32, L"ASUS Ch %d", i);
+            CreateWindowW(L"STATIC", label, WS_CHILD|WS_VISIBLE, colLabel, y+3, 90, 20, hWnd, NULL, hInst, NULL);
 
-            CreateWindowW(L"STATIC", L"R:", WS_CHILD | WS_VISIBLE, 115, y, 15, 20, hDlg, NULL, NULL, NULL);
-            HWND hR = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                130, y-2, 80, 25, hDlg, (HMENU)(INT_PTR)(7000 + i*3), NULL, NULL);
-            SendMessage(hR, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
-            SendMessage(hR, TBM_SETPOS, TRUE, g_config.aura[i].red_adjust);
+            // R
+            d->hSliderR[i] = CreateWindowW(TRACKBAR_CLASSW, L"",
+                WS_CHILD|WS_VISIBLE|WS_TABSTOP|TBS_HORZ|TBS_NOTICKS,
+                colR, y-1, sliderW, 24, hWnd, (HMENU)(INT_PTR)(7000+i*3), hInst, NULL);
+            SendMessage(d->hSliderR[i], TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
+            SendMessage(d->hSliderR[i], TBM_SETPOS,   TRUE, g_config.aura[i].red_adjust);
+            wchar_t v[8]; swprintf(v, 8, L"%d", g_config.aura[i].red_adjust);
+            d->hValR[i] = CreateWindowW(L"STATIC", v, WS_CHILD|WS_VISIBLE|SS_CENTER,
+                colR+sliderW+2, y+3, 30, 18, hWnd, NULL, hInst, NULL);
 
-            CreateWindowW(L"STATIC", L"G:", WS_CHILD | WS_VISIBLE, 215, y, 15, 20, hDlg, NULL, NULL, NULL);
-            HWND hG = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                230, y-2, 80, 25, hDlg, (HMENU)(INT_PTR)(7001 + i*3), NULL, NULL);
-            SendMessage(hG, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
-            SendMessage(hG, TBM_SETPOS, TRUE, g_config.aura[i].green_adjust);
+            // G
+            d->hSliderG[i] = CreateWindowW(TRACKBAR_CLASSW, L"",
+                WS_CHILD|WS_VISIBLE|WS_TABSTOP|TBS_HORZ|TBS_NOTICKS,
+                colG, y-1, sliderW, 24, hWnd, (HMENU)(INT_PTR)(7001+i*3), hInst, NULL);
+            SendMessage(d->hSliderG[i], TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
+            SendMessage(d->hSliderG[i], TBM_SETPOS,   TRUE, g_config.aura[i].green_adjust);
+            swprintf(v, 8, L"%d", g_config.aura[i].green_adjust);
+            d->hValG[i] = CreateWindowW(L"STATIC", v, WS_CHILD|WS_VISIBLE|SS_CENTER,
+                colG+sliderW+2, y+3, 30, 18, hWnd, NULL, hInst, NULL);
 
-            CreateWindowW(L"STATIC", L"B:", WS_CHILD | WS_VISIBLE, 315, y, 15, 20, hDlg, NULL, NULL, NULL);
-            HWND hB = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                330, y-2, 80, 25, hDlg, (HMENU)(INT_PTR)(7002 + i*3), NULL, NULL);
-            SendMessage(hB, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
-            SendMessage(hB, TBM_SETPOS, TRUE, g_config.aura[i].blue_adjust);
+            // B
+            d->hSliderB[i] = CreateWindowW(TRACKBAR_CLASSW, L"",
+                WS_CHILD|WS_VISIBLE|WS_TABSTOP|TBS_HORZ|TBS_NOTICKS,
+                colB, y-1, sliderW, 24, hWnd, (HMENU)(INT_PTR)(7002+i*3), hInst, NULL);
+            SendMessage(d->hSliderB[i], TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
+            SendMessage(d->hSliderB[i], TBM_SETPOS,   TRUE, g_config.aura[i].blue_adjust);
+            swprintf(v, 8, L"%d", g_config.aura[i].blue_adjust);
+            d->hValB[i] = CreateWindowW(L"STATIC", v, WS_CHILD|WS_VISIBLE|SS_CENTER,
+                colB+sliderW+2, y+3, 30, 18, hWnd, NULL, hInst, NULL);
+
             y += 30;
         }
-        CreateWindowW(L"STATIC", g_str->csHint, WS_CHILD | WS_VISIBLE, 10, y+5, 400, 20, hDlg, NULL, NULL, NULL);
-        CreateWindowW(L"BUTTON", g_str->csSaveClose, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            10, y+30, 120, 28, hDlg, (HMENU)IDOK, NULL, NULL);
-        CreateWindowW(L"BUTTON", g_str->csResetAll, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            140, y+30, 100, 28, hDlg, (HMENU)IDRETRY, NULL, NULL);
-        return TRUE;
-    }
-    case WM_COMMAND:
-        if (LOWORD(wParam) == IDOK) {
-            for (int i = 0; i < 8; i++) {
-                g_config.aura[i].red_adjust = (int)SendDlgItemMessage(hDlg, 7000+i*3, TBM_GETPOS, 0, 0);
-                g_config.aura[i].green_adjust = (int)SendDlgItemMessage(hDlg, 7001+i*3, TBM_GETPOS, 0, 0);
-                g_config.aura[i].blue_adjust = (int)SendDlgItemMessage(hDlg, 7002+i*3, TBM_GETPOS, 0, 0);
+
+        // Hint + buttons
+        int btnY = y + 8;
+        CreateWindowW(L"STATIC", g_str->csHint, WS_CHILD|WS_VISIBLE,
+            colLabel, btnY, 420, 20, hWnd, NULL, hInst, NULL);
+        HWND hBtnOk = CreateWindowW(L"BUTTON", g_str->csSaveClose,
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,
+            colLabel, btnY+28, 100, 30, hWnd, (HMENU)IDOK, hInst, NULL);
+        HWND hBtnReset = CreateWindowW(L"BUTTON", g_str->csResetAll,
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,
+            colLabel+110, btnY+28, 120, 30, hWnd, (HMENU)IDRETRY, hInst, NULL);
+        HWND hBtnCancel = CreateWindowW(L"BUTTON", L"Abbrechen",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,
+            colLabel+240, btnY+28, 100, 30, hWnd, (HMENU)IDCANCEL, hInst, NULL);
+
+        // Apply dark-theme font and subclassing to all child controls
+        HFONT hFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        EnumChildWindows(hWnd, [](HWND hChild, LPARAM lParam) -> BOOL {
+            SendMessage(hChild, WM_SETFONT, lParam, TRUE);
+            wchar_t cls[64];
+            GetClassNameW(hChild, cls, 64);
+            if (wcscmp(cls, L"Button") == 0 || wcscmp(cls, L"BUTTON") == 0) {
+                SetWindowSubclass(hChild, BtnCheckboxSubclassProc, 1, 0);
+                // Remove native theme so our custom WM_PAINT takes full control
+                SetWindowTheme(hChild, L"", L"");
+                InvalidateRect(hChild, NULL, TRUE);
+            } else if (wcscmp(cls, L"Static") == 0 || wcscmp(cls, L"STATIC") == 0) {
+                SetWindowSubclass(hChild, StaticSubclassProc, 1, 0);
+                InvalidateRect(hChild, NULL, TRUE);
+            } else if (wcscmp(cls, L"msctls_trackbar32") == 0) {
+                SetWindowTheme(hChild, L"DarkMode_Explorer", NULL);
             }
-            g_config.Save();
-            EndDialog(hDlg, IDOK);
-        } else if (LOWORD(wParam) == IDRETRY) {
+            return TRUE;
+        }, (LPARAM)hFont);
+
+        (void)hBtnOk; (void)hBtnReset; (void)hBtnCancel;
+        return 0;
+    }
+
+    case WM_HSCROLL: {
+        if (!d) break;
+        HWND hSlider = (HWND)lParam;
+        for (int i = 0; i < 8; i++) {
+            if (hSlider == d->hSliderR[i]) {
+                int val = (int)SendMessage(hSlider, TBM_GETPOS, 0, 0);
+                g_config.aura[i].red_adjust = val;
+                wchar_t v[8]; swprintf(v, 8, L"%d", val);
+                SetWindowTextW(d->hValR[i], v);
+            } else if (hSlider == d->hSliderG[i]) {
+                int val = (int)SendMessage(hSlider, TBM_GETPOS, 0, 0);
+                g_config.aura[i].green_adjust = val;
+                wchar_t v[8]; swprintf(v, 8, L"%d", val);
+                SetWindowTextW(d->hValG[i], v);
+            } else if (hSlider == d->hSliderB[i]) {
+                int val = (int)SendMessage(hSlider, TBM_GETPOS, 0, 0);
+                g_config.aura[i].blue_adjust = val;
+                wchar_t v[8]; swprintf(v, 8, L"%d", val);
+                SetWindowTextW(d->hValB[i], v);
+            }
+        }
+        break;
+    }
+
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        if (id == IDOK) {
+            // Values already updated live via WM_HSCROLL; just save & close
+            SaveSettings();
+            HWND hPar = d ? d->hParent : GetWindow(hWnd, GW_OWNER);
+            if (d) { delete d; SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0); d = nullptr; }
+            if (hPar) { EnableWindow(hPar, TRUE); SetForegroundWindow(hPar); }
+            DestroyWindow(hWnd);
+        } else if (id == IDRETRY) {
+            if (!d) break;
             for (int i = 0; i < 8; i++) {
                 g_config.aura[i].red_adjust = 100;
                 g_config.aura[i].green_adjust = 100;
                 g_config.aura[i].blue_adjust = 100;
-                SendDlgItemMessage(hDlg, 7000+i*3, TBM_SETPOS, TRUE, 100);
-                SendDlgItemMessage(hDlg, 7001+i*3, TBM_SETPOS, TRUE, 100);
-                SendDlgItemMessage(hDlg, 7002+i*3, TBM_SETPOS, TRUE, 100);
+                SendMessage(d->hSliderR[i], TBM_SETPOS, TRUE, 100);
+                SendMessage(d->hSliderG[i], TBM_SETPOS, TRUE, 100);
+                SendMessage(d->hSliderB[i], TBM_SETPOS, TRUE, 100);
+                SetWindowTextW(d->hValR[i], L"100");
+                SetWindowTextW(d->hValG[i], L"100");
+                SetWindowTextW(d->hValB[i], L"100");
             }
+        } else if (id == IDCANCEL) {
+            HWND hPar = d ? d->hParent : GetWindow(hWnd, GW_OWNER);
+            if (d) { delete d; SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0); d = nullptr; }
+            if (hPar) { EnableWindow(hPar, TRUE); SetForegroundWindow(hPar); }
+            DestroyWindow(hWnd);
         }
         break;
-    case WM_CLOSE:
-        EndDialog(hDlg, IDCANCEL);
+    }
+
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, RGB(220, 225, 235));
+        SetBkMode(hdc, TRANSPARENT);
+        static HBRUSH hStaticBrush = CreateSolidBrush(RGB(30, 34, 46));
+        return (LRESULT)hStaticBrush;
+    }
+
+    // WM_CTLCOLORBTN: return transparent brush so BtnCheckboxSubclassProc
+    // can draw the full button background via WM_ERASEBKGND / WM_PAINT.
+    // Native buttons only respect this if they are owner-draw; our subclass
+    // handles painting itself, so we just supply the background brush.
+    case WM_CTLCOLORBTN: {
+        HDC hdc = (HDC)wParam;
+        SetBkMode(hdc, TRANSPARENT);
+        static HBRUSH hBtnBrush = CreateSolidBrush(RGB(30, 34, 46));
+        return (LRESULT)hBtnBrush;
+    }
+
+    case WM_PRINTCLIENT: {
+        // BtnCheckboxSubclassProc calls WM_PRINTCLIENT on parent to get bg
+        HDC hdc = (HDC)wParam;
+        RECT rc; GetClientRect(hWnd, &rc);
+        HBRUSH hBr = CreateSolidBrush(RGB(30, 34, 46));
+        FillRect(hdc, &rc, hBr);
+        DeleteObject(hBr);
+        return 1;
+    }
+
+    case WM_ERASEBKGND: {
+        HDC hdc = (HDC)wParam;
+        RECT rc; GetClientRect(hWnd, &rc);
+        HBRUSH hBr = CreateSolidBrush(RGB(30, 34, 46));
+        FillRect(hdc, &rc, hBr);
+        DeleteObject(hBr);
+        return 1;
+    }
+
+    case WM_DESTROY: {
+        HWND hParent = GetWindow(hWnd, GW_OWNER);
+        if (d) { delete d; SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0); }
+        if (hParent) { EnableWindow(hParent, TRUE); SetForegroundWindow(hParent); }
         break;
     }
-    return FALSE;
+
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE) {
+            HWND hParent = GetWindow(hWnd, GW_OWNER);
+            if (d) { delete d; SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0); }
+            if (hParent) { EnableWindow(hParent, TRUE); SetForegroundWindow(hParent); }
+            DestroyWindow(hWnd);
+        }
+        break;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-void ShowChannelSettingsDialog(HWND hWnd) {
-    // Create a dialog template in memory
-    BYTE dlgTemplate[512] = {0};
-    DLGTEMPLATE* pDlg = (DLGTEMPLATE*)dlgTemplate;
-    pDlg->style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
-    pDlg->cx = 230; pDlg->cy = 200;
-    DialogBoxIndirectW(GetModuleHandle(NULL), pDlg, hWnd, ChannelSettingsDlgProc);
+void ShowChannelSettingsDialog(HWND hParent) {
+    static bool s_classRegistered = false;
+    if (!s_classRegistered) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc   = ChanSettingsWndProc;
+        wc.hInstance     = GetModuleHandleW(NULL);
+        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)GetStockObject(NULL_BRUSH);
+        wc.lpszClassName = L"ChanSettingsDlg";
+        RegisterClassW(&wc);
+        s_classRegistered = true;
+    }
+
+    // Window size: 8 rows × 30px + header(36) + buttons(70) + padding(20) = ~436 tall
+    // Width: colB(432) + slider(110) + val(32) + margin(16) = ~590
+    int dlgW = 596, dlgH = 450;
+
+    // Center over parent
+    RECT pr; GetWindowRect(hParent, &pr);
+    int cx = pr.left + (pr.right - pr.left - dlgW) / 2;
+    int cy = pr.top  + (pr.bottom - pr.top - dlgH) / 2;
+
+    HWND hDlg = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_APPWINDOW,
+        L"ChanSettingsDlg",
+        g_str->csTitle,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        cx, cy, dlgW, dlgH,
+        hParent, NULL, GetModuleHandleW(NULL), NULL);
+
+    if (!hDlg) return;
+
+    // Store parent ref in dialog data after WM_CREATE sets GWLP_USERDATA
+    ChanDlgData* d = (ChanDlgData*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+    if (d) d->hParent = hParent;
+
+    // Modal: disable parent, run message loop
+    EnableWindow(hParent, FALSE);
+
+    MSG msg;
+    while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0)) {
+        if (!IsDialogMessageW(hDlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(hParent, TRUE);
+    SetForegroundWindow(hParent);
 }
 
 //=============================================================================
@@ -2150,6 +2733,12 @@ AsusTestDialog* g_asusTest = nullptr;
 // Test a single ASUS channel with a specific color
 // 'channel' is the UI index (0, 1, 2...), we map it to the actual direct_channel
 bool TestAsusChannel(int channel, uint8_t r, uint8_t g, uint8_t b) {
+    std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
+
+    if (channel < 0 || channel >= AURA_CONFIG_CHANNELS) {
+        return false;
+    }
+
     hid_init();
     hid_device* dev = OpenAsusAura();
     if (!dev) {
@@ -2166,11 +2755,12 @@ bool TestAsusChannel(int channel, uint8_t r, uint8_t g, uint8_t b) {
         directChannel = g_asusHwConfig.channels[channel].directChannel;
     }
 
-    SetAsusChannel(dev, directChannel, ledCount, r, g, b);
+    int setCount = 0;
+    ApplyAsusChannelColor(dev, channel, directChannel, ledCount, r, g, b, true, false, setCount);
 
     hid_close(dev);
     hid_exit();
-    return true;
+    return (setCount > 0);
 }
 
 // Color preview subclass
@@ -2569,7 +3159,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         // R slider row
         CreateWindowW(L"STATIC", g_str->red, WS_CHILD | WS_VISIBLE | SS_RIGHT, labelX, row1Y+2, labelW, 18, hWnd, NULL, hInst, NULL);
-        g_state.hSliderR = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+        g_state.hSliderR = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
             sliderX, row1Y, sliderW, 20, hWnd, (HMENU)ID_SLIDER_R, hInst, NULL);
         SendMessage(g_state.hSliderR, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
         SendMessage(g_state.hSliderR, TBM_SETPOS, TRUE, g_state.red);
@@ -2583,7 +3173,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         // G slider row
         CreateWindowW(L"STATIC", g_str->green, WS_CHILD | WS_VISIBLE | SS_RIGHT, labelX, row2Y+2, labelW, 18, hWnd, NULL, hInst, NULL);
-        g_state.hSliderG = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+        g_state.hSliderG = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
             sliderX, row2Y, sliderW, 20, hWnd, (HMENU)ID_SLIDER_G, hInst, NULL);
         SendMessage(g_state.hSliderG, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
         SendMessage(g_state.hSliderG, TBM_SETPOS, TRUE, g_state.green);
@@ -2597,7 +3187,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         // B slider row
         CreateWindowW(L"STATIC", g_str->blue, WS_CHILD | WS_VISIBLE | SS_RIGHT, labelX, row3Y+2, labelW, 18, hWnd, NULL, hInst, NULL);
-        g_state.hSliderB = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+        g_state.hSliderB = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
             sliderX, row3Y, sliderW, 20, hWnd, (HMENU)ID_SLIDER_B, hInst, NULL);
         SendMessage(g_state.hSliderB, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
         SendMessage(g_state.hSliderB, TBM_SETPOS, TRUE, g_state.blue);
@@ -2624,7 +3214,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         };
         for (int i = 0; i < 7; i++) {
             int currentPbw = pbw + (i < rem ? 1 : 0);
-            CreateWindowW(L"BUTTON", presets[i].label, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            CreateWindowW(L"BUTTON", presets[i].label, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                 px, row5Y, currentPbw, BTN_H, hWnd, (HMENU)(INT_PTR)presets[i].id, hInst, NULL);
             px += currentPbw + BTN_GAP;
         }
@@ -2641,29 +3231,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Keyboard mode combo
         CreateWindowW(L"STATIC", g_str->keyboardEffect, WS_CHILD | WS_VISIBLE, gx, gy+3, 70, 18, hWnd, NULL, hInst, NULL);
         g_state.hComboKbMode = CreateWindowW(L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
             gx+75, gy, MAX_COMBO_W, 200, hWnd, (HMENU)ID_COMBO_KB_MODE, hInst, NULL);
         const wchar_t* kbModes[] = {g_str->modeStatic, g_str->modeBreathing, L"Spectrum", L"Wave Short",
             L"Wave Long", L"Color Wheel", g_str->modeReactive, L"Ripple", L"Starlight", g_str->modeRainbow, L"Hurricane"};
         for (int i = 0; i < 11; i++) SendMessageW(g_state.hComboKbMode, CB_ADDSTRING, 0, (LPARAM)kbModes[i]);
-        SendMessage(g_state.hComboKbMode, CB_SETCURSEL, 0, 0);
+        SendMessage(g_state.hComboKbMode, CB_SETCURSEL, KbModeToIndex(g_state.kbMode), 0);
         AddTooltip(g_state.hTooltip, g_state.hComboKbMode, g_str->tipKeyboardMode);
 
         // Edge mode combo
         int edgeX = gx + 75 + MAX_COMBO_W + 20;
         CreateWindowW(L"STATIC", g_str->edgeEffect, WS_CHILD | WS_VISIBLE, edgeX, gy+3, 50, 18, hWnd, NULL, hInst, NULL);
         g_state.hComboEdgeMode = CreateWindowW(L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
             edgeX+55, gy, MAX_COMBO_W, 200, hWnd, (HMENU)ID_COMBO_EDGE_MODE, hInst, NULL);
         const wchar_t* edgeModes[] = {g_str->edgeStatic, g_str->edgeBreathing, g_str->edgeWave, g_str->edgeSpectrum, g_str->edgeOff};
         for (int i = 0; i < 5; i++) SendMessageW(g_state.hComboEdgeMode, CB_ADDSTRING, 0, (LPARAM)edgeModes[i]);
-        SendMessage(g_state.hComboEdgeMode, CB_SETCURSEL, 0, 0);
+        SendMessage(g_state.hComboEdgeMode, CB_SETCURSEL, EdgeModeToIndex(g_state.edgeMode), 0);
         AddTooltip(g_state.hTooltip, g_state.hComboEdgeMode, g_str->tipEdgeMode);
 
         // Brightness slider
         int effY2 = gy + CTRL_H + ITEM_SPACING + 15;
         CreateWindowW(L"STATIC", g_str->brightness, WS_CHILD | WS_VISIBLE, gx, effY2+2, 70, 18, hWnd, NULL, hInst, NULL);
-        g_state.hSliderBrightness = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+        g_state.hSliderBrightness = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
             gx+75, effY2, 150, 20, hWnd, (HMENU)ID_SLIDER_BRIGHTNESS, hInst, NULL);
         SendMessage(g_state.hSliderBrightness, TBM_SETRANGE, TRUE, MAKELPARAM(0, 4));
         SendMessage(g_state.hSliderBrightness, TBM_SETPOS, TRUE, g_state.brightness);
@@ -2674,7 +3264,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         // Speed slider
         CreateWindowW(L"STATIC", g_str->speed, WS_CHILD | WS_VISIBLE, edgeX, effY2+2, 50, 18, hWnd, NULL, hInst, NULL);
-        g_state.hSliderSpeed = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+        g_state.hSliderSpeed = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
             edgeX+55, effY2, 150, 20, hWnd, (HMENU)ID_SLIDER_SPEED, hInst, NULL);
         SendMessage(g_state.hSliderSpeed, TBM_SETRANGE, TRUE, MAKELPARAM(0, 5));
         SendMessage(g_state.hSliderSpeed, TBM_SETPOS, TRUE, g_state.speed);
@@ -2697,15 +3287,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // expanded client areas (from Modern UI glow) from overlapping.
         int ck_width = 105;
         int ck_step = 120;
-        g_state.hCheckAura = CreateWindowW(L"BUTTON", L"Aura", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        g_state.hCheckAura = CreateWindowW(L"BUTTON", L"Aura", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             gx, gy, ck_width, 20, hWnd, (HMENU)ID_CHECK_AURA, hInst, NULL);
-        g_state.hCheckMouse = CreateWindowW(L"BUTTON", L"Mouse", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        g_state.hCheckMouse = CreateWindowW(L"BUTTON", L"Mouse", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             gx+ck_step, gy, ck_width, 20, hWnd, (HMENU)ID_CHECK_MOUSE, hInst, NULL);
-        g_state.hCheckKeyboard = CreateWindowW(L"BUTTON", L"Keyboard", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        g_state.hCheckKeyboard = CreateWindowW(L"BUTTON", L"Keyboard", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             gx+ck_step*2, gy, ck_width, 20, hWnd, (HMENU)ID_CHECK_KEYBOARD, hInst, NULL);
-        g_state.hCheckRAM = CreateWindowW(L"BUTTON", L"RAM", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        g_state.hCheckRAM = CreateWindowW(L"BUTTON", L"RAM", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             gx+ck_step*3, gy, ck_width, 20, hWnd, (HMENU)ID_CHECK_RAM, hInst, NULL);
-        g_state.hCheckEdge = CreateWindowW(L"BUTTON", L"Edge", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        g_state.hCheckEdge = CreateWindowW(L"BUTTON", L"Edge", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             gx+ck_step*4, gy, ck_width, 20, hWnd, (HMENU)ID_CHECK_EDGE, hInst, NULL);
         SendMessage(g_state.hCheckAura, BM_SETCHECK, g_state.enableAura ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessage(g_state.hCheckMouse, BM_SETCHECK, g_state.enableMouse ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -2715,11 +3305,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         // Utility buttons (second row)
         int btnY2 = gy + 24;
-        CreateWindowW(L"BUTTON", g_str->channelCorrection, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        CreateWindowW(L"BUTTON", g_str->channelCorrection, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             gx, btnY2, 100, BTN_H, hWnd, (HMENU)ID_BTN_CHANNEL_SETTINGS, hInst, NULL);
-        CreateWindowW(L"BUTTON", L"ASUS Test", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        CreateWindowW(L"BUTTON", L"ASUS Test", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             gx+106, btnY2, 80, BTN_H, hWnd, (HMENU)ID_BTN_ASUS_TEST, hInst, NULL);
-        CreateWindowW(L"BUTTON", L"HID Reset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        CreateWindowW(L"BUTTON", L"HID Reset", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             gx+192, btnY2, 80, BTN_H, hWnd, (HMENU)ID_BTN_HID_RESET, hInst, NULL);
         curY = g_cards[2].rect.bottom + GROUP_MARGIN;
 
@@ -2741,34 +3331,31 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         CreateWindowW(L"STATIC", g_str->profile, WS_CHILD | WS_VISIBLE, profX, gy+3, profLabelW, 18, hWnd, NULL, hInst, NULL);
         profX += profLabelW + 5;
         g_state.hComboProfiles = CreateWindowW(L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | WS_VSCROLL,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWN | WS_VSCROLL,
             profX, gy, profComboW, 200, hWnd, (HMENU)ID_COMBO_PROFILES, hInst, NULL);
         profX += profComboW + profGap;
-        CreateWindowW(L"BUTTON", g_str->save, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        CreateWindowW(L"BUTTON", g_str->save, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             profX, gy, profBtnW, BTN_H, hWnd, (HMENU)ID_BTN_SAVE_PROFILE, hInst, NULL);
         profX += profBtnW + profGap;
-        CreateWindowW(L"BUTTON", g_str->load, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        CreateWindowW(L"BUTTON", g_str->load, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             profX, gy, profBtnW, BTN_H, hWnd, (HMENU)ID_BTN_LOAD_PROFILE, hInst, NULL);
 
         // Settings checkboxes row
         int setY = gy + CTRL_H + ITEM_SPACING;
-        g_state.hCheckAutostart = CreateWindowW(L"BUTTON", g_str->autostart, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        g_state.hCheckAutostart = CreateWindowW(L"BUTTON", g_str->autostart, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             gx, setY, ck_width, 20, hWnd, (HMENU)ID_CHECK_AUTOSTART, hInst, NULL);
-        g_state.hCheckMinimizeTray = CreateWindowW(L"BUTTON", g_str->tray, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        g_state.hCheckMinimizeTray = CreateWindowW(L"BUTTON", g_str->tray, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             gx+ck_step, setY, ck_width, 20, hWnd, (HMENU)ID_CHECK_MINIMIZE_TRAY, hInst, NULL);
-        g_state.hCheckAutoApply = CreateWindowW(L"BUTTON", g_str->autoApply, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            gx+ck_step*2, setY, ck_width, 20, hWnd, (HMENU)ID_CHECK_AUTO_APPLY, hInst, NULL);
         SendMessage(g_state.hCheckAutostart, BM_SETCHECK, g_state.autostart ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessage(g_state.hCheckMinimizeTray, BM_SETCHECK, g_state.minimizeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
-        SendMessage(g_state.hCheckAutoApply, BM_SETCHECK, g_state.autoApply ? BST_CHECKED : BST_UNCHECKED, 0);
         curY = g_cards[3].rect.bottom + GROUP_MARGIN;
 
         // ============= ACTION BUTTONS =============
-        CreateWindowW(L"BUTTON", g_str->apply, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        CreateWindowW(L"BUTTON", g_str->apply, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
             MARGIN, curY, MAX_BUTTON_W + 20, BTN_H + 4, hWnd, (HMENU)ID_BTN_APPLY, hInst, NULL);
-        CreateWindowW(L"BUTTON", g_str->theme, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        CreateWindowW(L"BUTTON", g_str->theme, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             MARGIN + MAX_BUTTON_W + 30, curY, 65, BTN_H, hWnd, (HMENU)ID_BTN_THEME, hInst, NULL);
-        CreateWindowW(L"BUTTON", L"DE/EN", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        CreateWindowW(L"BUTTON", L"DE/EN", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             MARGIN + MAX_BUTTON_W + 100, curY, 55, BTN_H, hWnd, (HMENU)ID_BTN_LANG, hInst, NULL);
         curY += BTN_H + 8;
 
@@ -2790,8 +3377,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             bool expand = false;
             
             if (wcscmp(className, L"Button") == 0 || wcscmp(className, L"BUTTON") == 0) {
+                LONG style = GetWindowLong(hChild, GWL_STYLE);
+                if ((style & BS_TYPEMASK) == BS_AUTOCHECKBOX) {
+                    SetWindowLong(hChild, GWL_STYLE, (style & ~BS_TYPEMASK) | BS_CHECKBOX);
+                    SetWindowPos(hChild, NULL, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                }
                 SetWindowSubclass(hChild, BtnCheckboxSubclassProc, 1, 0);
-                expand = true;
+                expand = false;
             } else if (wcscmp(className, L"ComboBox") == 0 || wcscmp(className, L"COMBOBOX") == 0) {
                 SetWindowSubclass(hChild, ComboSubclassProc, 1, 0);
                 // Do NOT expand comboboxes - glow expansion breaks native dropdown functionality
@@ -2813,10 +3406,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     SetWindowSubclass(hChild, StaticSubclassProc, 1, 0);
                 }
             } else if (wcscmp(className, L"msctls_trackbar32") == 0 || wcscmp(className, L"Trackbar") == 0) {
-                // Slider expansion handled exclusively to 10px instead of 5px
-                RECT rcC; GetWindowRect(hChild, &rcC);
-                MapWindowPoints(HWND_DESKTOP, GetParent(hChild), (LPPOINT)&rcC, 2);
-                SetWindowPos(hChild, NULL, rcC.left - 10, rcC.top - 10, (rcC.right - rcC.left) + 20, (rcC.bottom - rcC.top) + 20, SWP_NOZORDER);
+                // Keep trackbar geometry unchanged to avoid overlap/input blocking
                 expand = false;
             }
             
@@ -2830,16 +3420,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return TRUE;
         }, (LPARAM)hFont);
 
-        // Load saved settings into controls
-        g_config.Load();
+        // Settings are already loaded via LoadAppSettings() in WinMain
         RefreshProfileList();
         UpdateSliders();
         UpdatePreview();
 
         // Load saved profile if any
         if (!g_state.lastProfile.empty()) {
-            LoadProfile(g_state.lastProfile);
-            UpdateAllControls();
+            if (LoadProfile(g_state.lastProfile)) {
+                UpdateAllControls();
+            }
         }
 
         // Register global hotkeys
@@ -2852,9 +3442,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Final sync of all UI elements to the loaded config
         UpdateAllControls();
 
+        // Start centralized apply worker queue
+        StartApplyWorker();
+
         // Apply colors on startup (unless --no-apply)
         if (!g_skipApplyOnStart) {
-            std::thread(ApplyColors).detach();
+            RequestApplyColors(true);
         }
         LogDebug("WM_CREATE finished");
         AppendStatus(L"OneClickRGB started");
@@ -2897,6 +3490,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_HSCROLL: {
         HWND hSlider = (HWND)lParam;
+        UINT scrollCode = LOWORD(wParam);
         if (hSlider == g_state.hSliderR) {
             g_state.red = (uint8_t)SendMessage(hSlider, TBM_GETPOS, 0, 0);
         } else if (hSlider == g_state.hSliderG) {
@@ -2908,7 +3502,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         } else if (hSlider == g_state.hSliderSpeed) {
             g_state.speed = (uint8_t)SendMessage(hSlider, TBM_GETPOS, 0, 0);
         }
-        UpdateSliders();
+        if (g_state.hLabelRVal) {
+            wchar_t buf[8]; swprintf(buf, 8, L"%d", g_state.red);
+            SetWindowTextW(g_state.hLabelRVal, buf);
+        }
+        if (g_state.hLabelGVal) {
+            wchar_t buf[8]; swprintf(buf, 8, L"%d", g_state.green);
+            SetWindowTextW(g_state.hLabelGVal, buf);
+        }
+        if (g_state.hLabelBVal) {
+            wchar_t buf[8]; swprintf(buf, 8, L"%d", g_state.blue);
+            SetWindowTextW(g_state.hLabelBVal, buf);
+        }
         UpdatePreview();
         // Update hex display
         if (g_state.hEditHex) {
@@ -2916,10 +3521,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             swprintf(hex, 10, L"#%02X%02X%02X", g_state.red, g_state.green, g_state.blue);
             SetWindowTextW(g_state.hEditHex, hex);
         }
+        // Persist immediately when drag ends or auto-apply is disabled
+        if (!g_state.autoApply || scrollCode == TB_ENDTRACK || scrollCode == TB_THUMBPOSITION || scrollCode == SB_ENDSCROLL) {
+            SaveSettings();
+        }
         // Live preview if enabled
         if (g_state.autoApply) {
             KillTimer(hWnd, ID_TIMER_DEBOUNCE);
-            SetTimer(hWnd, ID_TIMER_DEBOUNCE, 300, NULL);
+            SetTimer(hWnd, ID_TIMER_DEBOUNCE, APPLY_DEBOUNCE_MS, NULL);
         }
         break;
     }
@@ -2970,11 +3579,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_HOTKEY:
         switch (wParam) {
-        case ID_HOTKEY_BLUE: SetPresetColor(0, 34, 255); std::thread(ApplyColors).detach(); break;
-        case ID_HOTKEY_RED: SetPresetColor(255, 0, 0); std::thread(ApplyColors).detach(); break;
-        case ID_HOTKEY_GREEN: SetPresetColor(0, 255, 0); std::thread(ApplyColors).detach(); break;
-        case ID_HOTKEY_WHITE: SetPresetColor(255, 255, 255); std::thread(ApplyColors).detach(); break;
-        case ID_HOTKEY_OFF: SetPresetColor(0, 0, 0); std::thread(ApplyColors).detach(); break;
+        case ID_HOTKEY_BLUE: SetPresetColor(0, 34, 255); RequestApplyColors(true); break;
+        case ID_HOTKEY_RED: SetPresetColor(255, 0, 0); RequestApplyColors(true); break;
+        case ID_HOTKEY_GREEN: SetPresetColor(0, 255, 0); RequestApplyColors(true); break;
+        case ID_HOTKEY_WHITE: SetPresetColor(255, 255, 255); RequestApplyColors(true); break;
+        case ID_HOTKEY_OFF: SetPresetColor(0, 0, 0); RequestApplyColors(true); break;
         }
         break;
 
@@ -2983,10 +3592,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int code = HIWORD(wParam);
 
         if (id == ID_BTN_APPLY) {
-            ApplyColors();  // Direct call, no thread
+            CommitStateAndApply(true);
         }
         else if (id == ID_BTN_PICK_COLOR) {
             PickColor();
+            CommitStateAndApply(false);
         }
         else if (id == ID_EDIT_HEX && code == EN_KILLFOCUS) {
             wchar_t hex[16];
@@ -2995,30 +3605,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             UpdatePreview();
             UpdateSliders();
             // Hex-Änderung speichern
-            SaveSettings();
+            CommitStateAndApply(false);
         }
         else if (id == ID_COMBO_KB_MODE && code == CBN_SELCHANGE) {
             int sel = (int)SendMessage(g_state.hComboKbMode, CB_GETCURSEL, 0, 0);
-            uint8_t modes[] = {KB_MODE_STATIC, KB_MODE_BREATHING, KB_MODE_SPECTRUM, KB_MODE_WAVE_SHORT,
-                               KB_MODE_WAVE_LONG, KB_MODE_COLOR_WHEEL, KB_MODE_REACTIVE, KB_MODE_RIPPLE,
-                               KB_MODE_STARLIGHT, KB_MODE_RAINBOW, KB_MODE_HURRICANE};
-            if (sel >= 0 && sel < 11) {
-                g_state.kbMode = modes[sel];
-                SaveSettings();
+            if (sel >= 0 && sel < KB_MODE_COUNT) {
+                g_state.kbMode = IndexToKbMode(sel);
+                CommitStateAndApply(false);
             }
         }
         else if (id == ID_COMBO_EDGE_MODE && code == CBN_SELCHANGE) {
             int sel = (int)SendMessage(g_state.hComboEdgeMode, CB_GETCURSEL, 0, 0);
-            if (sel >= 0 && sel <= 5) {
-                g_state.edgeMode = sel;
-                SaveSettings();
+            if (sel >= 0 && sel < EDGE_MODE_COUNT) {
+                g_state.edgeMode = IndexToEdgeMode(sel);
+                CommitStateAndApply(false);
             }
         }
-        else if (id == ID_CHECK_AURA) { g_state.enableAura = (SendMessage(g_state.hCheckAura, BM_GETCHECK, 0, 0) == BST_CHECKED); SaveSettings(); }
-        else if (id == ID_CHECK_MOUSE) { g_state.enableMouse = (SendMessage(g_state.hCheckMouse, BM_GETCHECK, 0, 0) == BST_CHECKED); SaveSettings(); }
-        else if (id == ID_CHECK_KEYBOARD) { g_state.enableKeyboard = (SendMessage(g_state.hCheckKeyboard, BM_GETCHECK, 0, 0) == BST_CHECKED); SaveSettings(); }
-        else if (id == ID_CHECK_RAM) { g_state.enableRAM = (SendMessage(g_state.hCheckRAM, BM_GETCHECK, 0, 0) == BST_CHECKED); SaveSettings(); }
-        else if (id == ID_CHECK_EDGE) { g_state.enableEdge = (SendMessage(g_state.hCheckEdge, BM_GETCHECK, 0, 0) == BST_CHECKED); SaveSettings(); }
+        else if (id == ID_CHECK_AURA) { g_state.enableAura = (SendMessage(g_state.hCheckAura, BM_GETCHECK, 0, 0) == BST_CHECKED); CommitStateAndApply(false); }
+        else if (id == ID_CHECK_MOUSE) { g_state.enableMouse = (SendMessage(g_state.hCheckMouse, BM_GETCHECK, 0, 0) == BST_CHECKED); CommitStateAndApply(false); }
+        else if (id == ID_CHECK_KEYBOARD) { g_state.enableKeyboard = (SendMessage(g_state.hCheckKeyboard, BM_GETCHECK, 0, 0) == BST_CHECKED); CommitStateAndApply(false); }
+        else if (id == ID_CHECK_RAM) { g_state.enableRAM = (SendMessage(g_state.hCheckRAM, BM_GETCHECK, 0, 0) == BST_CHECKED); CommitStateAndApply(false); }
+        else if (id == ID_CHECK_EDGE) { g_state.enableEdge = (SendMessage(g_state.hCheckEdge, BM_GETCHECK, 0, 0) == BST_CHECKED); CommitStateAndApply(false); }
         else if (id == ID_CHECK_AUTOSTART) {
             g_state.autostart = (SendMessage(g_state.hCheckAutostart, BM_GETCHECK, 0, 0) == BST_CHECKED);
             SetAutoStart(g_state.autostart);
@@ -3028,15 +3635,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_state.minimizeToTray = (SendMessage(g_state.hCheckMinimizeTray, BM_GETCHECK, 0, 0) == BST_CHECKED);
             SaveSettings();
         }
-        else if (id == ID_CHECK_AUTO_APPLY) {
-            g_state.autoApply = (SendMessage(g_state.hCheckAutoApply, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            SaveSettings();
-        }
         else if (id == ID_BTN_CHANNEL_SETTINGS) {
             // Open integrated Channel Settings dialog
+            // Dialog commits through SaveSettings() on OK
             ShowChannelSettingsDialog(hWnd);
-            g_config.Load();  // Reload after dialog closes
             AppendStatus(L"Channel corrections updated");
+            CommitStateAndApply(false);
         }
         else if (id == ID_BTN_ASUS_TEST) {
             // Open ASUS Test dialog
@@ -3048,7 +3652,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             FullHIDReset();
             Sleep(500);
             AppendStatus(L"Re-applying colors...");
-            ApplyColors();
+            CommitStateAndApply(true);
         }
         else if (id == ID_BTN_SAVE_PROFILE) {
             wchar_t name[64];
@@ -3062,8 +3666,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             wchar_t name[64];
             GetWindowTextW(g_state.hComboProfiles, name, 64);
             if (wcslen(name) > 0) {
-                LoadProfile(name);
-                UpdateAllControls();
+                if (LoadProfile(name)) {
+                    UpdateAllControls();
+                    CommitStateAndApply(true);
+                } else {
+                    AppendStatus(L"Profile load failed");
+                }
             }
         }
         // Presets
@@ -3126,11 +3734,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             RemoveTrayIcon();
             PostQuitMessage(0);
         }
-        else if (id == ID_TRAY_BLUE) { SetPresetColor(0, 34, 255); std::thread(ApplyColors).detach(); }
-        else if (id == ID_TRAY_RED) { SetPresetColor(255, 0, 0); std::thread(ApplyColors).detach(); }
-        else if (id == ID_TRAY_GREEN) { SetPresetColor(0, 255, 0); std::thread(ApplyColors).detach(); }
-        else if (id == ID_TRAY_WHITE) { SetPresetColor(255, 255, 255); std::thread(ApplyColors).detach(); }
-        else if (id == ID_TRAY_OFF) { SetPresetColor(0, 0, 0); std::thread(ApplyColors).detach(); }
+        else if (id == ID_TRAY_BLUE) { SetPresetColor(0, 34, 255); RequestApplyColors(true); }
+        else if (id == ID_TRAY_RED) { SetPresetColor(255, 0, 0); RequestApplyColors(true); }
+        else if (id == ID_TRAY_GREEN) { SetPresetColor(0, 255, 0); RequestApplyColors(true); }
+        else if (id == ID_TRAY_WHITE) { SetPresetColor(255, 255, 255); RequestApplyColors(true); }
+        else if (id == ID_TRAY_OFF) { SetPresetColor(0, 0, 0); RequestApplyColors(true); }
         else if (id == ID_TRAY_STANDBY) { SystemStandby(); }
         else if (id == ID_TRAY_SHUTDOWN) {
             if (MessageBoxW(hWnd, L"Are you sure you want to shutdown?", L"Confirm Shutdown", MB_YESNO | MB_ICONQUESTION) == IDYES) {
@@ -3184,19 +3792,35 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     }
 
+    case WM_APP_STATUS_APPEND: {
+        std::wstring* msg = (std::wstring*)lParam;
+        if (msg) {
+            AppendStatus(msg->c_str());
+            delete msg;
+        }
+        return 0;
+    }
+
+    case WM_APP_STATUS_CLEAR:
+        ClearStatus();
+        return 0;
+
     case WM_POWERBROADCAST: {
         // Handle SUSPEND - turn off all devices before sleep
         if (wParam == PBT_APMSUSPEND) {
             ClearStatus();
             AppendStatus(L"System entering standby...");
             // Turn off all RGB devices for clean state
-            hid_init();
-            if (g_state.enableAura) SetAsusAura(0, 0, 0);
-            if (g_state.enableMouse) SetSteelSeries(0, 0, 0);
-            if (g_state.enableKeyboard) SetEVisionKeyboard(0, 0, 0, 0, 0, 0);
-            if (g_state.enableEdge) SetEVisionEdge(0, 0, 0, 0);
-            if (g_state.enableRAM) SetGSkillRAM(0, 0, 0);
-            hid_exit();
+            {
+                std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
+                hid_init();
+                if (g_state.enableAura) SetAsusAura(0, 0, 0);
+                if (g_state.enableMouse) SetSteelSeries(0, 0, 0);
+                if (g_state.enableKeyboard) SetEVisionKeyboard(0, 0, 0, 0, 0, 0);
+                if (g_state.enableEdge) SetEVisionEdge(0, 0, 0, 0);
+                if (g_state.enableRAM) SetGSkillRAM(0, 0, 0);
+                hid_exit();
+            }
             AppendStatus(L"Devices off - ready for standby");
         }
         // Handle RESUME from sleep/hibernate
@@ -3234,11 +3858,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ClearStatus();
             AppendStatus(L"System resumed - resetting RGB...");
             FullHIDReset();
-            ApplyColors();
+            CommitStateAndApply(true);
         }
         else if (wParam == ID_TIMER_DEBOUNCE) {
             KillTimer(hWnd, ID_TIMER_DEBOUNCE);
-            ApplyColors();
+            CommitStateAndApply(true);
         }
        
         break;
@@ -3247,6 +3871,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Save window position before exit
         SaveAppSettings();
         g_watcherRunning = false;  // Stop resume watcher thread
+        StopApplyWorker();
         // Unregister hotkeys
         UnregisterHotKey(hWnd, ID_HOTKEY_BLUE);
         UnregisterHotKey(hWnd, ID_HOTKEY_RED);
@@ -3262,6 +3887,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (g_hLogoBitmap) DeleteObject(g_hLogoBitmap);
         if (g_pLogoImage) { delete g_pLogoImage; g_pLogoImage = NULL; }
         if (g_hTransparentBrush) DeleteObject(g_hTransparentBrush);
+        if (g_hWndBgBrush) { DeleteObject(g_hWndBgBrush); g_hWndBgBrush = NULL; }
         PostQuitMessage(0);
         break;
 
@@ -3273,37 +3899,44 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 // Forward declarations already at top: StaticSubclassProc
 LRESULT CALLBACK StaticSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
-    if (uMsg == WM_ERASEBKGND) return 1;
-    if (uMsg == WM_PAINT) {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
-        RECT rc; GetClientRect(hWnd, &rc);
-        
+    auto drawStatic = [&](HDC hdc, const RECT& rc) {
         HDC hdcMem = CreateCompatibleDC(hdc);
-        HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+        HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rc.right - rc.left, rc.bottom - rc.top);
         HBITMAP hOldBm = (HBITMAP)SelectObject(hdcMem, hbmMem);
 
-        POINT pt = {0, 0};
-        MapWindowPoints(hWnd, GetParent(hWnd), &pt, 1);
-        SetWindowOrgEx(hdcMem, pt.x, pt.y, NULL);
-        SendMessage(GetParent(hWnd), WM_PRINTCLIENT, (WPARAM)hdcMem, PRF_CLIENT);
-        SetWindowOrgEx(hdcMem, 0, 0, NULL);
-        
+        FillCtrlBackground(hdcMem, hWnd, rc);
+
         wchar_t text[256];
         GetWindowTextW(hWnd, text, 256);
-        
+
         SetBkMode(hdcMem, TRANSPARENT);
         SetTextColor(hdcMem, g_currentTheme->textPrimary);
         HFONT hFont = (HFONT)SendMessage(hWnd, WM_GETFONT, 0, 0);
         HFONT hOldFont = (HFONT)SelectObject(hdcMem, hFont);
-        
-        DrawTextW(hdcMem, text, -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        
+
+        RECT rcText = rc;
+        DrawTextW(hdcMem, text, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
         SelectObject(hdcMem, hOldFont);
-        BitBlt(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY);
+        BitBlt(hdc, 0, 0, rc.right - rc.left, rc.bottom - rc.top, hdcMem, 0, 0, SRCCOPY);
         SelectObject(hdcMem, hOldBm);
         DeleteObject(hbmMem);
         DeleteDC(hdcMem);
+    };
+
+    if (uMsg == WM_ERASEBKGND) return 1;
+    if (uMsg == WM_PRINTCLIENT) {
+        HDC hdc = (HDC)wParam;
+        if (!hdc) return 0;
+        RECT rc; GetClientRect(hWnd, &rc);
+        drawStatic(hdc, rc);
+        return 0;
+    }
+    if (uMsg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT rc; GetClientRect(hWnd, &rc);
+        drawStatic(hdc, rc);
         EndPaint(hWnd, &ps);
         return 0;
     }
@@ -3313,36 +3946,42 @@ LRESULT CALLBACK StaticSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 LRESULT CALLBACK SliderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     CustomSliderData* data = (CustomSliderData*)dwRefData;
     ModernSlider& mslider = data->slider;
+
+    auto drawSlider = [&](HDC hdc, const RECT& rc) {
+        HDC hdcMem = CreateCompatibleDC(hdc);
+        HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rc.right - rc.left, rc.bottom - rc.top);
+        HBITMAP hOldBm = (HBITMAP)SelectObject(hdcMem, hbmMem);
+
+        FillCtrlBackground(hdcMem, hWnd, rc);
+
+        mslider.value = (int)SendMessage(hWnd, TBM_GETPOS, 0, 0);
+        mslider.rect = {10, 10, rc.right - 10, rc.bottom - 10};
+        mslider.Draw(hdcMem);
+
+        BitBlt(hdc, 0, 0, rc.right - rc.left, rc.bottom - rc.top, hdcMem, 0, 0, SRCCOPY);
+        SelectObject(hdcMem, hOldBm);
+        DeleteObject(hbmMem);
+        DeleteDC(hdcMem);
+    };
     
     switch (uMsg) {
         case WM_ERASEBKGND:
             return 1;
+        case WM_PRINTCLIENT: {
+            HDC hdc = (HDC)wParam;
+            if (!hdc) return 0;
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            drawSlider(hdc, rc);
+            return 0;
+        }
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
             RECT rc;
             GetClientRect(hWnd, &rc);
-            
-            HDC hdcMem = CreateCompatibleDC(hdc);
-            HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
-            HBITMAP hOldBm = (HBITMAP)SelectObject(hdcMem, hbmMem);
-            
-            // Ask parent to draw background exactly where we are
-            POINT pt = {0, 0};
-            MapWindowPoints(hWnd, GetParent(hWnd), &pt, 1);
-            SetWindowOrgEx(hdcMem, pt.x, pt.y, NULL);
-            SendMessage(GetParent(hWnd), WM_PRINTCLIENT, (WPARAM)hdcMem, PRF_CLIENT);
-            SetWindowOrgEx(hdcMem, 0, 0, NULL);
-            
-            // Sync value
-            mslider.value = (int)SendMessage(hWnd, TBM_GETPOS, 0, 0);
-            mslider.rect = {10, 10, rc.right - 10, rc.bottom - 10}; // 10px inset for massive slider glow
-            mslider.Draw(hdcMem);
-            
-            BitBlt(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY);
-            SelectObject(hdcMem, hOldBm);
-            DeleteObject(hbmMem);
-            DeleteDC(hdcMem);
+
+            drawSlider(hdc, rc);
             EndPaint(hWnd, &ps);
             return 0;
         }
@@ -3371,70 +4010,130 @@ LRESULT CALLBACK SliderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 }
 
 LRESULT CALLBACK BtnCheckboxSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    LONG style = GetWindowLong(hWnd, GWL_STYLE) & BS_TYPEMASK;
+    bool isCheckbox = (style == BS_AUTOCHECKBOX || style == BS_CHECKBOX);
+
+    auto drawCustom = [&](HDC hdcTarget, const RECT& rc) {
+        HDC hdcMem = CreateCompatibleDC(hdcTarget);
+        HBITMAP hbmMem = CreateCompatibleBitmap(hdcTarget, rc.right - rc.left, rc.bottom - rc.top);
+        HBITMAP hOldBm = (HBITMAP)SelectObject(hdcMem, hbmMem);
+
+        FillCtrlBackground(hdcMem, hWnd, rc);
+
+        bool isHovered = (bool)GetPropW(hWnd, L"hover");
+
+        if (isCheckbox) {
+            ModernCheckbox cb;
+            cb.rect = {5, 5, rc.right - 5, rc.bottom - 5};
+            GetWindowTextW(hWnd, cb.text, 64);
+            cb.isChecked = (SendMessage(hWnd, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            cb.isEnabled = IsWindowEnabled(hWnd);
+            cb.isHovered = isHovered;
+            cb.Draw(hdcMem);
+        } else {
+            ModernButton btn;
+            btn.rect = {5, 5, rc.right - 5, rc.bottom - 5};
+            GetWindowTextW(hWnd, btn.text, 64);
+            btn.isPressed = (SendMessage(hWnd, BM_GETSTATE, 0, 0) & BST_PUSHED);
+            btn.isEnabled = IsWindowEnabled(hWnd);
+            btn.isHovered = isHovered;
+            btn.isAccent = (GetWindowLong(hWnd, GWLP_ID) == ID_BTN_APPLY);
+
+            int btnId = GetWindowLong(hWnd, GWLP_ID);
+            btn.hasCustomGlow = false;
+            if (btnId >= ID_BTN_PRESET_BLUE && btnId <= ID_BTN_PRESET_CYAN) {
+                btn.hasCustomGlow = true;
+                if (btnId == ID_BTN_PRESET_BLUE) btn.customGlowColor = Gdiplus::Color(255, 0, 34, 255);
+                else if (btnId == ID_BTN_PRESET_RED) btn.customGlowColor = Gdiplus::Color(255, 255, 0, 0);
+                else if (btnId == ID_BTN_PRESET_GREEN) btn.customGlowColor = Gdiplus::Color(255, 0, 255, 0);
+                else if (btnId == ID_BTN_PRESET_CYAN) btn.customGlowColor = Gdiplus::Color(255, 0, 255, 255);
+                else if (btnId == ID_BTN_PRESET_PURPLE) btn.customGlowColor = Gdiplus::Color(255, 128, 0, 255);
+                else if (btnId == ID_BTN_PRESET_WHITE) btn.customGlowColor = Gdiplus::Color(255, 255, 255, 255);
+                else if (btnId == ID_BTN_PRESET_OFF) btn.customGlowColor = Gdiplus::Color(255, 100, 100, 100);
+            }
+
+            btn.Draw(hdcMem);
+        }
+
+        BitBlt(hdcTarget, 0, 0, rc.right - rc.left, rc.bottom - rc.top, hdcMem, 0, 0, SRCCOPY);
+        SelectObject(hdcMem, hOldBm);
+        DeleteObject(hbmMem);
+        DeleteDC(hdcMem);
+    };
+
     switch (uMsg) {
         case WM_ERASEBKGND:
             return 1;
+        case WM_PRINTCLIENT: {
+            HDC hdc = (HDC)wParam;
+            if (!hdc) return 0;
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            drawCustom(hdc, rc);
+            return 0;
+        }
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
             RECT rc;
             GetClientRect(hWnd, &rc);
-            
-            HDC hdcMem = CreateCompatibleDC(hdc);
-            HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
-            HBITMAP hOldBm = (HBITMAP)SelectObject(hdcMem, hbmMem);
-            
-            // Ask parent to draw background exactly where we are
-            POINT pt = {0, 0};
-            MapWindowPoints(hWnd, GetParent(hWnd), &pt, 1);
-            SetWindowOrgEx(hdcMem, pt.x, pt.y, NULL);
-            SendMessage(GetParent(hWnd), WM_PRINTCLIENT, (WPARAM)hdcMem, PRF_CLIENT);
-            SetWindowOrgEx(hdcMem, 0, 0, NULL);
-            
-            LONG style = GetWindowLong(hWnd, GWL_STYLE) & BS_TYPEMASK;
-            bool isHovered = (bool)GetPropW(hWnd, L"hover");
-            
-            if (style == BS_AUTOCHECKBOX || style == BS_CHECKBOX) {
-                ModernCheckbox cb;
-                cb.rect = {5, 5, rc.right - 5, rc.bottom - 5}; // 5px inset for glow
-                GetWindowTextW(hWnd, cb.text, 64);
-                cb.isChecked = (SendMessage(hWnd, BM_GETCHECK, 0, 0) == BST_CHECKED);
-                cb.isEnabled = IsWindowEnabled(hWnd);
-                cb.isHovered = isHovered;
-                cb.Draw(hdcMem);
-            } else {
-                ModernButton btn;
-                btn.rect = {5, 5, rc.right - 5, rc.bottom - 5}; // 5px inset for glow
-                GetWindowTextW(hWnd, btn.text, 64);
-                btn.isPressed = (SendMessage(hWnd, BM_GETSTATE, 0, 0) & BST_PUSHED);
-                btn.isEnabled = IsWindowEnabled(hWnd);
-                btn.isHovered = isHovered;
-                btn.isAccent = (GetWindowLong(hWnd, GWLP_ID) == ID_BTN_APPLY);
 
-                // Handle custom glows for preset buttons
-                int btnId = GetWindowLong(hWnd, GWLP_ID);
-                btn.hasCustomGlow = false;
-                if (btnId >= ID_BTN_PRESET_BLUE && btnId <= ID_BTN_PRESET_CYAN) {
-                    btn.hasCustomGlow = true;
-                    if (btnId == ID_BTN_PRESET_BLUE) btn.customGlowColor = Gdiplus::Color(255, 0, 34, 255);
-                    else if (btnId == ID_BTN_PRESET_RED) btn.customGlowColor = Gdiplus::Color(255, 255, 0, 0);
-                    else if (btnId == ID_BTN_PRESET_GREEN) btn.customGlowColor = Gdiplus::Color(255, 0, 255, 0);
-                    else if (btnId == ID_BTN_PRESET_CYAN) btn.customGlowColor = Gdiplus::Color(255, 0, 255, 255);
-                    else if (btnId == ID_BTN_PRESET_PURPLE) btn.customGlowColor = Gdiplus::Color(255, 128, 0, 255);
-                    else if (btnId == ID_BTN_PRESET_WHITE) btn.customGlowColor = Gdiplus::Color(255, 255, 255, 255);
-                    else if (btnId == ID_BTN_PRESET_OFF) btn.customGlowColor = Gdiplus::Color(255, 100, 100, 100);
-                }
-
-                btn.Draw(hdcMem);
-            }
-            
-            BitBlt(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY);
-            SelectObject(hdcMem, hOldBm);
-            DeleteObject(hbmMem);
-            DeleteDC(hdcMem);
+            drawCustom(hdc, rc);
             EndPaint(hWnd, &ps);
             return 0;
         }
+        case WM_LBUTTONDOWN:
+            if (isCheckbox) {
+                SetCapture(hWnd);
+                SetPropW(hWnd, L"pressed", (HANDLE)1);
+                InvalidateRect(hWnd, NULL, FALSE);
+                return 0;
+            }
+            break;
+        case WM_LBUTTONUP:
+            if (isCheckbox) {
+                RECT rc;
+                GetClientRect(hWnd, &rc);
+                POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                bool inside = PtInRect(&rc, pt) != FALSE;
+
+                if (GetCapture() == hWnd) {
+                    ReleaseCapture();
+                }
+                RemovePropW(hWnd, L"pressed");
+
+                if (inside) {
+                    LRESULT chk = SendMessage(hWnd, BM_GETCHECK, 0, 0);
+                    SendMessage(hWnd, BM_SETCHECK, (chk == BST_CHECKED) ? BST_UNCHECKED : BST_CHECKED, 0);
+                    HWND hParent = GetParent(hWnd);
+                    if (hParent) {
+                        SendMessage(hParent, WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(hWnd), BN_CLICKED), (LPARAM)hWnd);
+                    }
+                }
+
+                InvalidateRect(hWnd, NULL, FALSE);
+                return 0;
+            }
+            break;
+        case WM_KEYDOWN:
+            if (isCheckbox && (wParam == VK_SPACE || wParam == VK_RETURN)) {
+                LRESULT chk = SendMessage(hWnd, BM_GETCHECK, 0, 0);
+                SendMessage(hWnd, BM_SETCHECK, (chk == BST_CHECKED) ? BST_UNCHECKED : BST_CHECKED, 0);
+                HWND hParent = GetParent(hWnd);
+                if (hParent) {
+                    SendMessage(hParent, WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(hWnd), BN_CLICKED), (LPARAM)hWnd);
+                }
+                InvalidateRect(hWnd, NULL, FALSE);
+                return 0;
+            }
+            break;
+        case WM_CAPTURECHANGED:
+            if (isCheckbox) {
+                RemovePropW(hWnd, L"pressed");
+                InvalidateRect(hWnd, NULL, FALSE);
+                return 0;
+            }
+            break;
         case WM_MOUSEMOVE:
             if (!GetPropW(hWnd, L"hover")) {
                 SetPropW(hWnd, L"hover", (HANDLE)1);
@@ -3447,10 +4146,6 @@ LRESULT CALLBACK BtnCheckboxSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
             RemovePropW(hWnd, L"hover");
             InvalidateRect(hWnd, NULL, FALSE);
             break;
-        // Native button control handles drawing its pushed state via WM_PAINT internally?
-        // We need to invalidate when state changes (e.g. mouse down)
-        case WM_LBUTTONDOWN:
-        case WM_LBUTTONUP:
         case WM_SETFOCUS:
         case WM_KILLFOCUS:
         case WM_ENABLE:
@@ -3461,36 +4156,43 @@ LRESULT CALLBACK BtnCheckboxSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
 }
 
 LRESULT CALLBACK ComboSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    auto drawCombo = [&](HDC hdc, const RECT& rc) {
+        HDC hdcMem = CreateCompatibleDC(hdc);
+        HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rc.right - rc.left, rc.bottom - rc.top);
+        HBITMAP hOldBm = (HBITMAP)SelectObject(hdcMem, hbmMem);
+
+        FillCtrlBackground(hdcMem, hWnd, rc);
+
+        ModernCombo combo;
+        combo.rect = {0, 0, rc.right, rc.bottom};
+        combo.isHovered = (bool)GetPropW(hWnd, L"hover");
+        GetWindowTextW(hWnd, combo.selectedText, 128);
+        combo.Draw(hdcMem);
+
+        BitBlt(hdc, 0, 0, rc.right - rc.left, rc.bottom - rc.top, hdcMem, 0, 0, SRCCOPY);
+        SelectObject(hdcMem, hOldBm);
+        DeleteObject(hbmMem);
+        DeleteDC(hdcMem);
+    };
+
     switch (uMsg) {
     case WM_ERASEBKGND:
         return 1;
+    case WM_PRINTCLIENT: {
+        HDC hdc = (HDC)wParam;
+        if (!hdc) return 0;
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+        drawCombo(hdc, rc);
+        return 0;
+    }
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rc;
         GetClientRect(hWnd, &rc);
-        
-        HDC hdcMem = CreateCompatibleDC(hdc);
-        HBITMAP hbmMem = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
-        HBITMAP hOldBm = (HBITMAP)SelectObject(hdcMem, hbmMem);
-        
-        // Ask parent to draw background exactly where we are
-        POINT pt = {0, 0};
-        MapWindowPoints(hWnd, GetParent(hWnd), &pt, 1);
-        SetWindowOrgEx(hdcMem, pt.x, pt.y, NULL);
-        SendMessage(GetParent(hWnd), WM_PRINTCLIENT, (WPARAM)hdcMem, PRF_CLIENT);
-        SetWindowOrgEx(hdcMem, 0, 0, NULL);
-        
-        ModernCombo combo;
-        combo.rect = {0, 0, rc.right, rc.bottom}; // No inset - combo is not glow-expanded
-        combo.isHovered = (bool)GetPropW(hWnd, L"hover");
-        GetWindowTextW(hWnd, combo.selectedText, 128);
-        combo.Draw(hdcMem);
-        
-        BitBlt(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY);
-        SelectObject(hdcMem, hOldBm);
-        DeleteObject(hbmMem);
-        DeleteDC(hdcMem);
+
+        drawCombo(hdc, rc);
         EndPaint(hWnd, &ps);
         return 0; // Skip native rendering wrapper
     } 
@@ -3564,22 +4266,26 @@ LRESULT CALLBACK ColorPreviewSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
 LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     switch (uMsg) {
     case WM_NCPAINT: {
-        // Draw modern rounded border
+        // Draw modern rounded border — paint ONLY the NC area (4px ring), never the client area
         HDC hdc = GetWindowDC(hWnd);
-        RECT rc; GetWindowRect(hWnd, &rc);
-        OffsetRect(&rc, -rc.left, -rc.top);
-        
+        RECT rcWin; GetWindowRect(hWnd, &rcWin);
+        OffsetRect(&rcWin, -rcWin.left, -rcWin.top);
+
+        // Exclude client area (NC inset = 4px, see WM_NCCALCSIZE) so we do not
+        // overdraw the control's content and trigger a recursive repaint
+        ExcludeClipRect(hdc, 4, 4, rcWin.right - 4, rcWin.bottom - 4);
+
         Gdiplus::Graphics g(hdc);
         g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
-        Gdiplus::RectF r((float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom);
-        
-        // Clear background for rounded corners to work
+        Gdiplus::RectF r(0.0f, 0.0f, (float)rcWin.right, (float)rcWin.bottom);
+
+        // Fill corners outside the rounded rect with the parent background colour
         Gdiplus::SolidBrush bgBrush(g_mTheme->bgPrimary);
         g.FillRectangle(&bgBrush, r);
-        
-        // Draw the themed border
+
+        // Draw the themed rounded border
         DrawRoundedRect(g, r, 6.0f, Gdiplus::Color(0,0,0,0), g_mTheme->border, 1.0f);
-        
+
         ReleaseDC(hWnd, hdc);
         return 0;
     }
@@ -3601,13 +4307,273 @@ LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 // MAIN
 //=============================================================================
 
+#include "hardware_probe.h"
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow) {
     LogDebug("WinMain started");
+
+    // =========================================================
+    // PHASE 0 DIAGNOSTIC PROBE: --probe / --probe-interactive
+    // Headless, read-mostly hardware capability dump. Must run before any
+    // GUI/auto-apply so it does not perturb device state. Writes
+    // docs/probe_results_<ts>.json + docs/Hardware_Capability_Report.md.
+    // =========================================================
+    if (strstr(lpCmdLine, "--probe")) {
+        bool interactive = (strstr(lpCmdLine, "--probe-interactive") != nullptr);
+        return probe::RunHardwareProbe(interactive);
+    }
+
+    // Headless zone Identify (verify zoneBit -> physical mapping):
+    //   --identify=mouse:<zoneIndex 0..7>
+    {
+        const char* idArg = strstr(lpCmdLine, "--identify=");
+        if (idArg) {
+            const char* spec = idArg + strlen("--identify=");
+            LoadAppSettings();  // loads g_config.mouseZones (with migration)
+            if (strncmp(spec, "mouse:", 6) == 0)
+                IdentifyMouseZone(atoi(spec + 6), 3000);
+            return 0;
+        }
+    }
+
+    // Keyboard Win-lock isolation test (no writes, just session commands):
+    //   --kbtest=begin   send 0x01 begin-configure only
+    //   --kbtest=end     send 0x02 end-configure only
+    //   --kbtest=cycle   send 0x01 then 0x02
+    // Lets us pinpoint which command locks/unlocks the Win key.
+    {
+        const char* kbt = strstr(lpCmdLine, "--kbtest=");
+        if (kbt) {
+            const char* what = kbt + strlen("--kbtest=");
+            hid_init();
+            hid_device* dev = nullptr;
+            struct hid_device_info* devs = hid_enumerate(Devices::EVISION_VID, Devices::EVISION_PID);
+            for (auto* c = devs; c; c = c->next)
+                if (c->usage_page == Devices::EVISION_USAGE_PAGE) { dev = hid_open_path(c->path); break; }
+            hid_free_enumeration(devs);
+            if (dev) {
+                if      (strncmp(what, "begin", 5) == 0) { EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr); }
+                else if (strncmp(what, "end",   3) == 0) { EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr); }
+                else if (strncmp(what, "cycle", 5) == 0) { EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr); Sleep(50); EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr); }
+                else if (strncmp(what, "unlock", 6) == 0 || strncmp(what, "lock", 4) == 0) {
+                    // Controlled, reversible test: set/clear the per-profile flag at
+                    // profile_base+0x2E (win-lock/game-mode candidate). unlock->0x00, lock->0x01.
+                    uint8_t val = (strncmp(what, "lock", 4) == 0 && strncmp(what, "unlock", 6) != 0) ? 0x01 : 0x00;
+                    EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr); Sleep(20);
+                    uint8_t p = 0; EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &p); if (p > 2) p = 0;
+                    uint16_t off = (uint16_t)(p * 0x40 + 0x2E);
+                    uint8_t before = 0xFF, after = 0xFF;
+                    EVisionQuery(dev, 0x05, off, nullptr, 1, &before);
+                    int wr = EVisionQuery(dev, 0x06, off, &val, 1, nullptr); Sleep(10);
+                    EVisionQuery(dev, 0x05, off, nullptr, 1, &after);
+                    EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
+                    SHCreateDirectoryExA(NULL, "docs", NULL);
+                    FILE* fp = fopen("docs\\kbtest_unlock.txt", "w");
+                    if (fp) { fprintf(fp, "profile=%d off=0x%02X val=0x%02X before=0x%02X writeRes=%d after=0x%02X\n",
+                                      p, off, val, before, wr, after); fclose(fp); }
+                }
+                hid_close(dev);
+            }
+            hid_exit();
+            return 0;
+        }
+    }
+
+    // Headless per-zone mouse test: 8 distinct colours, one per zone, then exit.
+    if (strstr(lpCmdLine, "--mouse-zones-test")) {
+        LoadAppSettings();
+        static const uint8_t pal[8][3] = {
+            {255,0,0},{0,255,0},{0,0,255},{255,255,0},
+            {255,0,255},{0,255,255},{255,255,255},{255,128,0}
+        };
+        for (size_t i = 0; i < g_config.mouseZones.size() && i < 8; i++) {
+            g_config.mouseZones[i].color   = { pal[i][0], pal[i][1], pal[i][2] };
+            g_config.mouseZones[i].enabled = true;
+        }
+        hid_init();
+        SetSteelSeriesZones();
+        hid_exit();
+        return 0;
+    }
+
     // Check for command line flags
     bool startMinimized = (strstr(lpCmdLine, "--minimized") != nullptr);
     g_skipApplyOnStart = (strstr(lpCmdLine, "--no-apply") != nullptr);
     g_state.dryRun = (strstr(lpCmdLine, "--dry-run") != nullptr);
     bool forceForeground = (strstr(lpCmdLine, "--foreground") != nullptr);
+
+    // =========================================================
+    // HEADLESS TEST MODE: --switch-test=<device>
+    // Runs a hardware light sequence and exits without showing UI.
+    // Usage: OneClickRGB.exe --switch-test=edge|mouse|aura|keyboard|all|aura-spectrum|all-spectrum
+    // Sequence: OFF(2s) -> BLUE(4s) -> RED(4s) -> OFF(3s)
+    // Additional mode: --switch-test=edge-diagnose
+    // =========================================================
+    const char* switchTestArg = strstr(lpCmdLine, "--switch-test=");
+    if (switchTestArg) {
+        const char* devName = switchTestArg + strlen("--switch-test=");
+
+        // ---- edge-diagnose: enumerate all EVision HID interfaces + write probe ----
+        if (strncmp(devName, "edge-diagnose", 13) == 0) {
+            hid_init();
+            FILE* diag = fopen("edge_diagnose.txt", "w");
+            fprintf(diag, "=== OneClickRGB Edge HID Diagnose ===\n");
+            fprintf(diag, "Scanning VID=0x%04X (EVision/Endorfy)...\n\n",
+                    (unsigned)Devices::EVISION_VID);
+
+            // List every interface for the EVision VID
+            struct hid_device_info* all = hid_enumerate(Devices::EVISION_VID, 0);
+            int ifcount = 0;
+            for (auto* cur = all; cur; cur = cur->next) {
+                fprintf(diag,
+                    "PID=0x%04X  IfaceNo=%2d  UsagePage=0x%04X  Usage=0x%04X  Path=%s\n",
+                    (unsigned)cur->product_id,
+                    cur->interface_number,
+                    (unsigned)cur->usage_page,
+                    (unsigned)cur->usage,
+                    cur->path ? cur->path : "(no path)");
+                ifcount++;
+            }
+            hid_free_enumeration(all);
+            fprintf(diag, "\n%d interface(s) found.\n", ifcount);
+
+            // Write-probe: attempt every candidate offset with a blue static colour
+            fprintf(diag, "\n--- Write probe (UsagePage 0xFF1C then 0xFF00) ---\n");
+            char path[512] = {};
+            hid_device* dev = OpenEVisionEdgeDev(path, sizeof(path));
+            if (!dev) {
+                fprintf(diag, "ERROR: Could not open any EVision RGB interface.\n");
+            } else {
+                fprintf(diag, "Opened: %s\n", path);
+                EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr); Sleep(25);
+                uint8_t activeProfile = 0;
+                EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &activeProfile);
+                if (activeProfile > 2) activeProfile = 0;
+                fprintf(diag, "Active profile index: %d\n\n", (int)activeProfile);
+
+                // Probe payload: STATIC BLUE – no permanent flash save (byte[9]=0x00)
+                uint8_t testData[10] = {0x04, 4, 2, 0, 0, 0, 0, 255, 0, 0x00};
+                struct { uint16_t off; const char* lbl; } probes[] = {
+                    {0x13,"P0+0x12"},{0x16,"P0+0x15"},{0x19,"P0+0x18"},
+                    {0x1B,"P0+0x1A"},{0x1E,"P0-direct"},
+                    {0x53,"P1+0x12"},{0x56,"P1+0x15"},{0x59,"P1+0x18"},
+                    {0x5B,"P1+0x1A"},{0x5E,"P1-direct"},
+                    {0x93,"P2+0x12"},{0x96,"P2+0x15"},{0x99,"P2+0x18"},
+                    {0x9B,"P2+0x1A"},{0x9E,"P2-direct"},
+                };
+                for (const auto& p : probes) {
+                    int res = EVisionQuery(dev, 0x06, p.off, testData, 10, nullptr);
+                    fprintf(diag, "  off=0x%02X (%s): res=%d %s\n",
+                            (unsigned)p.off, p.lbl, res, res >= 0 ? "OK" : "FAIL");
+                    Sleep(5);
+                }
+                uint8_t unlock[2] = {0, 0};
+                EVisionQuery(dev, 0x06, 0x14, unlock, 2, nullptr);
+                EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
+                hid_close(dev);
+                fprintf(diag, "\nProbe complete. Offset rows marked OK accepted the write.\n");
+                fprintf(diag, "Observe which LED changed to blue to confirm the correct offset.\n");
+            }
+            fclose(diag);
+            hid_exit();
+            LogDebug("[EVision] edge-diagnose complete – see edge_diagnose.txt");
+            return 0;
+        }
+
+        // ---- normal switch-test mode ----
+        bool doEdge     = (strncmp(devName, "edge",     4) == 0 || strncmp(devName, "all", 3) == 0);
+        bool doMouse    = (strncmp(devName, "mouse",    5) == 0 || strncmp(devName, "all", 3) == 0);
+        bool doAura     = (strncmp(devName, "aura",     4) == 0 || strncmp(devName, "all", 3) == 0);
+        bool doKeyboard = (strncmp(devName, "keyboard", 8) == 0 || strncmp(devName, "all", 3) == 0);
+        bool doSpectrum = (strstr(devName, "spectrum") != nullptr);
+
+        // Load config so channel corrections are available
+        LoadSettings();
+
+        {
+            char switchDbg[128];
+            snprintf(switchDbg, sizeof(switchDbg),
+                     "[switch-test] mode=%s edge=%d mouse=%d aura=%d kb=%d spectrum=%d",
+                     devName, (int)doEdge, (int)doMouse, (int)doAura, (int)doKeyboard, (int)doSpectrum);
+            LogDebug(switchDbg);
+        }
+
+        auto hueToRgb = [](int hueDeg, uint8_t& outR, uint8_t& outG, uint8_t& outB) {
+            int h = hueDeg % 360;
+            if (h < 0) h += 360;
+            int sector = h / 60;
+            int rem = h % 60;
+            int t = (rem * 255) / 60;
+            int q = 255 - t;
+
+            switch (sector) {
+                case 0: outR = 255; outG = (uint8_t)t; outB = 0; break;
+                case 1: outR = (uint8_t)q; outG = 255; outB = 0; break;
+                case 2: outR = 0; outG = 255; outB = (uint8_t)t; break;
+                case 3: outR = 0; outG = (uint8_t)q; outB = 255; break;
+                case 4: outR = (uint8_t)t; outG = 0; outB = 255; break;
+                default: outR = 255; outG = 0; outB = (uint8_t)q; break;
+            }
+        };
+
+        // Helper: apply color to all enabled devices.
+        // isOff=true  → EDGE_MODE_OFF (hardware-level off, LEDs dark)
+        // isOff=false → EDGE_MODE_STATIC with supplied RGB
+        auto testApply = [&](uint8_t r, uint8_t g, uint8_t b, bool isOff) {
+            char step[80];
+            snprintf(step, sizeof(step),
+                     "[switch-test] apply rgb=(%d,%d,%d) off=%d", r, g, b, (int)isOff);
+            LogDebug(step);
+            hid_init();
+            if (doAura)     SetAsusAura(r, g, b);
+            if (doMouse)    SetSteelSeries(r, g, b);
+            if (doKeyboard) SetEVisionKeyboard(r, g, b, KB_MODE_STATIC, 4, 2);
+            if (doEdge) {
+                uint8_t eMode = isOff ? EDGE_MODE_OFF : EDGE_MODE_STATIC;
+                bool ok = SetEVisionEdge(r, g, b, eMode);
+                char edgeRes[64];
+                snprintf(edgeRes, sizeof(edgeRes),
+                         "[switch-test] SetEVisionEdge result=%d", (int)ok);
+                LogDebug(edgeRes);
+            }
+            hid_exit();
+        };
+
+        if (doSpectrum) {
+            // Sequence: OFF(1.5s) -> SPECTRUM sweep (~6s) -> OFF(2s)
+            LogDebug("[switch-test] phase=OFF(initial)");
+            testApply(0, 0, 0, true);      Sleep(1500);
+
+            LogDebug("[switch-test] phase=SPECTRUM(start)");
+            for (int h = 0; h < 360; h += 10) {
+                uint8_t sr = 0, sg = 0, sb = 0;
+                hueToRgb(h, sr, sg, sb);
+                char sstep[96];
+                snprintf(sstep, sizeof(sstep),
+                         "[switch-test] spectrum h=%d rgb=(%d,%d,%d)",
+                         h, (int)sr, (int)sg, (int)sb);
+                LogDebug(sstep);
+                testApply(sr, sg, sb, false);
+                Sleep(170);
+            }
+
+            LogDebug("[switch-test] phase=OFF(final)");
+            testApply(0, 0, 0, true);      Sleep(2000);
+        } else {
+            // Sequence: OFF(2s) -> BLUE(4s) -> RED(4s) -> OFF(3s)
+            LogDebug("[switch-test] phase=OFF(initial)");
+            testApply(0, 0, 0, true);      Sleep(2000);
+            LogDebug("[switch-test] phase=BLUE");
+            testApply(0, 0, 255, false);   Sleep(4000);
+            LogDebug("[switch-test] phase=RED");
+            testApply(255, 0, 0, false);   Sleep(4000);
+            LogDebug("[switch-test] phase=OFF(final)");
+            testApply(0, 0, 0, true);      Sleep(3000);
+        }
+
+        LogDebug("[switch-test] done");
+        return 0;  // Exit without showing any window
+    }
 
     // Initialize GDI+ for PNG loading
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
@@ -3637,7 +4603,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW);
+    // Hintergrundfarbe direkt aus dem aktiven Theme: verhindert den weißen Blitz
+    // ("FOUC") bevor WM_PAINT die dunkle Oberfläche zeichnet.
+    if (!g_hWndBgBrush)
+        g_hWndBgBrush = CreateSolidBrush(g_currentTheme->bgWindowTop);
+    wc.hbrBackground = g_hWndBgBrush;
     wc.lpszClassName = L"OneClickRGBClass";
     wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));  // Custom icon from resource
     RegisterClassW(&wc);
@@ -3691,6 +4661,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     } else {
         ShowWindow(g_state.hWnd, nCmdShow);
         LogDebug("Window shown");
+        // Erzwinge einen vollständigen Repaint aller Child-Controls sofort,
+        // bevor DWM den ersten Frame kompostiert → kein FOUC/Flicker.
+        RedrawWindow(g_state.hWnd, NULL, NULL,
+            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
 
         // Force foreground when restarting from theme/language change
         if (forceForeground) {

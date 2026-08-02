@@ -68,6 +68,14 @@ if %VS_FOUND%==0 (
 :vs_found
 echo.
 
+REM Verify cl.exe is accessible
+where cl.exe >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: cl.exe not found in PATH after vcvars setup!
+    echo Make sure Visual Studio is properly installed.
+    exit /b 1
+)
+
 REM Set paths relative to script location
 set ROOT_DIR=%~dp0
 set SRC_DIR=%ROOT_DIR%src
@@ -117,9 +125,17 @@ REM Resource file (icon)
 set RES_FILE=
 if exist "%SRC_DIR%\OneClickRGB.rc" (
     echo Compiling resources...
-    rc /nologo /fo"%BUILD_DIR%\OneClickRGB.res" "%SRC_DIR%\OneClickRGB.rc" >nul 2>&1
+    if exist "%BUILD_DIR%\OneClickRGB.res" del /f /q "%BUILD_DIR%\OneClickRGB.res" >nul 2>&1
+    rc /nologo /i"%SRC_DIR%" /fo"%BUILD_DIR%\OneClickRGB.res" "%SRC_DIR%\OneClickRGB.rc"
+    if errorlevel 1 (
+        echo ERROR: Resource compile failed.
+        exit /b 1
+    )
     if exist "%BUILD_DIR%\OneClickRGB.res" (
         set RES_FILE="%BUILD_DIR%\OneClickRGB.res"
+    ) else (
+        echo ERROR: Resource file was not created.
+        exit /b 1
     )
 )
 
@@ -130,12 +146,21 @@ echo Source: %SOURCE%
 echo Output: %OUTPUT%
 echo.
 
-cl.exe %CFLAGS% %INCLUDES% %SOURCE% %RES_FILE% /Fe"%OUTPUT%" /link %LIBS%
+cl.exe %CFLAGS% %INCLUDES% %SOURCE% %RES_FILE% /Fo"%BUILD_DIR%\\" /Fd"%BUILD_DIR%\OneClickRGB.pdb" /link /OUT:"%OUTPUT%" /SUBSYSTEM:WINDOWS %LIBS%
 
 if errorlevel 1 (
     echo.
     echo ================================================
     echo BUILD FAILED
+    echo ================================================
+    exit /b 1
+)
+
+if not exist "%OUTPUT%" (
+    echo.
+    echo ================================================
+    echo BUILD FAILED - Executable was not created
+    echo Expected: %OUTPUT%
     echo ================================================
     exit /b 1
 )
@@ -154,6 +179,12 @@ if exist "%ROOT_DIR%\config\*.json" (
     copy /Y "%ROOT_DIR%\config\*.json" "%BUILD_DIR%\config\" >nul 2>&1
 )
 
+REM Ensure non-elevated users can execute build artifacts (prevents 0xc0000222)
+icacls "%BUILD_DIR%" /grant *S-1-5-32-545:(OI)(CI)(RX) >nul 2>&1
+icacls "%OUTPUT%" /grant *S-1-5-32-545:(RX) >nul 2>&1
+if exist "%BUILD_DIR%\hidapi.dll" icacls "%BUILD_DIR%\hidapi.dll" /grant *S-1-5-32-545:(RX) >nul 2>&1
+if exist "%BUILD_DIR%\PawnIOLib.dll" icacls "%BUILD_DIR%\PawnIOLib.dll" /grant *S-1-5-32-545:(RX) >nul 2>&1
+
 echo.
 echo ================================================
 echo BUILD SUCCESSFUL!
@@ -161,7 +192,8 @@ echo ================================================
 echo.
 echo Executable: %OUTPUT%
 echo.
-echo To run: cd build ^&^& OneClickRGB.exe
+echo To run (PowerShell): cd build ; .\OneClickRGB.exe
+echo To run (cmd.exe):    cd build ^&^& OneClickRGB.exe
 echo.
 
 endlocal

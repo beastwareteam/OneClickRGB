@@ -134,6 +134,14 @@ powershell Compress-Archive -Path portable\* -DestinationPath OneClickRGB_v1.0_P
 ### "cl is not recognized"
 Run from **x64 Native Tools Command Prompt**, not regular cmd
 
+### PowerShell start command fails
+In PowerShell, run executables from current folder with `./` or `.\\`:
+
+```powershell
+cd build
+.\OneClickRGB.exe
+```
+
 ### "Cannot find hidapi.lib"
 Check `dependencies/hidapi/hidapi.lib` exists
 

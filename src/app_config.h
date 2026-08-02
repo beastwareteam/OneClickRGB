@@ -10,8 +10,10 @@
 
 #pragma once
 #include "channel_config.h"
+#include "light_zone.h"
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <map>
 #include <fstream>
 #include <iomanip>
@@ -33,8 +35,8 @@ public:
     uint8_t blue       = 255;
     uint8_t brightness = 4;   // 0-4 global brightness steps
     uint8_t speed      = 2;   // 0-5
-    uint8_t kbMode     = 0;   // KB_MODE_* constants
-    uint8_t edgeMode   = 0;   // 0-5
+    uint8_t kbMode     = 0x06; // KB_MODE_STATIC default
+    uint8_t edgeMode   = 0x00; // EDGE_MODE_STATIC/FREEZE default (solid color)
 
     //--- Device enables ---
     bool enableAura     = true;
@@ -50,7 +52,7 @@ public:
     int  windowX        = -1;  // -1 = CW_USEDEFAULT
     int  windowY        = -1;
     int  themeId        = 0;   // 0=Dark, 1=Light, 2=Colorblind
-    int  langId         = 0;   // 0=EN, 1=DE
+    int  langId         = 1;   // 0=EN, 1=DE
     std::string lastProfile;
 
     //--- Channel correction (per device zone) ---
@@ -60,7 +62,15 @@ public:
     ChannelConfig keyboard;
     ChannelConfig edge;
 
-    RGBConfig() { InitNames(); }
+    //--- Generic per-zone lighting model (device-independent, used by the
+    //    visual layout editor and the per-zone adapters). Colour values are
+    //    known/baked, never read from vendor software. ---
+    std::vector<LightZone> mouseZones;     // SteelSeries Rival 600 (8, known)
+    std::vector<LightZone> auraZones;      // filled from Aura 0xB0 scan (later)
+    std::vector<LightZone> ramZones;       // filled from SMBus scan (later)
+    std::vector<LightZone> keyboardZones;  // filled from KB segment map (later)
+
+    RGBConfig() { InitNames(); InitZones(); }
 
     //--- Persistence ---
 
@@ -115,12 +125,24 @@ public:
         j["keyboard"]    = chOut(keyboard);
         j["edge"]        = chOut(edge);
 
+        // Generic zone model
+        auto zonesOut = [](const std::vector<LightZone>& zs) -> json {
+            json a = json::array();
+            for (const auto& z : zs) a.push_back(z.to_json());
+            return a;
+        };
+        j["mouseZones"]    = zonesOut(mouseZones);
+        j["auraZones"]     = zonesOut(auraZones);
+        j["ramZones"]      = zonesOut(ramZones);
+        j["keyboardZones"] = zonesOut(keyboardZones);
+
         std::ofstream f(path);
         if (f) f << std::setw(4) << j;
     }
 
     void Load() {
         InitNames();  // ensure defaults before overwriting from disk
+        InitZones();  // generic zone defaults (known colours)
 
         std::ifstream f(GetPath());
         if (!f) { MigrateLegacy(); return; }
@@ -167,6 +189,21 @@ public:
             if (j.contains("steelseries")) loadCh(j["steelseries"], steelseries);
             if (j.contains("keyboard"))    loadCh(j["keyboard"],    keyboard);
             if (j.contains("edge"))        loadCh(j["edge"],        edge);
+
+            // Generic zone model. If absent (older config) -> migration: keep the
+            // baked defaults but seed their base colour from the loaded global
+            // colour so upgrading users keep their last colour.
+            auto loadZones = [](const json& j, const char* key, std::vector<LightZone>& out) -> bool {
+                if (!j.contains(key) || !j[key].is_array() || j[key].empty()) return false;
+                out.clear();
+                for (const auto& z : j[key]) { LightZone lz; lz.from_json(z); out.push_back(lz); }
+                return true;
+            };
+            if (!loadZones(j, "mouseZones", mouseZones))
+                for (auto& z : mouseZones) z.color = { red, green, blue };
+            loadZones(j, "auraZones",     auraZones);
+            loadZones(j, "ramZones",      ramZones);
+            loadZones(j, "keyboardZones", keyboardZones);
         } catch (...) {}
     }
 
@@ -177,6 +214,16 @@ private:
         steelseries.name = "SteelSeries Mouse";
         keyboard.name    = "Keyboard";
         edge.name        = "Keyboard Edge";
+    }
+
+    // Seed the generic zone model with known defaults. Mouse zones are fully
+    // known (see docs/Mouse_Protocol.md); the other device zone lists are filled
+    // from the hardware scan in later phases, so they start empty.
+    void InitZones() {
+        mouseZones = ZoneDefaults::Rival600({ red, green, blue });
+        auraZones.clear();
+        ramZones.clear();
+        keyboardZones.clear();
     }
 
     // One-time migration from old separate .cfg files on first run after upgrade
