@@ -46,6 +46,28 @@ enum EdgeMode : uint8_t {
     EDGE_MODE_OFF       = 0x05,
 };
 
+/// What the app falls back to. Note that neither enum starts at zero in a
+/// useful way: 0 is not a keyboard mode at all, and as an edge mode it means
+/// FREEZE. A zero-initialised setting is therefore never a sane default, which
+/// is what the persisted config used to hand out on a fresh install.
+constexpr uint8_t KB_MODE_DEFAULT   = KB_MODE_STATIC;
+constexpr uint8_t EDGE_MODE_DEFAULT = EDGE_MODE_STATIC;
+
+/// True for mode bytes the keyboard actually implements. Values are not
+/// contiguous (0x09 and 0x0B are absent), so a range check will not do.
+constexpr bool IsValidKeyboardMode(uint8_t mode) {
+    return mode == KB_MODE_WAVE_SHORT  || mode == KB_MODE_WAVE_LONG ||
+           mode == KB_MODE_COLOR_WHEEL || mode == KB_MODE_SPECTRUM  ||
+           mode == KB_MODE_BREATHING   || mode == KB_MODE_STATIC    ||
+           mode == KB_MODE_REACTIVE    || mode == KB_MODE_RIPPLE    ||
+           mode == KB_MODE_STARLIGHT   || mode == KB_MODE_RAINBOW   ||
+           mode == KB_MODE_HURRICANE;
+}
+
+constexpr bool IsValidEdgeMode(uint8_t mode) {
+    return mode <= EDGE_MODE_OFF;
+}
+
 /// Each of the three onboard profiles owns a 0x40-byte config block.
 constexpr uint16_t PROFILE_STRIDE = 0x40;
 constexpr uint16_t PROFILE_BASE   = 0x01;

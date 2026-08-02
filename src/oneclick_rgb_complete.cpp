@@ -75,8 +75,21 @@
 using json = nlohmann::json;
 
 #include <fstream>
+#include <string>
+
+// Startup tracing, off unless --debug is passed.
+//
+// It used to be unconditional and wrote "debug.log" relative to the current
+// directory - which for the elevated autostart task is not the install folder
+// but wherever the scheduler happens to point, so a release build appended to
+// a file in a system directory forever. The path is resolved once at startup
+// (see WinMain) because %APPDATA% is not available this early in the file.
+bool g_debugLogEnabled = false;
+std::wstring g_debugLogPath;
+
 inline void LogDebug(const char* msg) {
-    std::ofstream f("debug.log", std::ios::app);
+    if (!g_debugLogEnabled || g_debugLogPath.empty()) return;
+    std::ofstream f(g_debugLogPath, std::ios::app);
     f << msg << std::endl;
 }
 
@@ -584,6 +597,20 @@ constexpr uint8_t kEdgeModeByIndex[] = {
     EDGE_MODE_OFF,
 };
 
+// Every table entry has to be a mode the protocol implements. Without this a
+// combo index would happily sit in the table and be sent to the device as a
+// mode byte - which is the bug these tables exist to prevent.
+template <size_t N, typename Pred>
+constexpr bool AllModesValid(const uint8_t (&table)[N], Pred valid) {
+    for (size_t i = 0; i < N; ++i)
+        if (!valid(table[i])) return false;
+    return true;
+}
+static_assert(AllModesValid(kKbModeByIndex, devices::evision::IsValidKeyboardMode),
+              "keyboard mode table holds a value the protocol does not define");
+static_assert(AllModesValid(kEdgeModeByIndex, devices::evision::IsValidEdgeMode),
+              "edge mode table holds a value the protocol does not define");
+
 template <size_t N>
 int ModeToIndex(const uint8_t (&table)[N], uint8_t mode) {
     for (size_t i = 0; i < N; ++i)
@@ -658,12 +685,56 @@ struct AppState {
 // UTILITY FUNCTIONS
 //=============================================================================
 
+/// UTF-8 <-> UTF-16 conversion. Everything the UI stores as text passes through
+/// these two; a per-character cast between wchar_t and char silently mangles
+/// anything outside ASCII.
+std::string NarrowUtf8(const std::wstring& w) {
+    if (w.empty()) return std::string();
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(),
+                                           NULL, 0, NULL, NULL);
+    if (needed <= 0) return std::string();
+    std::string out(needed, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &out[0], needed, NULL, NULL);
+    return out;
+}
+
+std::wstring WidenUtf8(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), NULL, 0);
+    if (needed <= 0) return std::wstring();
+    std::wstring out(needed, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &out[0], needed);
+    return out;
+}
+
 std::wstring GetAppDataPath() {
-    wchar_t path[MAX_PATH];
-    SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, path);
+    wchar_t path[MAX_PATH] = {0};
+    if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, path) != S_OK)
+        return L".";  // No roaming profile: fall back to the working directory.
     std::wstring dir = std::wstring(path) + L"\\OneClickRGB";
     CreateDirectoryW(dir.c_str(), NULL);
     return dir;
+}
+
+/// Builds a path inside the app's %APPDATA% folder.
+///
+/// Every such path goes through here and callers pass a bare leaf name, never
+/// one carrying its own separator. Two bugs came from writing the separator at
+/// the call site: L"\profiles" (\p is no escape at all, so the backslash simply
+/// vanished and profiles landed in a sibling folder) and
+/// L"\asus_hw_config.bin" (\a *is* an escape - BEL - so the filename began with
+/// a control character and every open failed silently).
+std::wstring AppDataFile(const std::wstring& leaf) {
+    // A leaf carrying a separator or a control character is the signature of
+    // exactly that mistake, so it is caught here instead of turning into a
+    // file that can never be opened.
+    for (wchar_t c : leaf) {
+        if (c == L'\\' || c == L'/' || c < 0x20) {
+            OutputDebugStringW(L"AppDataFile: leaf name must not contain separators\n");
+            break;
+        }
+    }
+    return GetAppDataPath() + L"\\" + leaf;
 }
 
 // Window position storage
@@ -688,10 +759,10 @@ void SaveAppSettings() {
     g_config.autoApply      = g_state.autoApply;
     g_config.themeId        = GetThemeId();
     g_config.langId         = (g_lang == LANG_DE) ? 1 : 0;
-    if (!g_state.lastProfile.empty()) {
-        g_config.lastProfile.clear();
-        for (wchar_t wc : g_state.lastProfile) g_config.lastProfile += static_cast<char>(wc);
-    }
+    // UTF-8, not a per-character truncation to char: profile names come from a
+    // free-text field and an umlaut used to come back mangled. Assigned
+    // unconditionally so clearing the last profile is persisted too.
+    g_config.lastProfile = NarrowUtf8(g_state.lastProfile);
     if (g_state.hWnd) {
         RECT rc;
         GetWindowRect(g_state.hWnd, &rc);
@@ -719,7 +790,7 @@ void LoadAppSettings() {
     g_state.autostart      = g_config.autostart;
     g_state.minimizeToTray = g_config.minimizeToTray;
     g_state.autoApply      = g_config.autoApply;
-    g_state.lastProfile    = std::wstring(g_config.lastProfile.begin(), g_config.lastProfile.end());
+    g_state.lastProfile    = WidenUtf8(g_config.lastProfile);
     g_windowX = (g_config.windowX != -1) ? g_config.windowX : CW_USEDEFAULT;
     g_windowY = (g_config.windowY != -1) ? g_config.windowY : CW_USEDEFAULT;
     SetTheme(g_config.themeId);
@@ -870,27 +941,8 @@ void SetAutoStart(bool enable) {
 
 namespace {
 
-std::string NarrowUtf8(const std::wstring& w) {
-    if (w.empty()) return std::string();
-    const int needed = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(),
-                                           NULL, 0, NULL, NULL);
-    if (needed <= 0) return std::string();
-    std::string out(needed, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &out[0], needed, NULL, NULL);
-    return out;
-}
-
-std::wstring WidenUtf8(const std::string& s) {
-    if (s.empty()) return std::wstring();
-    const int needed = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), NULL, 0);
-    if (needed <= 0) return std::wstring();
-    std::wstring out(needed, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &out[0], needed);
-    return out;
-}
-
-std::string ProfileDir() {
-    return NarrowUtf8(GetAppDataPath() + L"\profiles");
+std::filesystem::path ProfileDir() {
+    return std::filesystem::path(AppDataFile(L"profiles"));
 }
 
 }  // namespace
@@ -982,7 +1034,7 @@ AuraChannelUi g_auraUi[devices::aura::MAX_CHANNELS];
 namespace {
 
 std::wstring AuraCachePath() {
-    return GetAppDataPath() + L"\asus_hw_config.bin";
+    return AppDataFile(L"asus_hw_config.bin");
 }
 
 /// Signature guarding the cache file against layout changes between versions.
@@ -1052,7 +1104,10 @@ void InitAsusHardware() {
 
 bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
     hal::IHidBackend& hid = Hid();
-    return devices::aura::SetAll(hid, g_auraHw, g_config.aura, 8, r, g, b, g_status) >= 0;
+    // The whole array, not a hard-coded eight: a board reporting more zones
+    // than that had the rest left dark.
+    return devices::aura::SetAll(hid, g_auraHw, g_config.aura,
+                                 RGBConfig::AURA_CHANNELS, r, g, b, g_status) >= 0;
 }
 
 bool SetSteelSeries(uint8_t r, uint8_t g, uint8_t b) {
@@ -1452,13 +1507,21 @@ void ShowTrayMenu(HWND hWnd) {
 // CHANNEL SETTINGS DIALOG
 //=============================================================================
 
+// The dialog lays out one fixed row per channel, so it edits the first eight
+// rather than all RGBConfig::AURA_CHANNELS. Channels past this point apply the
+// neutral default - which is what they did before the array grew, except that
+// they now receive colour at all.
+constexpr int kEditableAuraChannels = 8;
+static_assert(kEditableAuraChannels <= RGBConfig::AURA_CHANNELS,
+              "dialog would index past the channel array");
+
 INT_PTR CALLBACK ChannelSettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_INITDIALOG: {
         SetWindowTextW(hDlg, g_str->csTitle);
         // Create channel correction controls
         int y = 30;
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < kEditableAuraChannels; i++) {
             wchar_t label[64];
             swprintf(label, 64, L"ASUS Ch %d", i);
             CreateWindowW(L"STATIC", label, WS_CHILD | WS_VISIBLE, 10, y, 100, 20, hDlg, NULL, NULL, NULL);
@@ -1491,7 +1554,7 @@ INT_PTR CALLBACK ChannelSettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPAR
     }
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK) {
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < kEditableAuraChannels; i++) {
                 g_config.aura[i].red_adjust = (int)SendDlgItemMessage(hDlg, 7000+i*3, TBM_GETPOS, 0, 0);
                 g_config.aura[i].green_adjust = (int)SendDlgItemMessage(hDlg, 7001+i*3, TBM_GETPOS, 0, 0);
                 g_config.aura[i].blue_adjust = (int)SendDlgItemMessage(hDlg, 7002+i*3, TBM_GETPOS, 0, 0);
@@ -1499,7 +1562,7 @@ INT_PTR CALLBACK ChannelSettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPAR
             g_config.Save();
             EndDialog(hDlg, IDOK);
         } else if (LOWORD(wParam) == IDRETRY) {
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < kEditableAuraChannels; i++) {
                 g_config.aura[i].red_adjust = 100;
                 g_config.aura[i].green_adjust = 100;
                 g_config.aura[i].blue_adjust = 100;
@@ -2257,12 +2320,28 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             UpdateAllControls();
         }
 
-        // Register global hotkeys
-        RegisterHotKey(hWnd, ID_HOTKEY_BLUE, MOD_CONTROL | MOD_ALT, 'B');
-        RegisterHotKey(hWnd, ID_HOTKEY_RED, MOD_CONTROL | MOD_ALT, 'R');
-        RegisterHotKey(hWnd, ID_HOTKEY_GREEN, MOD_CONTROL | MOD_ALT, 'G');
-        RegisterHotKey(hWnd, ID_HOTKEY_WHITE, MOD_CONTROL | MOD_ALT, 'W');
-        RegisterHotKey(hWnd, ID_HOTKEY_OFF, MOD_CONTROL | MOD_ALT, '0');
+        // Register global hotkeys. A hotkey another application already owns is
+        // refused, and silently doing nothing afterwards is indistinguishable
+        // from a broken build - so the ones that failed are named in the log.
+        {
+            const struct { int id; UINT vk; const wchar_t* label; } kHotkeys[] = {
+                {ID_HOTKEY_BLUE,  'B', L"Ctrl+Alt+B"},
+                {ID_HOTKEY_RED,   'R', L"Ctrl+Alt+R"},
+                {ID_HOTKEY_GREEN, 'G', L"Ctrl+Alt+G"},
+                {ID_HOTKEY_WHITE, 'W', L"Ctrl+Alt+W"},
+                {ID_HOTKEY_OFF,   '0', L"Ctrl+Alt+0"},
+            };
+            std::wstring taken;
+            for (const auto& hk : kHotkeys) {
+                if (!RegisterHotKey(hWnd, hk.id, MOD_CONTROL | MOD_ALT, hk.vk)) {
+                    if (!taken.empty()) taken += L", ";
+                    taken += hk.label;
+                }
+            }
+            if (!taken.empty())
+                AppendStatus((L"[WARN] Hotkey already in use by another program: "
+                              + taken).c_str());
+        }
 
         // Final sync of all UI elements to the loaded config
         UpdateAllControls();
@@ -2676,7 +2755,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         UnregisterHotKey(hWnd, ID_HOTKEY_GREEN);
         UnregisterHotKey(hWnd, ID_HOTKEY_WHITE);
         UnregisterHotKey(hWnd, ID_HOTKEY_OFF);
-        UnregisterHotKey(hWnd, ID_HOTKEY_TOGGLE);
         WTSUnRegisterSessionNotification(hWnd);
         RemoveTrayIcon();
         if (g_hBgBrush) DeleteObject(g_hBgBrush);
@@ -3025,12 +3103,42 @@ LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 //=============================================================================
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow) {
-    LogDebug("WinMain started");
     // Check for command line flags
     bool startMinimized = (strstr(lpCmdLine, "--minimized") != nullptr);
     g_skipApplyOnStart = (strstr(lpCmdLine, "--no-apply") != nullptr);
     g_state.dryRun = (strstr(lpCmdLine, "--dry-run") != nullptr);
     bool forceForeground = (strstr(lpCmdLine, "--foreground") != nullptr);
+
+    g_debugLogEnabled = (strstr(lpCmdLine, "--debug") != nullptr);
+    if (g_debugLogEnabled) g_debugLogPath = AppDataFile(L"debug.log");
+    LogDebug("WinMain started");
+
+    // Only one instance may drive the hardware. The scheduled autostart task
+    // and a manual launch would otherwise talk to the same HID devices at the
+    // same time and both write config.json, last writer winning.
+    //
+    // Session-local: the task runs elevated in the same session, and a second
+    // user's session gets its own instance legitimately.
+    HANDLE instanceMutex = CreateMutexW(NULL, TRUE, L"Local\\OneClickRGB.SingleInstance");
+    if (instanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        // A theme or language switch restarts the app, so for that one case the
+        // predecessor is on its way out and it is worth waiting for it.
+        bool acquired = false;
+        if (forceForeground)
+            acquired = WaitForSingleObject(instanceMutex, 5000) == WAIT_OBJECT_0;
+
+        if (!acquired) {
+            // Hand the running instance the foreground instead of starting a
+            // second one; from the tray it is otherwise invisible.
+            if (HWND existing = FindWindowW(L"OneClickRGBClass", NULL)) {
+                ShowWindow(existing, SW_SHOW);
+                if (IsIconic(existing)) ShowWindow(existing, SW_RESTORE);
+                SetForegroundWindow(existing);
+            }
+            CloseHandle(instanceMutex);
+            return 0;
+        }
+    }
 
     // In dry-run mode every device is simulated so the protocols run end to end
     // and their bytes land in the status log, without touching hardware.
@@ -3108,12 +3216,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         return 1;
     }
 
-    // Register for power setting notifications (resume from sleep)
-    GUID GUID_CONSOLE_DISPLAY_STATE = {0x6fe69556, 0x704a, 0x47a0, {0x8f, 0x24, 0x8d, 0x93, 0x6f, 0xda, 0x47}};
-    RegisterPowerSettingNotification(g_state.hWnd, &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
+    // Register for power setting notifications (resume from sleep).
+    //
+    // {6FE69556-704A-47A0-8F24-C28D936FDA47} - all eight Data4 bytes. The
+    // previous literal listed only seven, so C28D93... shifted by one and the
+    // last byte defaulted to zero: a GUID no subsystem knows, registration
+    // failed, and no display-state notification ever arrived. Named differently
+    // from the SDK symbol so this cannot quietly shadow it again.
+    static const GUID kConsoleDisplayStateGuid =
+        {0x6fe69556, 0x704a, 0x47a0, {0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47}};
+    static_assert(sizeof(kConsoleDisplayStateGuid.Data4) == 8, "GUID Data4 is eight bytes");
+
+    if (!RegisterPowerSettingNotification(g_state.hWnd, &kConsoleDisplayStateGuid,
+                                          DEVICE_NOTIFY_WINDOW_HANDLE)) {
+        AppendStatus(L"[WARN] Display power notifications unavailable - "
+                     L"relying on the resume watchdog only");
+    }
 
     // Also register for session notifications (lock/unlock)
-    WTSRegisterSessionNotification(g_state.hWnd, NOTIFY_FOR_THIS_SESSION);
+    if (!WTSRegisterSessionNotification(g_state.hWnd, NOTIFY_FOR_THIS_SESSION))
+        AppendStatus(L"[WARN] Session notifications unavailable - "
+                     L"no re-apply after unlock");
 
     // Start resume watcher thread (detects time jumps from standby)
     std::thread(ResumeWatcherThread).detach();
@@ -3157,6 +3280,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
     // Cleanup GDI+
     Gdiplus::GdiplusShutdown(g_gdiplusToken);
+
+    // Held for the whole run so a second launch can detect this one; released
+    // here so a restart for a theme or language change does not have to wait
+    // for the process to be reaped.
+    if (instanceMutex) {
+        ReleaseMutex(instanceMutex);
+        CloseHandle(instanceMutex);
+    }
 
     return (int)msg.wParam;
 }

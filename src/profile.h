@@ -9,6 +9,7 @@
 
 #pragma once
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -46,13 +47,18 @@ Profile Parse(const std::string& text);
 /// filesystem. Profile names come from a free-text field in the UI.
 bool IsValidName(const std::string& name);
 
+// The directory is a std::filesystem::path rather than a std::string on
+// purpose: on Windows a narrow string is interpreted in the active code page,
+// so a UTF-8 %APPDATA% path containing an umlaut pointed nowhere. The caller
+// hands over the native wide path and no conversion happens at all.
+
 /// Directory is created if missing. Returns false on invalid name or I/O error.
-bool Save(const std::string& dir, const std::string& name, const Profile& p);
+bool Save(const std::filesystem::path& dir, const std::string& name, const Profile& p);
 
 /// Returns false when the profile does not exist or the name is invalid.
-bool Load(const std::string& dir, const std::string& name, Profile& out);
+bool Load(const std::filesystem::path& dir, const std::string& name, Profile& out);
 
 /// Profile names present in `dir`, without the extension, sorted.
-std::vector<std::string> List(const std::string& dir);
+std::vector<std::string> List(const std::filesystem::path& dir);
 
 }  // namespace profile

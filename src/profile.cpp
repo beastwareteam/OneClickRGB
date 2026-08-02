@@ -104,13 +104,15 @@ bool IsValidName(const std::string& name) {
 
 namespace {
 
-fs::path ProfilePath(const std::string& dir, const std::string& name) {
-    return fs::path(dir) / (name + EXTENSION);
+fs::path ProfilePath(const fs::path& dir, const std::string& name) {
+    // u8path keeps the name UTF-8 on the way to the native encoding; profile
+    // names come from a free-text UI field and may hold non-ASCII characters.
+    return dir / fs::u8path(name + EXTENSION);
 }
 
 }  // namespace
 
-bool Save(const std::string& dir, const std::string& name, const Profile& p) {
+bool Save(const fs::path& dir, const std::string& name, const Profile& p) {
     if (!IsValidName(name)) return false;
 
     std::error_code ec;
@@ -122,7 +124,7 @@ bool Save(const std::string& dir, const std::string& name, const Profile& p) {
     return static_cast<bool>(f);
 }
 
-bool Load(const std::string& dir, const std::string& name, Profile& out) {
+bool Load(const fs::path& dir, const std::string& name, Profile& out) {
     if (!IsValidName(name)) return false;
 
     std::ifstream f(ProfilePath(dir, name));
@@ -134,7 +136,7 @@ bool Load(const std::string& dir, const std::string& name, Profile& out) {
     return true;
 }
 
-std::vector<std::string> List(const std::string& dir) {
+std::vector<std::string> List(const fs::path& dir) {
     std::vector<std::string> names;
     std::error_code ec;
     if (!fs::is_directory(dir, ec)) return names;
@@ -143,7 +145,9 @@ std::vector<std::string> List(const std::string& dir) {
         if (ec) break;
         if (!entry.is_regular_file()) continue;
         if (entry.path().extension() != EXTENSION) continue;
-        names.push_back(entry.path().stem().string());
+        // u8string, to match what Save() accepts - .string() would hand back
+        // the active code page and a name with an umlaut would not round trip.
+        names.push_back(entry.path().stem().u8string());
     }
     std::sort(names.begin(), names.end());
     return names;

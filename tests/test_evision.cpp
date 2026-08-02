@@ -312,3 +312,61 @@ TEST(evision, missing_keyboard_is_reported_and_writes_nothing) {
     REQUIRE(!log.empty());
     CHECK(log[0].find("not found") != std::string::npos);
 }
+
+//=============================================================================
+// Mode validity
+//
+// The app persists these bytes and hands them straight to the device, so a
+// value the protocol does not define must never survive a round trip through
+// the settings. A zero-initialised setting used to do exactly that: 0 is not a
+// keyboard mode at all, and as an edge mode it means FREEZE.
+//=============================================================================
+
+TEST(evision, zero_is_not_a_keyboard_mode) {
+    CHECK(!IsValidKeyboardMode(0x00));
+}
+
+TEST(evision, gaps_in_the_keyboard_mode_range_are_rejected) {
+    // The range is not contiguous, so a bounds check would wrongly accept these.
+    CHECK(!IsValidKeyboardMode(0x09));
+    CHECK(!IsValidKeyboardMode(0x0B));
+    CHECK(!IsValidKeyboardMode(0x0E));
+    CHECK(!IsValidKeyboardMode(0xFF));
+}
+
+TEST(evision, every_named_keyboard_mode_is_accepted) {
+    const uint8_t all[] = {KB_MODE_WAVE_SHORT, KB_MODE_WAVE_LONG, KB_MODE_COLOR_WHEEL,
+                           KB_MODE_SPECTRUM, KB_MODE_BREATHING, KB_MODE_STATIC,
+                           KB_MODE_REACTIVE, KB_MODE_RIPPLE, KB_MODE_STARLIGHT,
+                           KB_MODE_RAINBOW, KB_MODE_HURRICANE};
+    for (uint8_t mode : all) CHECK(IsValidKeyboardMode(mode));
+}
+
+TEST(evision, edge_modes_stop_after_off) {
+    CHECK(IsValidEdgeMode(EDGE_MODE_FREEZE));
+    CHECK(IsValidEdgeMode(EDGE_MODE_OFF));
+    CHECK(!IsValidEdgeMode(EDGE_MODE_OFF + 1));
+    CHECK(!IsValidEdgeMode(0xFF));
+}
+
+TEST(evision, the_defaults_are_modes_the_device_implements) {
+    CHECK(IsValidKeyboardMode(KB_MODE_DEFAULT));
+    CHECK(IsValidEdgeMode(EDGE_MODE_DEFAULT));
+    // Static, specifically - the default must be a plain colour, not an effect.
+    CHECK_EQ((int)KB_MODE_DEFAULT, (int)KB_MODE_STATIC);
+    CHECK_EQ((int)EDGE_MODE_DEFAULT, (int)EDGE_MODE_STATIC);
+}
+
+TEST(evision, the_mode_a_setting_carries_is_the_byte_that_goes_out) {
+    // Guards the index/value confusion: SetEdge must transmit the mode it was
+    // given, not translate it. EDGE_MODE_OFF is 0x05 while its position in the
+    // UI list is 4 - sending the index turned "Off" into STATIC.
+    auto hid = MakeKeyboardBackend();
+    for (int i = 0; i < 8; ++i) hid.QueueResponse(MakeResponse(0));
+
+    SetEdge(hid, ChannelConfig(), 10, 20, 30, EDGE_MODE_OFF, NullStatus);
+
+    const auto edge_writes = hid.WritesWithByte(4, 10);  // the 10-byte payload
+    REQUIRE(!edge_writes.empty());
+    CHECK_EQ((int)edge_writes[0]->data[8], (int)EDGE_MODE_OFF);
+}

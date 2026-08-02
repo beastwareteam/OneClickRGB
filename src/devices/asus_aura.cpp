@@ -240,7 +240,10 @@ bool ResetToDirectMode(hal::IHidBackend& hid, const StatusFn& status) {
     dev->Write(buf, PACKET_SIZE);
     hid.Sleep(50);
 
-    for (int ch = 0; ch < 8; ++ch) {
+    // Every channel the protocol can address, not just the first eight - a
+    // channel left in effect mode ignores the direct colour writes that follow.
+    // Over-addressing is harmless; the board ignores channels it does not have.
+    for (int ch = 0; ch < MAX_CHANNELS; ++ch) {
         std::memset(buf, 0, sizeof(buf));
         buf[0x00] = REPORT_ID;
         buf[0x01] = REQ_CHANNEL_MODE;

@@ -10,6 +10,8 @@
 
 #pragma once
 #include "channel_config.h"
+#include "devices/asus_aura.h"
+#include "devices/evision.h"
 #include <cstdint>
 #include <string>
 #include <map>
@@ -33,8 +35,11 @@ public:
     uint8_t blue       = 255;
     uint8_t brightness = 4;   // 0-4 global brightness steps
     uint8_t speed      = 2;   // 0-5
-    uint8_t kbMode     = 0;   // KB_MODE_* constants
-    uint8_t edgeMode   = 0;   // 0-5
+    // Protocol values, not list indices - see devices/evision.h. Zero is not a
+    // valid keyboard mode and means FREEZE for the edge zone, so these must not
+    // be left zero-initialised.
+    uint8_t kbMode     = devices::evision::KB_MODE_DEFAULT;
+    uint8_t edgeMode   = devices::evision::EDGE_MODE_DEFAULT;
 
     //--- Device enables ---
     bool enableAura     = true;
@@ -54,8 +59,16 @@ public:
     std::string lastProfile;
 
     //--- Channel correction (per device zone) ---
-    ChannelConfig aura[8];
-    ChannelConfig ram[4];
+
+    // One entry per channel the Aura protocol can address. This used to be
+    // eight while the protocol allows sixteen, so a board reporting more than
+    // eight zones left the rest dark with no message. The correction dialog
+    // still edits the first eight; the others apply the neutral default.
+    static constexpr int AURA_CHANNELS = devices::aura::MAX_CHANNELS;
+    static constexpr int RAM_SLOTS     = 4;
+
+    ChannelConfig aura[AURA_CHANNELS];
+    ChannelConfig ram[RAM_SLOTS];
     ChannelConfig steelseries;
     ChannelConfig keyboard;
     ChannelConfig edge;
@@ -109,8 +122,8 @@ public:
                     {"r", c.red_adjust}, {"g", c.green_adjust},
                     {"b", c.blue_adjust}, {"br", c.brightness}};
         };
-        for (int i = 0; i < 8; i++) j["aura"][i] = chOut(aura[i]);
-        for (int i = 0; i < 4; i++) j["ram"][i]  = chOut(ram[i]);
+        for (int i = 0; i < AURA_CHANNELS; i++) j["aura"][i] = chOut(aura[i]);
+        for (int i = 0; i < RAM_SLOTS; i++) j["ram"][i]  = chOut(ram[i]);
         j["steelseries"] = chOut(steelseries);
         j["keyboard"]    = chOut(keyboard);
         j["edge"]        = chOut(edge);
@@ -134,6 +147,19 @@ public:
             speed      = (uint8_t)j.value("speed",      (int)speed);
             kbMode     = (uint8_t)j.value("kbMode",     (int)kbMode);
             edgeMode   = (uint8_t)j.value("edgeMode",   (int)edgeMode);
+
+            // Files written by earlier versions hold a zero here (and older
+            // ones a combo index), which would be sent to the keyboard as a
+            // mode byte. Anything the protocol does not implement falls back to
+            // the default rather than going out on the wire.
+            if (!devices::evision::IsValidKeyboardMode(kbMode))
+                kbMode = devices::evision::KB_MODE_DEFAULT;
+            // FREEZE is a protocol value the UI never offered, so a stored zero
+            // can only be the old zero-initialised default rather than a
+            // deliberate choice - migrate it instead of sending it.
+            if (!devices::evision::IsValidEdgeMode(edgeMode) ||
+                edgeMode == devices::evision::EDGE_MODE_FREEZE)
+                edgeMode = devices::evision::EDGE_MODE_DEFAULT;
 
             enableAura     = j.value("enableAura",     enableAura);
             enableMouse    = j.value("enableMouse",    enableMouse);
@@ -159,10 +185,10 @@ public:
                 dst.brightness  = src.value("br", dst.brightness);
             };
             if (j.contains("aura") && j["aura"].is_array())
-                for (int i = 0; i < 8 && i < (int)j["aura"].size(); i++)
+                for (int i = 0; i < AURA_CHANNELS && i < (int)j["aura"].size(); i++)
                     loadCh(j["aura"][i], aura[i]);
             if (j.contains("ram") && j["ram"].is_array())
-                for (int i = 0; i < 4 && i < (int)j["ram"].size(); i++)
+                for (int i = 0; i < RAM_SLOTS && i < (int)j["ram"].size(); i++)
                     loadCh(j["ram"][i], ram[i]);
             if (j.contains("steelseries")) loadCh(j["steelseries"], steelseries);
             if (j.contains("keyboard"))    loadCh(j["keyboard"],    keyboard);
@@ -172,8 +198,8 @@ public:
 
 private:
     void InitNames() {
-        for (int i = 0; i < 8; i++) aura[i].name = "ASUS Channel " + std::to_string(i);
-        for (int i = 0; i < 4; i++) ram[i].name  = "RAM Slot "     + std::to_string(i);
+        for (int i = 0; i < AURA_CHANNELS; i++) aura[i].name = "ASUS Channel " + std::to_string(i);
+        for (int i = 0; i < RAM_SLOTS; i++) ram[i].name  = "RAM Slot "     + std::to_string(i);
         steelseries.name = "SteelSeries Mouse";
         keyboard.name    = "Keyboard";
         edge.name        = "Keyboard Edge";
@@ -213,7 +239,7 @@ private:
                 if (eq != std::string::npos)
                     try { vals[line.substr(0, eq)] = std::stoi(line.substr(eq + 1)); } catch (...) {}
             }
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < AURA_CHANNELS; i++) {
                 std::string p = "aura" + std::to_string(i);
                 if (vals.count(p + "_enabled"))    aura[i].enabled      = vals[p + "_enabled"] != 0;
                 if (vals.count(p + "_red"))        aura[i].red_adjust   = vals[p + "_red"];
@@ -221,7 +247,7 @@ private:
                 if (vals.count(p + "_blue"))       aura[i].blue_adjust  = vals[p + "_blue"];
                 if (vals.count(p + "_brightness")) aura[i].brightness   = vals[p + "_brightness"];
             }
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < RAM_SLOTS; i++) {
                 std::string p = "ram" + std::to_string(i);
                 if (vals.count(p + "_enabled"))    ram[i].enabled      = vals[p + "_enabled"] != 0;
                 if (vals.count(p + "_red"))        ram[i].red_adjust   = vals[p + "_red"];

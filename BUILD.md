@@ -111,6 +111,20 @@ protocols run end to end and their packet bytes go to the status log instead of
 onto the bus. Useful for UI work and for inspecting what a protocol actually
 sends.
 
+### Command line flags
+
+| Flag | Effect |
+|------|--------|
+| `--dry-run` | Simulate every device; nothing is transmitted |
+| `--no-apply` | Start without applying colours |
+| `--minimized` | Start in the tray |
+| `--foreground` | Force the window to the front (used by the self-restart) |
+| `--debug` | Write startup tracing to `%APPDATA%\OneClickRGB\debug.log` |
+
+Only one instance runs at a time. Starting a second one brings the running
+window to the front and exits - the autostart task and a manual launch would
+otherwise drive the same devices simultaneously.
+
 ---
 
 ## Build Output
