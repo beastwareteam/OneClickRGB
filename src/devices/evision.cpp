@@ -137,7 +137,13 @@ bool SetEdge(hal::IHidBackend& hid, const ChannelConfig& zone,
              uint8_t r, uint8_t g, uint8_t b, uint8_t mode,
              const StatusFn& status) {
     auto dev = OpenKeyboard(hid);
-    if (!dev) return false;
+    if (!dev) {
+        // Reported rather than returned silently: with the keyboard absent the
+        // edge zone produced no log line at all, so "the edge lighting does not
+        // work" looked identical to the feature being broken.
+        status("[EVision] Edge: keyboard not found");
+        return false;
+    }
 
     Query(*dev, CMD_BEGIN_CONFIG, 0, nullptr, 0, nullptr);
     hid.Sleep(20);

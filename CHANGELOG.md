@@ -90,6 +90,22 @@ All notable changes to OneClickRGB are documented here.
 - Hotkeys that another application already owns are named in the status log
   instead of silently doing nothing.
 
+- **The status log stayed empty.** Two causes: the pending-notification flag was
+  latched by every line written before the window existed, and since it was only
+  cleared while handling the redraw message it stayed set forever and no update
+  was ever posted. Appending also used `EM_REPLACESEL`, which an edit control
+  silently ignores while it is `ES_READONLY`.
+
+- **Every start ran a full "resume" cycle.** Windows reports the current display
+  state the moment a power notification is registered, and that report was
+  treated as a wake-up: HID reset plus a re-apply on each launch. Only an
+  off-to-on transition counts now. This surfaced once the notification GUID was
+  corrected - before that the registration failed and nothing arrived at all.
+
+- The edge zone said nothing at all when the keyboard was absent, while the main
+  matrix reported "not found" - so a missing keyboard was indistinguishable from
+  broken edge lighting.
+
 ### Changed
 
 - Device protocols (ASUS Aura, SteelSeries, EVision, G.Skill), profile storage

@@ -849,15 +849,21 @@ void RefreshStatusWindow() {
     } else {
         // Move the caret past the end, then insert - EM_REPLACESEL with no
         // selection is an append and repaints only the new lines.
+        //
+        // The control is ES_READONLY and an edit control silently ignores
+        // EM_REPLACESEL while it is: the message is dropped, no error, and the
+        // log simply stays empty. Read-only is lifted for the insertion and put
+        // straight back, which keeps the control unwritable for the user.
+        SendMessage(g_state.hStatus, EM_SETREADONLY, FALSE, 0);
         const int end = GetWindowTextLengthW(g_state.hStatus);
         SendMessage(g_state.hStatus, EM_SETSEL, end, end);
         SendMessageW(g_state.hStatus, EM_REPLACESEL, FALSE, (LPARAM)toAppend.c_str());
+        SendMessage(g_state.hStatus, EM_SETREADONLY, TRUE, 0);
     }
     SendMessage(g_state.hStatus, EM_SCROLLCARET, 0, 0);
 }
 
 void AppendStatus(const wchar_t* text) {
-    bool notify = false;
     {
         std::lock_guard<std::mutex> lock(g_state.statusMutex);
         g_state.statusLog += text;
@@ -871,17 +877,21 @@ void AppendStatus(const wchar_t* text) {
             ++g_state.statusGeneration;
             g_state.statusRendered = 0;
         }
-        // One pending notification is enough no matter how many lines arrive
-        // before the UI thread gets round to them; the refresh always renders
-        // everything outstanding. Without this an apply run posts a dozen
-        // messages and the control is reworked a dozen times.
-        notify = !g_state.statusNotifyPending.exchange(true);
     }
 
     // The edit control belongs to the UI thread. Worker threads must not write
     // to it directly: each one rendering its own snapshot of the log means the
     // updates can land out of order and leave a stale, truncated log on screen.
-    if (notify && g_state.hWnd) PostMessage(g_state.hWnd, WM_APP_STATUS, 0, 0);
+    //
+    // One pending notification is enough no matter how many lines arrive before
+    // the UI thread gets round to them - the refresh always renders everything
+    // outstanding. The flag is latched *only* when there is a window to post
+    // to: setting it without posting, which is what every status line written
+    // before the window exists would do, left it stuck at true and silenced the
+    // log for the rest of the session. Those early lines are picked up by the
+    // explicit refresh once the window has been created.
+    if (g_state.hWnd && !g_state.statusNotifyPending.exchange(true))
+        PostMessage(g_state.hWnd, WM_APP_STATUS, 0, 0);
 }
 
 void ClearStatus() {
@@ -891,8 +901,8 @@ void ClearStatus() {
         ++g_state.statusGeneration;
         g_state.statusRendered = 0;
     }
-    g_state.statusNotifyPending = true;
-    if (g_state.hWnd) PostMessage(g_state.hWnd, WM_APP_STATUS, 0, 0);
+    if (g_state.hWnd && !g_state.statusNotifyPending.exchange(true))
+        PostMessage(g_state.hWnd, WM_APP_STATUS, 0, 0);
 }
 
 //=============================================================================
@@ -1239,6 +1249,11 @@ bool EnableShutdownPrivilege() {
 // Global flag for resume detection
 std::atomic<bool> g_resumeDetected{false};
 std::atomic<bool> g_watcherRunning{true};
+
+/// Last console display state seen: -1 until the first notification arrives,
+/// then 0 (off) or 1 (on). Needed to tell a real wake-up from the state report
+/// Windows sends as soon as the notification is registered.
+int g_displayState = -1;
 
 // Watchdog thread that detects resume by monitoring time jumps
 void ResumeWatcherThread() {
@@ -2759,8 +2774,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         else if (wParam == PBT_POWERSETTINGCHANGE) {
             POWERBROADCAST_SETTING* pbs = (POWERBROADCAST_SETTING*)lParam;
             if (pbs && pbs->DataLength >= 4) {
-                DWORD displayState = *((DWORD*)pbs->Data);
-                if (displayState == 1) {
+                const DWORD displayState = *((DWORD*)pbs->Data);
+                const bool wasOff = (g_displayState == 0);
+                const bool firstReport = (g_displayState < 0);
+                g_displayState = (int)displayState;
+
+                // Only an off -> on transition is a wake-up. Windows delivers
+                // the *current* state the moment the notification is
+                // registered, so acting on any "display on" made every single
+                // start run the full resume cycle - HID reset and a re-apply -
+                // which showed up as a spurious "System resumed" right after
+                // launch.
+                if (displayState == 1 && wasOff && !firstReport) {
                     KillTimer(hWnd, ID_TIMER_RESUME);
                     SetTimer(hWnd, ID_TIMER_RESUME, 3000, NULL);
                 }
@@ -3175,8 +3200,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     //
     // Session-local: the task runs elevated in the same session, and a second
     // user's session gets its own instance legitimately.
+    // SetLastError first: CreateMutexW leaves the last error untouched when it
+    // creates a fresh mutex, so whatever ran before decides the answer. With
+    // --debug that is CreateDirectoryW on the already-existing %APPDATA% folder,
+    // which sets ERROR_ALREADY_EXISTS - and the app then quit on startup,
+    // convinced a second instance was running.
+    SetLastError(ERROR_SUCCESS);
     HANDLE instanceMutex = CreateMutexW(NULL, TRUE, L"Local\\OneClickRGB.SingleInstance");
-    if (instanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+    const bool alreadyRunning = (GetLastError() == ERROR_ALREADY_EXISTS);
+
+    if (instanceMutex && alreadyRunning) {
         // A theme or language switch restarts the app, so for that one case the
         // predecessor is on its way out and it is worth waiting for it.
         bool acquired = false;
@@ -3271,6 +3304,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         MessageBoxW(NULL, err, L"Error", MB_OK);
         return 1;
     }
+
+    // Everything logged before this point - the HID reset, the hardware scan,
+    // and every line written from inside WM_CREATE, where g_state.hWnd is not
+    // assigned yet - has nowhere to be drawn. Render it now that there is a
+    // window; from here on AppendStatus posts for itself.
+    RefreshStatusWindow();
 
     // Register for power setting notifications (resume from sleep).
     //

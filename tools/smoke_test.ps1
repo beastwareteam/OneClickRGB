@@ -38,6 +38,40 @@ function Check {
     }
 }
 
+# Reads the text of a child control of the main window. The status log is an
+# EDIT control, and "the window comes up but the log stays empty" is a failure
+# no check that only looks at files or exit codes can see.
+Add-Type -Namespace Win32 -Name Ui -MemberDefinition @'
+[DllImport("user32.dll", SetLastError=true)]
+public static extern IntPtr GetDlgItem(IntPtr hDlg, int nIDDlgItem);
+[DllImport("user32.dll", CharSet=CharSet.Unicode)]
+public static extern IntPtr SendMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+[DllImport("user32.dll", CharSet=CharSet.Unicode)]
+public static extern IntPtr SendMessageW(IntPtr hWnd, uint msg, IntPtr wParam, System.Text.StringBuilder lParam);
+'@
+
+# ID_STATIC_STATUS in src/oneclick_rgb_complete.cpp
+$ID_STATIC_STATUS = 1060
+
+function Get-StatusLogText {
+    param([IntPtr]$MainWindow)
+    $ctrl = [Win32.Ui]::GetDlgItem($MainWindow, $ID_STATIC_STATUS)
+    if ($ctrl -eq [IntPtr]::Zero) { return $null }
+
+    # WM_GETTEXT, not GetWindowText: for a control owned by another process
+    # GetWindowText returns the window caption and an EDIT control has none, so
+    # it hands back an empty string no matter what the control contains. That
+    # is by design, and reading it the wrong way made a working log look empty.
+    $WM_GETTEXTLENGTH = 0x000E
+    $WM_GETTEXT       = 0x000D
+
+    $len = [int][Win32.Ui]::SendMessageW($ctrl, $WM_GETTEXTLENGTH, [IntPtr]::Zero, [IntPtr]::Zero)
+    if ($len -le 0) { return "" }
+    $sb = New-Object System.Text.StringBuilder ($len + 1)
+    [void][Win32.Ui]::SendMessageW($ctrl, $WM_GETTEXT, [IntPtr]$sb.Capacity, $sb)
+    return $sb.ToString()
+}
+
 function Stop-App {
     param($Process)
     if ($Process -and -not $Process.HasExited) {
@@ -60,6 +94,24 @@ Write-Host ""
 Write-Host "Smoke test: $Exe"
 Write-Host ""
 
+# An instance already running holds the single-instance mutex, so the one this
+# script starts would exit immediately and every check below would report a
+# failure that says nothing about the build under test.
+$running = @(Get-Process OneClickRGB -ErrorAction SilentlyContinue)
+if ($running.Count -gt 0) {
+    Write-Host "OneClickRGB is already running - close it before running the smoke test:" -ForegroundColor Red
+    $running | ForEach-Object { Write-Host "  PID $($_.Id)  $($_.Path)" }
+    exit 1
+}
+try {
+    $existing = [System.Threading.Mutex]::OpenExisting('Local\OneClickRGB.SingleInstance')
+    $existing.Dispose()
+    Write-Host "The single-instance mutex is held by another process - close it first." -ForegroundColor Red
+    exit 1
+} catch [System.Threading.WaitHandleCannotBeOpenedException] {
+    # Nothing holds it - this is the expected path.
+}
+
 # --- The build output must be runnable as it stands ------------------------
 # hidapi.dll is load-time linked: if it is missing the process dies before
 # reaching WinMain, with a Windows error that mentions nothing about RGB.
@@ -78,6 +130,17 @@ try {
     Start-Sleep -Seconds 4
 
     Check "process is still alive after four seconds" { -not $app.HasExited }
+    if ($app.HasExited) {
+        # Everything after this inspects a live window; without one the checks
+        # would fail with binding errors that hide the actual cause.
+        Write-Host "  the process exited early with code $($app.ExitCode) - remaining checks skipped" -ForegroundColor Red
+        Write-Host ""
+        if (Test-Path $logPath) {
+            Write-Host "  debug log:"
+            Get-Content $logPath | ForEach-Object { Write-Host "    $_" }
+        }
+        exit 1
+    }
     Check "a main window exists" { $app.Refresh(); $app.MainWindowHandle -ne 0 }
 
     # --- Debug log placement ----------------------------------------------
@@ -93,6 +156,45 @@ try {
     }
     Check "startup reached the message loop" {
         (Select-String -Path $logPath -Pattern 'Entering Message Loop' -ErrorAction SilentlyContinue).Count -eq 1
+    }
+
+    # --- Status log --------------------------------------------------------
+    # The log is what tells the user why a device did not respond. It has been
+    # empty, doubled and repainted per line; each of those reached a user.
+    Write-Host "[status log]"
+    $app.Refresh()
+    $log = Get-StatusLogText $app.MainWindowHandle
+    Check "the status control exists" { $null -ne $log }
+    Check "it is not empty" { $log -and $log.Trim().Length -gt 0 }
+    Check "it shows the startup line" { $log -match 'OneClickRGB started' }
+    Check "no line appears twice in a row" {
+        if (-not $log) { return $false }
+        $lines = @($log -split "`r`n" | Where-Object { $_.Trim() -ne '' })
+        $dupes = 0
+        for ($i = 1; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -eq $lines[$i-1]) { $dupes++ }
+        }
+        $dupes -eq 0
+    }
+
+    # Press Apply for real and watch what the log does. In --dry-run this runs
+    # every protocol against the simulated backend, so it is safe here.
+    $before = $log
+    $WM_COMMAND = 0x0111
+    $ID_BTN_APPLY = 1001
+    $BN_CLICKED = 0
+    $wParam = [IntPtr](($BN_CLICKED -shl 16) -bor $ID_BTN_APPLY)
+    [void][Win32.Ui]::SendMessageW($app.MainWindowHandle, $WM_COMMAND, $wParam, [IntPtr]::Zero)
+    Start-Sleep -Seconds 2
+    $after = Get-StatusLogText $app.MainWindowHandle
+
+    Check "applying writes to the log" { $after -and $after -match 'Applying RGB Settings' }
+    Check "applying appends rather than clearing the history" {
+        $after -and $before -and $after.Length -gt $before.Length
+    }
+    Check "one apply produces one run, not several" {
+        if (-not $after) { return $false }
+        ([regex]::Matches($after, 'Applying RGB Settings')).Count -eq 1
     }
 
     # --- Single instance ---------------------------------------------------

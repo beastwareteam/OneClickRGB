@@ -370,3 +370,17 @@ TEST(evision, the_mode_a_setting_carries_is_the_byte_that_goes_out) {
     REQUIRE(!edge_writes.empty());
     CHECK_EQ((int)edge_writes[0]->data[8], (int)EDGE_MODE_OFF);
 }
+
+TEST(evision, missing_keyboard_is_reported_for_the_edge_zone_too) {
+    // The main matrix said "not found" while the edge zone returned silently,
+    // so a user with no keyboard attached saw nothing about the edge at all.
+    fakes::FakeHidBackend hid;  // no devices registered
+
+    std::vector<std::string> log;
+    const bool ok = SetEdge(hid, ChannelConfig(), 1, 2, 3, EDGE_MODE_STATIC,
+                            [&](const std::string& s) { log.push_back(s); });
+    CHECK(!ok);
+    CHECK_EQ((int)hid.WriteCount(), 0);
+    REQUIRE(!log.empty());
+    CHECK(log[0].find("not found") != std::string::npos);
+}
