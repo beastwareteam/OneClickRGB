@@ -2520,6 +2520,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN: {
         HDC hdcCtrl = (HDC)wParam;
+
+        // A read-only edit control asks for its colours with WM_CTLCOLORSTATIC,
+        // not WM_CTLCOLOREDIT - and the status log is one. Handing it the hollow
+        // brush every label gets meant it never erased its background, so each
+        // repaint drew the new text straight on top of the old and the log ended
+        // up as layers of overlapping glyphs. It needs a real brush and an
+        // opaque background; the labels keep the transparent treatment, which is
+        // what lets them sit on the card background.
+        if ((HWND)lParam == g_state.hStatus) {
+            if (!g_hBgBrush) g_hBgBrush = CreateSolidBrush(g_currentTheme->bgControl);
+            SetTextColor(hdcCtrl, g_currentTheme->textPrimary);
+            SetBkColor(hdcCtrl, g_currentTheme->bgControl);
+            SetBkMode(hdcCtrl, OPAQUE);
+            return (LRESULT)g_hBgBrush;
+        }
+
         SetTextColor(hdcCtrl, g_currentTheme->textPrimary);
         SetBkMode(hdcCtrl, TRANSPARENT);
         return (LRESULT)GetStockObject(HOLLOW_BRUSH);

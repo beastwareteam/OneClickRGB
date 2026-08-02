@@ -98,3 +98,7 @@ legacy/
 # Root-level duplicate DLLs (originals are in dependencies/hidapi/ and dependencies/PawnIO/)
 dependencies/hidapi.dll
 dependencies/PawnIOLib.dll
+
+# Smoke test artefact
+build_app/smoke_status_log.png
+smoke_status_log.png

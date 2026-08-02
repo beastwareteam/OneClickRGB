@@ -48,6 +48,9 @@ public static extern IntPtr GetDlgItem(IntPtr hDlg, int nIDDlgItem);
 public static extern IntPtr SendMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 [DllImport("user32.dll", CharSet=CharSet.Unicode)]
 public static extern IntPtr SendMessageW(IntPtr hWnd, uint msg, IntPtr wParam, System.Text.StringBuilder lParam);
+[DllImport("user32.dll")]
+public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+public struct RECT { public int Left, Top, Right, Bottom; }
 '@
 
 # ID_STATIC_STATUS in src/oneclick_rgb_complete.cpp
@@ -195,6 +198,35 @@ try {
     Check "one apply produces one run, not several" {
         if (-not $after) { return $false }
         ([regex]::Matches($after, 'Applying RGB Settings')).Count -eq 1
+    }
+
+    # A picture of the log after scrolling. Painting defects - text drawn over
+    # text because the control never erased its background - are invisible to
+    # every check above, which only ever reads the control's text. No assertion
+    # is made on the pixels; the image is there to be looked at, and CI keeps it
+    # as an artifact.
+    Write-Host "[appearance]"
+    $log = [Win32.Ui]::GetDlgItem($app.MainWindowHandle, $ID_STATIC_STATUS)
+    $WM_VSCROLL = 0x0115
+    foreach ($cmd in 2,2,3) {      # SB_PAGEUP, SB_PAGEUP, SB_PAGEDOWN
+        [void][Win32.Ui]::SendMessageW($log, $WM_VSCROLL, [IntPtr]$cmd, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 200
+    }
+    Check "the log control could be captured" {
+        Add-Type -AssemblyName System.Drawing
+        $rect = New-Object Win32.Ui+RECT
+        if (-not [Win32.Ui]::GetWindowRect($log, [ref]$rect)) { return $false }
+        $w = $rect.Right - $rect.Left
+        $h = $rect.Bottom - $rect.Top
+        if ($w -le 0 -or $h -le 0) { return $false }
+        $bmp = New-Object System.Drawing.Bitmap $w, $h
+        $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+        $gfx.CopyFromScreen($rect.Left, $rect.Top, 0, 0, (New-Object System.Drawing.Size($w, $h)))
+        $shot = Join-Path (Split-Path $Exe -Parent) 'smoke_status_log.png'
+        $bmp.Save($shot, [System.Drawing.Imaging.ImageFormat]::Png)
+        $gfx.Dispose(); $bmp.Dispose()
+        Write-Host "    saved: $shot"
+        Test-Path $shot
     }
 
     # --- Single instance ---------------------------------------------------
