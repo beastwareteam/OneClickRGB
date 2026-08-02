@@ -1187,8 +1187,10 @@ bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode,
                                          g_status);
 }
 
-bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode) {
-    return devices::evision::SetEdge(Hid(), g_config.edge, r, g, b, mode, g_status);
+bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode,
+                    uint8_t brightness, uint8_t speed) {
+    return devices::evision::SetEdge(Hid(), g_config.edge, r, g, b, mode,
+                                     brightness, speed, g_status);
 }
 
 //--- G.Skill RAM ------------------------------------------------------------
@@ -1373,7 +1375,8 @@ void ApplyColors() {
     if (doMouse)    SetSteelSeries(r, g, b);
     if (doKeyboard) SetEVisionKeyboard(r, g, b, (uint8_t)kbMode, (uint8_t)brightness,
                                        (uint8_t)speed);
-    if (doEdge)     SetEVisionEdge(r, g, b, (uint8_t)edgeMode);
+    if (doEdge)     SetEVisionEdge(r, g, b, (uint8_t)edgeMode, (uint8_t)brightness,
+                                   (uint8_t)speed);
     if (doRAM)      SetGSkillRAM(r, g, b);
 
     hid.Exit();
@@ -2760,7 +2763,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_state.enableMouse) SetSteelSeries(0, 0, 0);
             if (g_state.enableKeyboard)
                 SetEVisionKeyboard(0, 0, 0, KB_MODE_STATIC, 0, 0);
-            if (g_state.enableEdge) SetEVisionEdge(0, 0, 0, EDGE_MODE_OFF);
+            if (g_state.enableEdge) SetEVisionEdge(0, 0, 0, EDGE_MODE_OFF, 0, 0);
             if (g_state.enableRAM) SetGSkillRAM(0, 0, 0);
             hid.Exit();
             AppendStatus(L"Devices off - ready for standby");
@@ -3175,6 +3178,27 @@ LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
             return 0;
         }
         break;
+
+    // Scrolling leaves the previous text standing.
+    //
+    // An edit control scrolls by blitting its client area and repainting only
+    // the strip that came into view. WM_NCCALCSIZE above insets that area by
+    // four pixels on every side, so the blit and the repaint disagree about
+    // where the text belongs and the old lines stay on screen next to the new
+    // ones - which reads as the log overwriting itself and showing text twice.
+    // Repainting the whole control after a scroll costs one extra redraw of a
+    // small control and leaves nothing behind.
+    case WM_VSCROLL:
+    case WM_HSCROLL:
+    case WM_MOUSEWHEEL:
+    case EM_SCROLL:
+    case EM_LINESCROLL:
+    case EM_SCROLLCARET: {
+        const LRESULT result = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+        InvalidateRect(hWnd, NULL, TRUE);
+        UpdateWindow(hWnd);
+        return result;
+    }
     }
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }

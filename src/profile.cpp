@@ -1,5 +1,7 @@
 #include "profile.h"
 
+#include "devices/evision.h"
+
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -57,6 +59,23 @@ uint8_t ClampByte(int v) {
     return static_cast<uint8_t>(v);
 }
 
+/// Effect modes have to be values the keyboard implements; anything else would
+/// be sent to the device verbatim. Invalid entries fall back to the default
+/// rather than being clamped into a neighbouring mode.
+uint8_t ValidKbMode(int v) {
+    const uint8_t mode = ClampByte(v);
+    return devices::evision::IsValidKeyboardMode(mode) ? mode : devices::evision::KB_MODE_DEFAULT;
+}
+
+uint8_t ValidEdgeMode(int v) {
+    const uint8_t mode = ClampByte(v);
+    // FREEZE is never a deliberate choice - the UI has never offered it - so a
+    // stored zero is the old zero-initialised default and gets migrated.
+    if (!devices::evision::IsValidEdgeMode(mode) || mode == devices::evision::EDGE_MODE_FREEZE)
+        return devices::evision::EDGE_MODE_DEFAULT;
+    return mode;
+}
+
 }  // namespace
 
 Profile Parse(const std::string& text) {
@@ -73,13 +92,17 @@ Profile Parse(const std::string& text) {
         int value = 0;
         if (!ParseInt(line.substr(eq + 1), value)) continue;
 
-        if      (key == "red")            p.red             = ClampByte(value);
+        // Effect modes are validated on the way in, exactly as the settings are.
+        // A profile written before the index/value confusion was fixed carries a
+        // combo index where a protocol mode belongs - loading one put an edge
+        // mode of 0x00 (FREEZE) on the wire while the UI showed "Static".
+        if      (key == "kbMode")         p.kb_mode         = ValidKbMode(value);
+        else if (key == "edgeMode")       p.edge_mode       = ValidEdgeMode(value);
+        else if (key == "red")            p.red             = ClampByte(value);
         else if (key == "green")          p.green           = ClampByte(value);
         else if (key == "blue")           p.blue            = ClampByte(value);
         else if (key == "brightness")     p.brightness      = ClampByte(value);
         else if (key == "speed")          p.speed           = ClampByte(value);
-        else if (key == "kbMode")         p.kb_mode         = ClampByte(value);
-        else if (key == "edgeMode")       p.edge_mode       = ClampByte(value);
         else if (key == "enableAura")     p.enable_aura     = value != 0;
         else if (key == "enableMouse")    p.enable_mouse    = value != 0;
         else if (key == "enableKeyboard") p.enable_keyboard = value != 0;

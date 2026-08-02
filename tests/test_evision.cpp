@@ -364,7 +364,7 @@ TEST(evision, the_mode_a_setting_carries_is_the_byte_that_goes_out) {
     auto hid = MakeKeyboardBackend();
     for (int i = 0; i < 8; ++i) hid.QueueResponse(MakeResponse(0));
 
-    SetEdge(hid, ChannelConfig(), 10, 20, 30, EDGE_MODE_OFF, NullStatus);
+    SetEdge(hid, ChannelConfig(), 10, 20, 30, EDGE_MODE_OFF, 4, 2, NullStatus);
 
     const auto edge_writes = hid.WritesWithByte(4, 10);  // the 10-byte payload
     REQUIRE(!edge_writes.empty());
@@ -377,10 +377,102 @@ TEST(evision, missing_keyboard_is_reported_for_the_edge_zone_too) {
     fakes::FakeHidBackend hid;  // no devices registered
 
     std::vector<std::string> log;
-    const bool ok = SetEdge(hid, ChannelConfig(), 1, 2, 3, EDGE_MODE_STATIC,
+    const bool ok = SetEdge(hid, ChannelConfig(), 1, 2, 3, EDGE_MODE_STATIC, 4, 2,
                             [&](const std::string& s) { log.push_back(s); });
     CHECK(!ok);
     CHECK_EQ((int)hid.WriteCount(), 0);
     REQUIRE(!log.empty());
     CHECK(log[0].find("not found") != std::string::npos);
+}
+
+//=============================================================================
+// Edge (side LED) parameter block
+//
+// Every keyboard here carries VID 0x3299 - SPC Gear / ENDORFY - whose edge
+// parameters live at 0x1a..0x23 inside the active profile block. The previous
+// implementation wrote that block and then wrote twice more at profile+0x15 and
+// at an absolute 0x1E, both of which overlap it, so the parameters it had just
+// written were overwritten with misaligned bytes and the side lighting never
+// followed the colour or the mode.
+//=============================================================================
+
+namespace {
+
+/// The edge write is the one carrying a payload of EDGE_BLOCK_SIZE bytes.
+const std::vector<uint8_t>* FindEdgeWrite(fakes::FakeHidBackend& hid) {
+    const auto writes = hid.WritesWithByte(4, EDGE_BLOCK_SIZE);
+    return writes.empty() ? nullptr : &writes[0]->data;
+}
+
+}  // namespace
+
+TEST(evision, edge_is_written_once_to_the_profile_edge_block) {
+    auto hid = MakeKeyboardBackend();
+    // The profile read answers 0, so the block belongs to profile 0.
+    for (int i = 0; i < 8; ++i) hid.QueueResponse(MakeResponse(1, {0}));
+
+    SetEdge(hid, ChannelConfig(), 1, 2, 3, EDGE_MODE_STATIC, 4, 2, NullStatus);
+
+    const auto edge_writes = hid.WritesWithByte(4, EDGE_BLOCK_SIZE);
+    CHECK_EQ((int)edge_writes.size(), 1);
+    REQUIRE(!edge_writes.empty());
+    CHECK_EQ((int)OffsetOf(edge_writes[0]->data), (int)EdgeOffset(0));
+}
+
+TEST(evision, no_write_lands_on_the_offsets_that_used_to_clobber_the_block) {
+    auto hid = MakeKeyboardBackend();
+    for (int i = 0; i < 8; ++i) hid.QueueResponse(MakeResponse(1, {0}));
+
+    SetEdge(hid, ChannelConfig(), 1, 2, 3, EDGE_MODE_STATIC, 4, 2, NullStatus);
+
+    for (const auto& write : hid.Writes()) {
+        if (write.data.size() < 8) continue;
+        const uint16_t offset = OffsetOf(write.data);
+        CHECK(offset != (uint16_t)(ProfileOffset(0) + 0x15));
+        CHECK(offset != (uint16_t)0x1E);
+    }
+}
+
+TEST(evision, the_edge_block_carries_mode_brightness_speed_and_colour) {
+    auto hid = MakeKeyboardBackend();
+    for (int i = 0; i < 8; ++i) hid.QueueResponse(MakeResponse(1, {0}));
+
+    SetEdge(hid, ChannelConfig(), 0x11, 0x22, 0x33, EDGE_MODE_BREATHING, 3, 5, NullStatus);
+
+    const auto* block = FindEdgeWrite(hid);
+    REQUIRE(block != nullptr);
+    const uint8_t* p = block->data() + 8;  // payload starts after the header
+    CHECK_EQ((int)p[EDGE_INDEX_MODE],       (int)EDGE_MODE_BREATHING);
+    CHECK_EQ((int)p[EDGE_INDEX_BRIGHTNESS], 3);
+    CHECK_EQ((int)p[EDGE_INDEX_SPEED],      5);
+    CHECK_EQ((int)p[EDGE_INDEX_RANDOM],     0);
+    CHECK_EQ((int)p[EDGE_INDEX_COLOUR + 0], 0x11);
+    CHECK_EQ((int)p[EDGE_INDEX_COLOUR + 1], 0x22);
+    CHECK_EQ((int)p[EDGE_INDEX_COLOUR + 2], 0x33);
+    CHECK_EQ((int)p[EDGE_INDEX_ON_OFF],     1);
+}
+
+TEST(evision, switching_the_edge_off_also_clears_its_on_off_byte) {
+    auto hid = MakeKeyboardBackend();
+    for (int i = 0; i < 8; ++i) hid.QueueResponse(MakeResponse(1, {0}));
+
+    SetEdge(hid, ChannelConfig(), 255, 255, 255, EDGE_MODE_OFF, 4, 2, NullStatus);
+
+    const auto* block = FindEdgeWrite(hid);
+    REQUIRE(block != nullptr);
+    const uint8_t* p = block->data() + 8;
+    CHECK_EQ((int)p[EDGE_INDEX_MODE],   (int)EDGE_MODE_OFF);
+    CHECK_EQ((int)p[EDGE_INDEX_ON_OFF], 0);
+}
+
+TEST(evision, the_edge_block_follows_the_active_profile) {
+    auto hid = MakeKeyboardBackend();
+    // Active profile 2 - the block moves by two strides of 0x40.
+    for (int i = 0; i < 8; ++i) hid.QueueResponse(MakeResponse(1, {2}));
+
+    SetEdge(hid, ChannelConfig(), 1, 2, 3, EDGE_MODE_STATIC, 4, 2, NullStatus);
+
+    const auto* block = FindEdgeWrite(hid);
+    REQUIRE(block != nullptr);
+    CHECK_EQ((int)OffsetOf(*block), (int)EdgeOffset(2));
 }

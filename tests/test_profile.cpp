@@ -3,6 +3,7 @@
  */
 
 #include "../src/profile.h"
+#include "../src/devices/evision.h"
 
 #include <filesystem>
 #include <fstream>
@@ -199,4 +200,20 @@ TEST(profile_storage, a_truncated_file_still_yields_a_usable_profile) {
     REQUIRE(profile::Load(dir.str(), "Kaputt", loaded));
     CHECK_EQ((int)loaded.red, 42);
     CHECK_EQ((int)loaded.green, (int)profile::Profile().green);
+}
+
+TEST(profile, an_effect_mode_the_device_does_not_implement_is_replaced) {
+    // Profiles saved before the index/value confusion was fixed carry a combo
+    // index. Loading one used to put it straight on the wire: edgeMode 0 is
+    // FREEZE, which the UI never offered and which leaves the side lighting
+    // stuck.
+    const auto p = profile::Parse("kbMode=0\nedgeMode=0\n");
+    CHECK_EQ((int)p.kb_mode, (int)devices::evision::KB_MODE_STATIC);
+    CHECK_EQ((int)p.edge_mode, (int)devices::evision::EDGE_MODE_STATIC);
+}
+
+TEST(profile, a_valid_effect_mode_survives_the_round_trip) {
+    const auto p = profile::Parse("kbMode=12\nedgeMode=5\n");
+    CHECK_EQ((int)p.kb_mode, (int)devices::evision::KB_MODE_RAINBOW);
+    CHECK_EQ((int)p.edge_mode, (int)devices::evision::EDGE_MODE_OFF);
 }

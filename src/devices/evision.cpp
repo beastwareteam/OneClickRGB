@@ -135,7 +135,7 @@ bool SetKeyboard(hal::IHidBackend& hid, const ChannelConfig& zone,
 
 bool SetEdge(hal::IHidBackend& hid, const ChannelConfig& zone,
              uint8_t r, uint8_t g, uint8_t b, uint8_t mode,
-             const StatusFn& status) {
+             uint8_t brightness, uint8_t speed, const StatusFn& status) {
     auto dev = OpenKeyboard(hid);
     if (!dev) {
         // Reported rather than returned silently: with the keyboard absent the
@@ -151,26 +151,31 @@ bool SetEdge(hal::IHidBackend& hid, const ChannelConfig& zone,
     const Rgb c = Corrected(zone, r, g, b);
     const uint8_t profile = ReadActiveProfile(*dev);
 
-    // The side-LED block sits at a different offset per keyboard variant and
-    // there is no reliable way to identify the variant, so all known layouts
-    // are written; the ones that do not apply are ignored by the device.
-    const uint16_t offsets[] = {
-        static_cast<uint16_t>(ProfileOffset(profile) + 0x1A),  // standard Thyrus
-        static_cast<uint16_t>(ProfileOffset(profile) + 0x15),  // some Omnis variants
-        static_cast<uint16_t>(0x1E),                           // direct edge id
-    };
+    // One write, to the one block that holds the edge parameters. See
+    // EDGE_OFFSET_IN_PROFILE for why the previous three overlapping writes
+    // undid each other.
+    uint8_t edge_data[EDGE_BLOCK_SIZE] = {0};
+    edge_data[EDGE_INDEX_MODE]       = mode;
+    edge_data[EDGE_INDEX_BRIGHTNESS] = brightness;
+    edge_data[EDGE_INDEX_SPEED]      = speed;
+    edge_data[EDGE_INDEX_DIRECTION]  = 0;
+    edge_data[EDGE_INDEX_RANDOM]     = 0;  // fixed colour, not random
+    edge_data[EDGE_INDEX_COLOUR + 0] = c.r;
+    edge_data[EDGE_INDEX_COLOUR + 1] = c.g;
+    edge_data[EDGE_INDEX_COLOUR + 2] = c.b;
+    // The zone has its own on/off switch beside the mode. "Off" is also a mode,
+    // but a zone switched off here ignores every mode, so the two are kept in
+    // agreement.
+    edge_data[EDGE_INDEX_ON_OFF]     = (mode == EDGE_MODE_OFF) ? 0 : 1;
 
-    for (uint16_t off : offsets) {
-        uint8_t edge_data[10] = {mode, 0x04, 0x02, 0x00, 0x00,
-                                 c.r, c.g, c.b, 0x00, 0x01};
-        Query(*dev, CMD_WRITE, off, edge_data, sizeof(edge_data), nullptr);
-    }
+    Query(*dev, CMD_WRITE, EdgeOffset(profile), edge_data, sizeof(edge_data), nullptr);
 
     ClearKeyLock(*dev, profile);
     Query(*dev, CMD_END_CONFIG, 0, nullptr, 0, nullptr);
 
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "[EVision] Edge set (Mode: 0x%02X)", mode);
+    char buf[80];
+    std::snprintf(buf, sizeof(buf), "[EVision] Edge set (Mode: 0x%02X, Profile: %u)",
+                  mode, static_cast<unsigned>(profile));
     status(buf);
     return true;
 }

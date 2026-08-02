@@ -73,6 +73,34 @@ constexpr uint16_t PROFILE_STRIDE = 0x40;
 constexpr uint16_t PROFILE_BASE   = 0x01;
 constexpr uint8_t  PROFILE_COUNT  = 3;
 
+/// Offset of the side-LED ("edge") parameter block within a profile block, its
+/// length, and the index of the on/off byte inside it.
+///
+/// Every keyboard this application talks to carries VID 0x3299, which is
+/// SPC Gear / ENDORFY, so the ENDORFY parameter layout is the only one that
+/// applies: the edge shares the block the EVision layout uses for the logo,
+/// running from 0x1a to 0x23 inclusive.
+///
+/// This was previously guessed. The block was written correctly and then
+/// overwritten twice more, at profile+0x15 and at an absolute 0x1E, on the
+/// theory that unknown variants would ignore what does not apply to them. Both
+/// of those land *inside* this very block - for profile 0 it occupies 0x1B-0x24
+/// while the extra writes cover 0x16-0x1F and 0x1E-0x27 - so the correct
+/// parameters were scribbled over immediately and the side lighting never took
+/// the colour or the mode.
+constexpr uint16_t EDGE_OFFSET_IN_PROFILE = 0x1A;
+constexpr uint8_t  EDGE_BLOCK_SIZE        = 10;
+constexpr uint8_t  EDGE_INDEX_MODE        = 0;
+constexpr uint8_t  EDGE_INDEX_BRIGHTNESS  = 1;
+constexpr uint8_t  EDGE_INDEX_SPEED       = 2;
+constexpr uint8_t  EDGE_INDEX_DIRECTION   = 3;
+constexpr uint8_t  EDGE_INDEX_RANDOM      = 4;
+constexpr uint8_t  EDGE_INDEX_COLOUR      = 5;  ///< r, g, b
+constexpr uint8_t  EDGE_INDEX_ON_OFF      = 9;
+
+/// Address of the edge parameter block for a given profile.
+inline uint16_t EdgeOffset(uint8_t profile);
+
 /// Offset of the key-lock register *within* a profile block.
 ///
 /// This is the bug behind the stuck Windows key: the register was previously
@@ -98,6 +126,10 @@ inline uint16_t ProfileOffset(uint8_t profile) {
 /// Address of the key-lock register for a given profile.
 inline uint16_t LockOffset(uint8_t profile) {
     return static_cast<uint16_t>(ProfileOffset(profile) + LOCK_OFFSET_IN_PROFILE);
+}
+
+inline uint16_t EdgeOffset(uint8_t profile) {
+    return static_cast<uint16_t>(ProfileOffset(profile) + EDGE_OFFSET_IN_PROFILE);
 }
 
 /// Builds the 64-byte V2 packet, including the checksum over bytes 3..63.
@@ -141,9 +173,13 @@ bool SetKeyboard(hal::IHidBackend& hid, const ChannelConfig& zone,
                  const KeyboardSettings& settings, const StatusFn& status);
 
 /// Applies colour + effect to the side-LED (edge) zone.
+///
+/// Brightness and speed are passed in rather than fixed: the edge block carries
+/// its own copies of both, and hard-coding them meant the sliders moved the key
+/// matrix while the side lighting stayed at full brightness.
 bool SetEdge(hal::IHidBackend& hid, const ChannelConfig& zone,
              uint8_t r, uint8_t g, uint8_t b, uint8_t mode,
-             const StatusFn& status);
+             uint8_t brightness, uint8_t speed, const StatusFn& status);
 
 }  // namespace evision
 }  // namespace devices

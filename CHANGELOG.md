@@ -106,6 +106,30 @@ All notable changes to OneClickRGB are documented here.
   matrix reported "not found" - so a missing keyboard was indistinguishable from
   broken edge lighting.
 
+- **The side (edge) lighting never took the colour or the mode.** Its parameter
+  block was written correctly and then overwritten twice: the implementation
+  wrote the same payload to `profile+0x1A`, `profile+0x15` and an absolute
+  `0x1E` on the theory that a keyboard would ignore the offsets that do not
+  apply to it. All three overlap - for profile 0 the block occupies `0x1B-0x24`
+  while the extra writes cover `0x16-0x1F` and `0x1E-0x27` - so the correct
+  parameters were immediately replaced by misaligned bytes. Every keyboard this
+  application supports carries VID `0x3299` (SPC Gear / ENDORFY), whose edge
+  parameters live at `0x1a-0x23` inside the active profile, and that single
+  block is now the only thing written. Verified against the EVision V2 protocol
+  as implemented in OpenRGB.
+
+- The edge zone ignored the brightness and speed sliders: both were hard-coded
+  at maximum. It carries its own copies of the two and now follows the UI.
+
+- Effect modes stored in a **profile** were not validated, so a profile written
+  before the mode mapping was fixed put a combo index on the wire - typically
+  edge mode `0x00` (FREEZE), which the UI never offered.
+
+- The status log left the previous text standing when scrolled. The control's
+  client area is inset by four pixels for the rounded border, so the scroll blit
+  and the repaint disagreed about where the text belonged and old lines stayed
+  visible beside the new ones.
+
 ### Changed
 
 - Device protocols (ASUS Aura, SteelSeries, EVision, G.Skill), profile storage
