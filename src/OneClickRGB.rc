@@ -5,6 +5,14 @@
 // IDI_ICON1 = 101
 101 ICON "OneClickRGB.ico"
 
+// Application manifest. Ohne diesen Eintrag landet OneClickRGB.manifest nicht
+// im EXE: der Linker wird nicht mit /MANIFESTINPUT aufgerufen, also fehlt das
+// angeforderte requireAdministrator. Die App startet dann unprivilegiert und
+// die G.Skill-RAM-Steuerung (SMBus ueber PawnIO) scheitert stillschweigend -
+// der RAM bleibt dunkel, waehrend alle anderen Geraete leuchten.
+// 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID (fuer eine EXE).
+1 RT_MANIFEST "OneClickRGB.manifest"
+
 // Version Info
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 2,0,0,1

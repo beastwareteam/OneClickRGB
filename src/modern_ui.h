@@ -136,6 +136,21 @@ inline void SyncModernTheme() {
 inline void DrawRoundedRect(Gdiplus::Graphics& g, Gdiplus::RectF rect, float radius,
                             Gdiplus::Color fillColor, Gdiplus::Color borderColor = Gdiplus::Color(0, 0, 0, 0),
                             float borderWidth = 0) {
+    // A GDI+ pen straddles the path: half its width falls outside. Callers pass
+    // the full client rect, so an un-inset 1px border is drawn from width-0.5 to
+    // width+0.5 and the outer half lands beyond the last valid pixel - the right
+    // and bottom edges come out clipped or missing. Inset by half the pen width
+    // so the whole stroke stays inside the control.
+    if (borderWidth > 0 && borderColor.GetA() > 0) {
+        float inset = borderWidth / 2.0f;
+        rect.X      += inset;
+        rect.Y      += inset;
+        rect.Width  -= borderWidth;
+        rect.Height -= borderWidth;
+        if (rect.Width  < 0) rect.Width  = 0;
+        if (rect.Height < 0) rect.Height = 0;
+    }
+
     Gdiplus::GraphicsPath path;
     float d = radius * 2;
 

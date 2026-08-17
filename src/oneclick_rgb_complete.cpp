@@ -168,7 +168,11 @@ static inline void FillCtrlBackground(HDC hdcMem, HWND hCtrl, const RECT& rc) {
 
 // Layout constants (responsive)
 #define WINDOW_WIDTH 640
-#define WINDOW_HEIGHT 820
+// Tall enough for every group plus the full status log and a bottom margin.
+// Client height = WINDOW_HEIGHT - TITLEBAR_H; the layout runs to
+// 663 (end of the action buttons) + STATUS_H + MARGIN, so anything less clips
+// the bottom of the log.
+#define WINDOW_HEIGHT 870
 #define TITLEBAR_H 32       // Custom titlebar height
 #define MARGIN 12           // Window margin
 #define GROUP_MARGIN 8      // Space between groups
@@ -191,8 +195,13 @@ static inline void FillCtrlBackground(HDC hdcMem, HWND hCtrl, const RECT& rc) {
 // Control heights
 #define CTRL_H 28           // Minimum height for buttons (includes 2px inset on each side)
 #define BTN_H 28            // Explicit button height
-#define SLIDER_H 20
-#define STATUS_H 120
+// Trackbar height. ModernSlider draws a knob of radius 10 (20px across), plus a
+// drop shadow offset 2px downwards and a 1.5px border straddling the edge. At
+// the old 20px the control was exactly one knob tall, so the shadow and the
+// lower half of the border were clipped away - the sliders looked cut off along
+// the bottom. 28 leaves room for knob + shadow + border and matches BTN_H.
+#define SLIDER_H 28
+#define STATUS_H 160        // Status log height - must fit the apply output
 
 // Tray icon
 #define WM_TRAYICON (WM_USER + 1)
@@ -475,60 +484,60 @@ Strings g_strEN = {
 };
 
 Strings g_strDE = {
-    // Group titles (ä=\x00E4, ö=\x00F6, ü=\x00FC, ß=\x00DF, Ä=\x00C4, Ö=\x00D6, Ü=\x00DC)
-    L"Farbe", L"Effekte", L"Ger\x00E4te", L"Profile",
+    // Group titles (ä=\u00E4, ö=\u00F6, ü=\u00FC, ß=\u00DF, Ä=\u00C4, Ö=\u00D6, Ü=\u00DC)
+    L"Farbe", L"Effekte", L"Ger\u00E4te", L"Profile",
     // Color section
-    L"Rot", L"Gr\x00FCn", L"Blau", L"W\x00E4hlen", L"Hex:",
+    L"Rot", L"Gr\u00FCn", L"Blau", L"W\u00E4hlen", L"Hex:",
     // Effects section
     L"Tastatur", L"Rand-LEDs", L"Helligkeit", L"Tempo",
     // Devices section
-    L"Kan\x00E4le...",
+    L"Kan\u00E4le...",
     // Profiles section
     L"Profil", L"Speichern", L"Laden", L"Autostart", L"Tray", L"Live",
     // Buttons
     L"ANWENDEN", L"Design",
     // Status
-    L"Status", L"Bereit - Farbe w\x00E4hlen und Anwenden klicken",
+    L"Status", L"Bereit - Farbe w\u00E4hlen und Anwenden klicken",
     // Window title (version inserted at runtime via APP_VERSION)
     L"Komplette RGB-Steuerung [Admin: %s]",
     // Color presets
-    L"Blau", L"Rot", L"Gr\x00FCn", L"Cyan", L"Lila", L"Wei\x00DF", L"Aus",
+    L"Blau", L"Rot", L"Gr\u00FCn", L"Cyan", L"Lila", L"Wei\u00DF", L"Aus",
     // Keyboard modes
     L"Statisch", L"Atmend", L"Welle", L"Reaktiv", L"Regenbogen",
     // Edge modes
     L"Statisch", L"Atmend", L"Welle", L"Spektrum", L"Aus",
     // Channel settings dialog
-    L"Kanal-Farbkorrektur", L"Speichern", L"Zur\x00FCcksetzen",
-    L"100% = keine \x00C4nderung. Anpassen um Farbabweichungen zu korrigieren.",
+    L"Kanal-Farbkorrektur", L"Speichern", L"Zur\u00FCcksetzen",
+    L"100% = keine \u00C4nderung. Anpassen um Farbabweichungen zu korrigieren.",
     // Tooltips
-    L"Rotkanal (0-255)\nRote Farbintensit\x00E4t einstellen",
-    L"Gr\x00FCnkanal (0-255)\nGr\x00FCne Farbintensit\x00E4t einstellen",
-    L"Blaukanal (0-255)\nBlaue Farbintensit\x00E4t einstellen",
-    L"Farbvorschau\nZeigt die aktuell gew\x00E4hlte Farbe",
-    L"Hex-Farbeingabe\nFarbe als #RRGGBB eingeben (z.B. #FF0000 f\x00FCr Rot)",
-    L"Farbauswahl \x00F6ffnen\nBelibige Farbe visuell ausw\x00E4hlen",
+    L"Rotkanal (0-255)\nRote Farbintensit\u00E4t einstellen",
+    L"Gr\u00FCnkanal (0-255)\nGr\u00FCne Farbintensit\u00E4t einstellen",
+    L"Blaukanal (0-255)\nBlaue Farbintensit\u00E4t einstellen",
+    L"Farbvorschau\nZeigt die aktuell gew\u00E4hlte Farbe",
+    L"Hex-Farbeingabe\nFarbe als #RRGGBB eingeben (z.B. #FF0000 f\u00FCr Rot)",
+    L"Farbauswahl \u00F6ffnen\nBelibige Farbe visuell ausw\u00E4hlen",
     L"Schnellauswahl: Blau\nASUS Aura Standardfarbe",
     L"Schnellauswahl: Rot\nIntensives Rot",
-    L"Schnellauswahl: Gr\x00FCn\nIntensives Gr\x00FCn",
-    L"Schnellauswahl: Cyan\nT\x00FCrkis/Aqua-Farbe",
+    L"Schnellauswahl: Gr\u00FCn\nIntensives Gr\u00FCn",
+    L"Schnellauswahl: Cyan\nT\u00FCrkis/Aqua-Farbe",
     L"Schnellauswahl: Lila\nMagenta/Violett-Farbe",
-    L"Schnellauswahl: Wei\x00DF\nAlle Kan\x00E4le auf Maximum",
+    L"Schnellauswahl: Wei\u00DF\nAlle Kan\u00E4le auf Maximum",
     L"Alle LEDs ausschalten\nSetzt Farbe auf Schwarz (0,0,0)",
     L"Tastatur-Lichteffekt\nStatisch, Atmend, Welle, Reaktiv, Regenbogen",
-    L"Rand-LED Effekt (Laptop-Tastaturr\x00E4nder)\nSteuert die seitlichen Lichtleisten",
-    L"Gesamthelligkeit (0-100%)\nBeeinflusst alle verbundenen Ger\x00E4te",
+    L"Rand-LED Effekt (Laptop-Tastaturr\u00E4nder)\nSteuert die seitlichen Lichtleisten",
+    L"Gesamthelligkeit (0-100%)\nBeeinflusst alle verbundenen Ger\u00E4te",
     L"Animationsgeschwindigkeit\nSteuert Atmen/Wellen-Effekt Timing",
-    L"Kanal-Farbkorrektur\nEinzelne Ger\x00E4tefarben fein abstimmen",
-    L"Gespeichertes Profil ausw\x00E4hlen\nSchnell zwischen Farbkonfigurationen wechseln",
-    L"Aktuelle Einstellungen speichern\nFarbe, Effekte und Ger\x00E4teeinstellungen sichern",
-    L"Ausgew\x00E4hltes Profil laden\nGespeicherte Einstellungen wiederherstellen",
-    L"Mit Windows starten\nMinimiert starten wenn Windows hochf\x00E4hrt",
+    L"Kanal-Farbkorrektur\nEinzelne Ger\u00E4tefarben fein abstimmen",
+    L"Gespeichertes Profil ausw\u00E4hlen\nSchnell zwischen Farbkonfigurationen wechseln",
+    L"Aktuelle Einstellungen speichern\nFarbe, Effekte und Ger\u00E4teeinstellungen sichern",
+    L"Ausgew\u00E4hltes Profil laden\nGespeicherte Einstellungen wiederherstellen",
+    L"Mit Windows starten\nMinimiert starten wenn Windows hochf\u00E4hrt",
     L"In System-Tray minimieren\nFenster verstecken aber weiterlaufen",
-    L"Live-Vorschau\n\x00C4nderungen automatisch beim Anpassen anwenden",
-    L"Einstellungen auf alle Ger\x00E4te anwenden\nAktuelle Farbe an alle RGB-Hardware senden",
+    L"Live-Vorschau\n\u00C4nderungen automatisch beim Anpassen anwenden",
+    L"Einstellungen auf alle Ger\u00E4te anwenden\nAktuelle Farbe an alle RGB-Hardware senden",
     L"Farbschema wechseln\nDunkel / Hell / Farbenblind Modi",
     L"Sprache wechseln\nEnglish / Deutsch",
-    L"Anwendungsprotokoll\nZeigt Ger\x00E4testatus und angewandte Einstellungen"
+    L"Anwendungsprotokoll\nZeigt Ger\u00E4testatus und angewandte Einstellungen"
 };
 
 Strings* g_str = &g_strEN;
@@ -761,9 +770,21 @@ void SaveAppSettings() {
     g_config.autoApply      = g_state.autoApply;
     g_config.themeId        = GetThemeId();
     g_config.langId         = (g_lang == LANG_DE) ? 1 : 0;
+    // Mirror lastProfile unconditionally - the old "only if non-empty" guard
+    // meant a cleared selection could never be written back, so a deleted or
+    // renamed profile stayed in the config forever. Convert through UTF-8
+    // instead of truncating each wchar_t to a char, which mangled every
+    // profile name containing umlauts.
+    g_config.lastProfile.clear();
     if (!g_state.lastProfile.empty()) {
-        g_config.lastProfile.clear();
-        for (wchar_t wc : g_state.lastProfile) g_config.lastProfile += static_cast<char>(wc);
+        int n = WideCharToMultiByte(CP_UTF8, 0, g_state.lastProfile.c_str(), -1,
+                                    nullptr, 0, nullptr, nullptr);
+        if (n > 1) {
+            std::string tmp(n - 1, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, g_state.lastProfile.c_str(), -1,
+                                &tmp[0], n, nullptr, nullptr);
+            g_config.lastProfile = tmp;
+        }
     }
     if (g_state.hWnd) {
         RECT rc;
@@ -792,8 +813,18 @@ void LoadAppSettings() {
     g_state.enableEdge     = g_config.enableEdge;
     g_state.autostart      = g_config.autostart;
     g_state.minimizeToTray = g_config.minimizeToTray;
-    g_state.autoApply      = true;
-    g_state.lastProfile    = std::wstring(g_config.lastProfile.begin(), g_config.lastProfile.end());
+    g_state.autoApply      = g_config.autoApply;
+    // Counterpart to the UTF-8 encode in SaveAppSettings; the old byte-wise
+    // widening produced mojibake for any non-ASCII profile name.
+    g_state.lastProfile.clear();
+    if (!g_config.lastProfile.empty()) {
+        int n = MultiByteToWideChar(CP_UTF8, 0, g_config.lastProfile.c_str(), -1, nullptr, 0);
+        if (n > 1) {
+            std::wstring tmp(n - 1, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, g_config.lastProfile.c_str(), -1, &tmp[0], n);
+            g_state.lastProfile = tmp;
+        }
+    }
     g_windowX = (g_config.windowX != -1) ? g_config.windowX : CW_USEDEFAULT;
     g_windowY = (g_config.windowY != -1) ? g_config.windowY : CW_USEDEFAULT;
     SetTheme(g_config.themeId);
@@ -914,6 +945,12 @@ void SaveProfile(const std::wstring& name) {
         file << "enableRAM=" << g_state.enableRAM << "\n";
         file << "enableEdge=" << g_state.enableEdge << "\n";
         file.close();
+        // The profile just written becomes the active one. Without this,
+        // lastProfile kept pointing at whatever was loaded before, so the next
+        // Laden/Speichern - and any later restore - silently targeted the old
+        // profile instead of the one the user just saved.
+        g_state.currentProfile = name;
+        g_state.lastProfile    = name;
         AppendStatus((L"Profile saved: " + name).c_str());
     }
 }
@@ -1011,14 +1048,66 @@ void RefreshProfileList() {
 }
 
 //=============================================================================
+// DRY-RUN GUARD
+//
+// --dry-run has to reach every writing path, not just ApplyColors. It used to
+// be parsed only at line ~4794, i.e. *after* --probe, --kbdump, --kbtest,
+// --kbmode* and --mouse-zones-test had already run and returned, so
+// "--dry-run --kbmode-sweep" stamped 21 mode bytes into the keyboard flash.
+//
+// The flag is now the first thing WinMain reads, and every public device
+// setter asks this guard before it opens a handle - so a path added later
+// cannot quietly bypass it.
+//
+// Returns false ("nothing was verified"), never true: a dry run proves
+// nothing about the hardware, and claiming success for a write that never
+// left the process is exactly the blind success CLAUDE.md rule 1 forbids.
+//=============================================================================
+
+static bool DryRunSkip(const wchar_t* what) {
+    if (!g_state.dryRun) return false;
+    wchar_t buf[160];
+    swprintf(buf, 160, L"[DRY] %s: kein Write gesendet", what);
+    AppendStatus(buf);
+    return true;
+}
+
+//=============================================================================
 // DEVICE CONTROL - ASUS AURA
 // Direct HID control with 65-byte buffer (Report ID 0xEC)
 //=============================================================================
 
 #define ASUS_LEDS_PER_PACKET 20
+// Only used when the 0xB0 config table gives no usable per-header maximum.
+// The real value is read from the table - see ParseAsusConfig().
+#define ASUS_ADDRESSABLE_FALLBACK_LEDS 120
+// Sanity bound for a per-header LED maximum read out of the config table.
+#define ASUS_ADDRESSABLE_SANE_MAX 240
 #define AURA_REQUEST_FIRMWARE_VERSION 0x82
 #define AURA_REQUEST_CONFIG_TABLE 0xB0
 #define AURA_CONFIG_CHANNELS 8
+
+// Fallback channel map - used only when the 0xB0 config table could not be
+// parsed (g_asusHwConfig.valid == false).
+//
+// Two contradictory tables used to live here: SetAsusAura drove
+// {0,1,2,3,4,0x0B,0x0C} while SetAsusAuraQuick drove {0..7}, so the live
+// preview and the actual apply addressed different hardware on the same
+// board. This is the set both of them agreed on, with the identity
+// index->channel mapping the rest of the code already assumes (see
+// ShowAsusTestDialog: "Default: use index as channel") and which matches how
+// ParseAsusConfig() numbers the addressable headers.
+//
+// OPEN (Sanierungsplan 4.3): which channels this board really exposes is
+// unverified. Neither tail (0x0B/0x0C nor 5/6/7) was ever confirmed against a
+// device, and there is no read-back for Aura direct-mode colours to settle it
+// from software. Extend this table from a live scan only - not from a guess.
+struct AuraFallbackChannel { int channel; int leds; };
+static const AuraFallbackChannel AURA_FALLBACK_CHANNELS[] = {
+    {0x00, 60}, {0x01, 120}, {0x02, 120}, {0x03, 60}, {0x04, 60}
+};
+static const int AURA_FALLBACK_COUNT =
+    (int)(sizeof(AURA_FALLBACK_CHANNELS) / sizeof(AURA_FALLBACK_CHANNELS[0]));
 
 // Hardware configuration from device scan
 struct AsusHardwareConfig {
@@ -1116,16 +1205,37 @@ void ParseAsusConfig(AsusHardwareConfig& cfg) {
     // OpenRGB-like: only onboard zone + addressable headers as direct channels.
     // (Legacy RGB/diagnostic zone scan removed: it caused channel drift and config mismatch.)
     for (int i = 0; i < cfg.numAddressableHeaders && cfg.numChannels < 16; i++) {
-        // OpenRGB Mainboard-Controller: addressable headers are treated as one logical LED target
         cfg.channels[cfg.numChannels].present = true;
-        cfg.channels[cfg.numChannels].ledCount = 1;
+
+        // Per-header LED maximum, read from the 0xB0 table rather than assumed.
+        //
+        // This used to be hardcoded to 1 ("one logical LED target"), which made
+        // SetAsusChannel emit colour data for the first pixel only - everything
+        // further along an attached ARGB strip stayed dark.
+        //
+        // Layout of the table (derived from a real dump, board AULA3-AR32-0222):
+        //   [0x02]            = number of addressable headers
+        //   [0x03 + i*6 .. +5]= one 6-byte record per header
+        //   record byte +3    = maximum LED count this header drives
+        // The dump reads 03 | 01 00 00 78 3C 00 | 01 00 00 78 3C 00 | 01 00 00 78 3C 00,
+        // i.e. three identical records, each reporting 0x78 = 120.
+        //
+        // Reading it keeps boards with a different capacity correct instead of
+        // baking one machine's number into the binary. The value is only a
+        // ceiling - Aura cannot know the physical strip length, so a shorter
+        // strip simply ignores the surplus pixel data.
+        int rec     = 0x03 + i * 6;
+        int maxLeds = (rec + 3 < 60) ? (int)cfg.configTable[rec + 3] : 0;
+        if (maxLeds < 1 || maxLeds > ASUS_ADDRESSABLE_SANE_MAX)
+            maxLeds = ASUS_ADDRESSABLE_FALLBACK_LEDS;
+        cfg.channels[cfg.numChannels].ledCount = maxLeds;
         cfg.channels[cfg.numChannels].addressable = true;
         cfg.channels[cfg.numChannels].directChannel = i;  // Addressable uses 0, 1, 2...
         cfg.channels[cfg.numChannels].colorR = 0;
         cfg.channels[cfg.numChannels].colorG = 34;
         cfg.channels[cfg.numChannels].colorB = 255;
         cfg.channels[cfg.numChannels].enabled = true;
-        sprintf(cfg.channels[cfg.numChannels].name, "Addressable %d (max 120 LEDs)", i + 1);
+        sprintf(cfg.channels[cfg.numChannels].name, "Addressable %d (%d LEDs)", i + 1, maxLeds);
         cfg.numChannels++;
     }
 
@@ -1205,7 +1315,14 @@ bool LoadAsusHardwareConfig() {
         if (f) {
             size_t read = fread(&g_asusHwConfig, sizeof(g_asusHwConfig), 1, f);
             fclose(f);
-            return (read == 1 && g_asusHwConfig.valid);
+            if (read != 1) return false;
+            // Re-derive the channel list from the cached raw 0xB0 table instead
+            // of trusting the parsed channels in the file. The cache stores the
+            // *result* of ParseAsusConfig, so any later change to how channels
+            // or LED counts are derived would otherwise stay masked behind a
+            // stale file until the hardware itself changed.
+            ParseAsusConfig(g_asusHwConfig);
+            return g_asusHwConfig.valid;
         }
     }
     return false;
@@ -1343,6 +1460,8 @@ static void ApplyAsusChannelColor(hid_device* dev, int auraIndex, int directChan
 }
 
 bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
+    if (DryRunSkip(L"ASUS Aura")) return false;
+
     hid_device* dev = OpenAsusAura();
     if (!dev) {
         AppendStatus(L"[ASUS Aura] Not found");
@@ -1365,12 +1484,10 @@ bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
                 setCount);
         }
     } else {
-        // Fallback: old static config
-        struct { int channel; int leds; } channels[] = {
-            {0x00, 60}, {0x01, 120}, {0x02, 120}, {0x03, 60}, {0x04, 60}, {0x0B, 60}, {0x0C, 60}
-        };
-        for (int i = 0; i < 7; i++) {
-            ApplyAsusChannelColor(dev, i, channels[i].channel, channels[i].leds, r, g, b, true, true, setCount);
+        for (int i = 0; i < AURA_FALLBACK_COUNT; i++) {
+            ApplyAsusChannelColor(dev, i, AURA_FALLBACK_CHANNELS[i].channel,
+                                  AURA_FALLBACK_CHANNELS[i].leds,
+                                  r, g, b, true, true, setCount);
         }
     }
 
@@ -1384,6 +1501,8 @@ bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
 
 // Quick update for live preview (single call, no status messages)
 void SetAsusAuraQuick(uint8_t r, uint8_t g, uint8_t b) {
+    if (DryRunSkip(L"ASUS Aura (Vorschau)")) return;
+
     std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
 
     hid_init();
@@ -1408,13 +1527,11 @@ void SetAsusAuraQuick(uint8_t r, uint8_t g, uint8_t b) {
                 ignoredCount);
         }
     } else {
-        // Fallback
-        struct { int channel; int leds; } channels[] = {
-            {0, 60}, {1, 120}, {2, 120}, {3, 60}, {4, 60}, {5, 60}, {6, 60}, {7, 60}
-        };
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < AURA_FALLBACK_COUNT; i++) {
             int ignoredCount = 0;
-            ApplyAsusChannelColor(dev, i, channels[i].channel, channels[i].leds, r, g, b, true, true, ignoredCount);
+            ApplyAsusChannelColor(dev, i, AURA_FALLBACK_CHANNELS[i].channel,
+                                  AURA_FALLBACK_CHANNELS[i].leds,
+                                  r, g, b, true, true, ignoredCount);
         }
     }
 
@@ -1427,6 +1544,8 @@ void SetAsusAuraQuick(uint8_t r, uint8_t g, uint8_t b) {
 //=============================================================================
 
 bool SetSteelSeries(uint8_t r, uint8_t g, uint8_t b) {
+    if (DryRunSkip(L"SteelSeries")) return false;
+
     hid_device* dev = nullptr;
     struct hid_device_info* devs = hid_enumerate(Devices::STEELSERIES_VID, Devices::RIVAL_600_PID);
     for (auto* cur = devs; cur; cur = cur->next) {
@@ -1482,6 +1601,8 @@ static void SSSave(hid_device* dev) { uint8_t save[10] = {0x09}; hid_write(dev, 
 
 // Write each mouse zone its own (corrected) colour.
 bool SetSteelSeriesZones() {
+    if (DryRunSkip(L"SteelSeries Zonen")) return false;
+
     hid_device* dev = OpenRival600();
     if (!dev) { AppendStatus(L"[SteelSeries] Not found"); return false; }
     int n = 0;
@@ -1504,6 +1625,7 @@ bool SetSteelSeriesZones() {
 // (own hid_init/exit + deviceIoMutex); do not call while holding that mutex.
 bool IdentifyMouseZone(int idx, int durationMs = 3000) {
     if (idx < 0 || idx >= (int)g_config.mouseZones.size()) return false;
+    if (DryRunSkip(L"SteelSeries Identify")) return false;
     std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
     hid_init();
     hid_device* dev = OpenRival600();
@@ -1555,7 +1677,29 @@ int EVisionQuery(hid_device* dev, uint8_t cmd, uint16_t offset, const uint8_t* i
     return buffer[4];
 }
 
+// Result of the last SetEVisionKeyboard read-back. Filled on every call so the
+// headless --kbmode probes can report what the firmware really stored without
+// duplicating the write path (see CLAUDE.md rule 1: tests read live values).
+struct KbVerifyResult {
+    bool    valid    = false;   // read-back succeeded
+    int     writeRes = 0;
+    int     readRes  = 0;
+    uint8_t want[9]  = {0};     // mode,bright,speed,dir,rand,R,G,B,coloff
+    uint8_t got[18]  = {0};     // what the profile block actually holds now
+};
+static KbVerifyResult g_lastKbVerify;
+
 bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode, uint8_t brightness, uint8_t speed) {
+    // Invalidate the read-back record FIRST, before anything can return early.
+    // It used to be reset only just before the read-back itself, i.e. behind
+    // the "keyboard not found" bail-out - so if the keyboard dropped off the
+    // bus mid --kbmode-sweep, every following row in kbmode_probe.txt printed
+    // the last successful read-back as though it were fresh. An old dump
+    // reported as a live value, in the very probe built to prevent that.
+    g_lastKbVerify = KbVerifyResult{};
+
+    if (DryRunSkip(L"EVision Keyboard")) return false;
+
     hid_device* dev = nullptr;
     struct hid_device_info* devs = hid_enumerate(Devices::EVISION_VID, Devices::EVISION_PID);
     for (auto* cur = devs; cur; cur = cur->next) {
@@ -1591,27 +1735,95 @@ bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode, uint8_t b
         memset(config, 0, sizeof(config));
     }
 
-    // Update known keyboard fields
-    config[0] = mode;           // Mode
-    config[1] = brightness;     // Brightness (0-4)
-    config[2] = speed;          // Speed (0-5, inverted)
-    config[3] = 0;              // Direction
-    config[4] = 0;              // Random color off
-    config[5] = cr;             // Red (corrected)
-    config[6] = cg;             // Green (corrected)
-    config[7] = cb;             // Blue (corrected)
-    config[8] = 0;              // Color offset
+    // Update known keyboard fields.
+    //
+    // The keyboard block uses the same 10-byte layout as the edge payload at
+    // +0x1E (docs/Keyboard_Protocol.md 3.1):
+    //   [mode, brightness, speed, direction, random, R, G, B, colorOffset, save]
+    // Only the first nine were ever written here, so the trailing commit/save
+    // byte at profile_base+0x0A stayed whatever it was - a live read-back after
+    // selecting Breathing showed the block as "05 04 04 00 00 00 13 FF 00 [00]".
+    // The mode byte reaches the flash but the firmware never applies it, which
+    // is exactly the reported symptom: the colour changes, the effect does not.
+    config[0] = mode;           // +0x01 Mode
+    config[1] = brightness;     // +0x02 Brightness (0-4)
+    config[2] = speed;          // +0x03 Speed (0-5, inverted)
+    config[3] = 0;              // +0x04 Direction
+    config[4] = 0;              // +0x05 Random color off
+    config[5] = cr;             // +0x06 Red (corrected)
+    config[6] = cg;             // +0x07 Green (corrected)
+    config[7] = cb;             // +0x08 Blue (corrected)
+    config[8] = 0;              // +0x09 Color offset
+    config[9] = 0x01;           // +0x0A Commit/save - same flag the edge path sets
 
-    EVisionQuery(dev, 0x06, profile_offset, config, 18, nullptr);
+    int writeRes = EVisionQuery(dev, 0x06, profile_offset, config, 18, nullptr);
+    Sleep(10);
+
+    // Read back what the firmware actually stored. The write result alone is no
+    // proof: the device ACKs writes whose payload it silently discards, so a
+    // mode byte it does not implement produced a cheerful "Keyboard set" while
+    // the lighting never changed. Only the read-back is reported below.
+    g_lastKbVerify.writeRes = writeRes;
+    memcpy(g_lastKbVerify.want, config, 9);
+    g_lastKbVerify.readRes = EVisionQuery(dev, 0x05, profile_offset, nullptr, 18,
+                                          g_lastKbVerify.got);
+    g_lastKbVerify.valid = (g_lastKbVerify.readRes >= 0);
+
+    const uint8_t* got = g_lastKbVerify.got;
+    bool verified = g_lastKbVerify.valid &&
+                    got[0] == mode && got[1] == brightness && got[2] == speed &&
+                    got[5] == cr && got[6] == cg && got[7] == cb;
+
+    {
+        char dbg[224];
+        snprintf(dbg, sizeof(dbg),
+                 "[EVision] KB profile=%d off=0x%02X writeRes=%d readRes=%d "
+                 "want[mode=%02X br=%02X sp=%02X rgb=%02X%02X%02X] "
+                 "got[mode=%02X br=%02X sp=%02X rgb=%02X%02X%02X] verified=%d",
+                 (int)profile, (unsigned)profile_offset, writeRes,
+                 g_lastKbVerify.readRes,
+                 mode, brightness, speed, cr, cg, cb,
+                 got[0], got[1], got[2], got[5], got[6], got[7], (int)verified);
+        LogDebug(dbg);
+    }
+
+    // Unlock the Windows key: clear the two bytes at profile_base+0x14.
+    //
+    // This call existed until commit f1c6aaa removed it from both device paths
+    // (keeping it only in the --switch-test=edge-diagnose branch). Removing it
+    // is what made the Win-key lock permanent: the old 15-offset brute-force in
+    // SetEVisionEdge wrote at 0x13 and 0x16, which straddle 0x14/0x15, so every
+    // apply stamped payload bytes (brightness 0x04, speed 0x02) into the
+    // Win-Lock field, and this unlock was the thing that cleared them again.
+    // A live dump with the key locked reads exactly "04 02" there.
+    //
+    // The brute-force is gone now, so nothing corrupts the field anymore, but
+    // the write is kept because it also clears a lock the user toggled via
+    // Fn+Win - and it is addressed per active profile rather than hardcoded to
+    // profile 0 as the original was.
+    uint8_t unlock[2] = {0x00, 0x00};
+    EVisionQuery(dev, 0x06, (uint16_t)(profile * 0x40 + 0x14), unlock, 2, nullptr);
     Sleep(10);
 
     EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);  // End configure
     hid_close(dev);
 
-    wchar_t buf[64];
-    swprintf(buf, 64, L"[EVision] Keyboard set (Mode: 0x%02X)", mode);
+    wchar_t buf[192];
+    if (!g_lastKbVerify.valid) {
+        swprintf(buf, 192, L"[EVision] Keyboard mode 0x%02X written, read-back failed (%d)",
+                 mode, g_lastKbVerify.readRes);
+    } else if (verified) {
+        swprintf(buf, 192, L"[EVision] Keyboard verified: mode 0x%02X, brightness %d, speed %d",
+                 mode, brightness, speed);
+    } else {
+        // Report the mismatch instead of a blanket success - this is how a mode
+        // the firmware refuses becomes visible instead of silently doing nothing.
+        swprintf(buf, 192,
+                 L"[EVision] Keyboard MISMATCH - mode 0x%02X->0x%02X, brightness %d->%d, speed %d->%d",
+                 mode, got[0], brightness, got[1], speed, got[2]);
+    }
     AppendStatus(buf);
-    return true;
+    return verified;
 }
 
 // ---------------------------------------------------------------------------
@@ -1642,7 +1854,14 @@ static hid_device* OpenEVisionEdgeDev(char* pathOut, int pathMax) {
     return nullptr;
 }
 
-bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode) {
+// brightness 0-4, speed 0-5 - both come from the Effects group sliders. They
+// used to be hardcoded here (brightness 4, speed 2) and were not even function
+// parameters, which is why the Tempo slider had no effect on the edge strips
+// and every effect always animated at the same rate.
+bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode,
+                    uint8_t brightness, uint8_t speed) {
+    if (DryRunSkip(L"EVision Edge")) return false;
+
     char devPath[256] = "<not opened>";
     hid_device* dev = OpenEVisionEdgeDev(devPath, sizeof(devPath));
 
@@ -1686,12 +1905,12 @@ bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode) {
     // Build 10-byte edge payload
     // Layout: [mode, brightness, speed, direction, random, R, G, B, colorOff, save]
     // ------------------------------------------------------------------
-    uint8_t bright = (mode == EDGE_MODE_OFF) ? 0 : 4;  // 0-4 brightness steps
-    uint8_t speed  = 2;                                  // 0-5 speed
+    uint8_t bright = (mode == EDGE_MODE_OFF) ? 0 : (brightness > 4 ? 4 : brightness);
+    uint8_t spd    = (speed > 5) ? 5 : speed;
     uint8_t edgeData[10] = {
         mode,        // [0] effect mode
-        bright,      // [1] brightness
-        speed,       // [2] speed
+        bright,      // [1] brightness (0-4, from the Helligkeit slider)
+        spd,         // [2] speed      (0-5, from the Tempo slider)
         0x00,        // [3] direction
         0x00,        // [4] random color = off (use given color)
         cr, cg, cb,  // [5][6][7] RGB
@@ -1700,54 +1919,46 @@ bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode) {
     };
 
     // ------------------------------------------------------------------
-    // Write to ALL known offset families across all 3 profile slots.
-    // Endorfy Thock / Thyrus / Omnis variants use different offsets.
-    // We try every known one and log each result so we can diagnose
-    // which offset actually controls the edge bar on this keyboard.
+    // Single targeted write to the edge payload slot of the ACTIVE profile.
     //
-    // Offset naming: "P<profile>+<hex offset within profile block>"
-    //   Profile base: profile * 0x40
-    //   Keyboard zone: profile_base + 0x01 (18 bytes → through +0x12)
-    //   Edge zone candidates (4 known chip revisions):
-    //     +0x12: right after keyboard block (18 + 1 byte = 0x13)
-    //     +0x15: Thyrus older revision
-    //     +0x18: Omnis TKL revision
-    //     +0x1A: Thyrus newer revision
-    //     +0x1D: Direct "edge slot" address (also expressed as 0x1E globally)
+    // This used to brute-force the same 10 bytes onto 15 offsets (0x13/0x16/
+    // 0x19/0x1B/0x1E in every one of the three profile blocks). Only +0x1E is
+    // the edge slot - see docs/Keyboard_Protocol.md section 3.1, where the live
+    // dump reads exactly [mode,bright,speed,dir,rand,R,G,B,coloff,save] there.
+    // The other four offsets land 3-11 bytes earlier and therefore scribble the
+    // payload straight through +0x14..0x1D, the still-undecoded per-zone tuple
+    // region, five times over at overlapping positions. The captured config
+    // dump shows the damage plainly: "04 02 00 04 02 00 04 00 04 02 00 04 02"
+    // is nothing but those overlapping brightness/speed bytes.
+    //
+    // That stray writing is what corrupted the keyboard's on-board config and
+    // produced the unwanted Windows-key lock. It also hit profiles 1 and 2,
+    // which the user may not even be using. One profile, one offset, one write.
     // ------------------------------------------------------------------
-    struct EdgeOffEntry { uint16_t off; const char* label; };
-    const EdgeOffEntry candidates[] = {
-        // ---- Profile 0 (base 0x00) ----
-        {0x13, "P0+0x12"},
-        {0x16, "P0+0x15"},
-        {0x19, "P0+0x18"},
-        {0x1B, "P0+0x1A"},
-        {0x1E, "P0-direct"},
-        // ---- Profile 1 (base 0x40) ----
-        {0x53, "P1+0x12"},
-        {0x56, "P1+0x15"},
-        {0x59, "P1+0x18"},
-        {0x5B, "P1+0x1A"},
-        {0x5E, "P1-direct"},
-        // ---- Profile 2 (base 0x80) ----
-        {0x93, "P2+0x12"},
-        {0x96, "P2+0x15"},
-        {0x99, "P2+0x18"},
-        {0x9B, "P2+0x1A"},
-        {0x9E, "P2-direct"},
-    };
+    uint16_t edgeOff = (uint16_t)(profile * 0x40 + 0x1E);
+    int res = EVisionQuery(dev, 0x06, edgeOff, edgeData, 10, nullptr);
+    Sleep(10);
 
-    int ok = 0;
-    for (const EdgeOffEntry& e : candidates) {
-        int res = EVisionQuery(dev, 0x06, e.off, edgeData, 10, nullptr);
-        snprintf(dbg, sizeof(dbg),
-                 "[EVision] Edge write off=0x%02X (%s) res=%d mode=0x%02X rgb=%d,%d,%d",
-                 (unsigned)e.off, e.label, res, (unsigned)mode,
-                 (unsigned)cr, (unsigned)cg, (unsigned)cb);
-        LogDebug(dbg);
-        Sleep(3);
-        if (res >= 0) ok++;
-    }
+    // Read back rather than trusting the write result (CLAUDE.md rule 1). The
+    // device ACKs writes it discards, so res>=0 on its own is not evidence that
+    // the strip changed.
+    uint8_t edgeBack[10] = {0};
+    int edgeRead = EVisionQuery(dev, 0x05, edgeOff, nullptr, 10, edgeBack);
+    bool edgeVerified = (edgeRead >= 0) &&
+                        edgeBack[0] == mode   && edgeBack[1] == bright &&
+                        edgeBack[2] == spd    && edgeBack[5] == cr &&
+                        edgeBack[6] == cg     && edgeBack[7] == cb;
+    int ok = edgeVerified ? 1 : 0;
+
+    snprintf(dbg, sizeof(dbg),
+             "[EVision] Edge write off=0x%02X (P%d+0x1E) res=%d readRes=%d "
+             "want[%02X %02X %02X %02X%02X%02X] got[%02X %02X %02X %02X%02X%02X] verified=%d",
+             (unsigned)edgeOff, (int)profile, res, edgeRead,
+             mode, bright, spd, cr, cg, cb,
+             edgeBack[0], edgeBack[1], edgeBack[2],
+             edgeBack[5], edgeBack[6], edgeBack[7], (int)edgeVerified);
+    LogDebug(dbg);
+    Sleep(3);
 
     // ------------------------------------------------------------------
     // End configure session
@@ -1757,17 +1968,25 @@ bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode) {
     hid_close(dev);
 
     snprintf(dbg, sizeof(dbg),
-             "[EVision] Edge done: profile=%d mode=0x%02X rgb=%d,%d,%d ok=%d/%d offsets",
-             (int)profile, (unsigned)mode,
-             (unsigned)cr, (unsigned)cg, (unsigned)cb,
-             ok, (int)(sizeof(candidates)/sizeof(candidates[0])));
+             "[EVision] Edge done: profile=%d off=0x%02X mode=0x%02X rgb=%d,%d,%d ok=%d",
+             (int)profile, (unsigned)edgeOff, (unsigned)mode,
+             (unsigned)cr, (unsigned)cg, (unsigned)cb, ok);
     LogDebug(dbg);
 
-    wchar_t wbuf[128];
-    swprintf(wbuf, 128,
-             L"[EVision] Edge: mode=0x%02X rgb=%d,%d,%d ok=%d/%d offsets",
-             mode, cr, cg, cb, ok,
-             (int)(sizeof(candidates)/sizeof(candidates[0])));
+    wchar_t wbuf[192];
+    if (edgeRead < 0) {
+        swprintf(wbuf, 192,
+                 L"[EVision] Edge: P%d+0x1E mode=0x%02X geschrieben, Rücklesen fehlgeschlagen (%d)",
+                 (int)profile, mode, edgeRead);
+    } else if (edgeVerified) {
+        swprintf(wbuf, 192,
+                 L"[EVision] Edge: P%d+0x1E mode=0x%02X rgb=%d,%d,%d verifiziert",
+                 (int)profile, mode, cr, cg, cb);
+    } else {
+        swprintf(wbuf, 192,
+                 L"[EVision] Edge ABWEICHUNG - mode 0x%02X->0x%02X, Helligkeit %d->%d, Tempo %d->%d",
+                 mode, edgeBack[0], bright, edgeBack[1], spd, edgeBack[2]);
+    }
     AppendStatus(wbuf);
 
     return ok > 0;
@@ -1802,6 +2021,8 @@ bool ResetGSkillRAM() {
 }
 
 bool SetGSkillRAM(uint8_t r, uint8_t g, uint8_t b) {
+    if (DryRunSkip(L"G.Skill RAM")) return false;
+
     std::string exeDir = GetExeDirA();
 
     // Try multiple paths for PawnIOLib.dll
@@ -1981,6 +2202,39 @@ bool EnableShutdownPrivilege() {
 std::atomic<bool> g_resumeDetected{false};
 std::atomic<bool> g_watcherRunning{true};
 
+// --- Resume gating -----------------------------------------------------------
+// A post-resume reset is expensive: FullHIDReset() tears down and re-enumerates
+// the whole HID stack and sleeps ~800ms, then every device is written again.
+// Four separate notifications can request it (watchdog time jump, APM resume,
+// display-on, session unlock) and two of them - display-on and unlock - also
+// fire during ordinary AFK idle, when no standby happened at all. Without
+// gating, an idle machine whose monitor keeps cycling off/on re-initialises the
+// devices forever; the re-apply writes to keyboard and mouse, which can itself
+// wake the display and sustain the cycle.
+//
+// Rules: only reset when a real suspend was observed, never more than one reset
+// at a time, and at most one per cooldown window.
+#define RESUME_COOLDOWN_MS 15000
+std::atomic<bool> g_suspendSeen{false};        // genuine standby observed
+std::atomic<bool> g_resetInFlight{false};      // reset currently running
+std::atomic<bool> g_resetArmed{false};         // timer already scheduled
+std::atomic<ULONGLONG> g_lastResetTick{0};     // completion time of last reset
+
+// Arm the deferred post-resume reset. Silently ignores triggers that are not
+// backed by an actual suspend, and those inside the cooldown window.
+static void ScheduleResumeReset(HWND hWnd) {
+    if (!g_suspendSeen.load()) return;   // display-on / unlock while awake
+    if (g_resetInFlight.load()) return;
+    // Already scheduled: leave the pending timer alone. Re-arming on every
+    // event would push the deadline out indefinitely while the display keeps
+    // cycling, so the reset would never actually run.
+    if (g_resetArmed.load()) return;
+    ULONGLONG last = g_lastResetTick.load();
+    if (last && (GetTickCount64() - last) < RESUME_COOLDOWN_MS) return;
+    g_resetArmed = true;
+    SetTimer(hWnd, ID_TIMER_RESUME, 3000, NULL);
+}
+
 // Watchdog thread that detects resume by monitoring time jumps
 void ResumeWatcherThread() {
     ULONGLONG lastTick = GetTickCount64();
@@ -2033,6 +2287,8 @@ void SystemRestart() {
 //=============================================================================
 
 void FullHIDReset() {
+    if (DryRunSkip(L"HID-Reset")) return;
+
     AppendStatus(L"Resetting all RGB devices...");
 
     std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
@@ -2174,7 +2430,7 @@ void ApplyColors() {
             SetEVisionKeyboard(r, g, b, kbMode, brightness, speed);
         }
         if (doEdge) {
-            SetEVisionEdge(r, g, b, edgeMode);
+            SetEVisionEdge(r, g, b, edgeMode, (uint8_t)brightness, (uint8_t)speed);
         }
         if (doRAM) {
             SetGSkillRAM(r, g, b);
@@ -2348,6 +2604,7 @@ void UpdateAllControls() {
     if (g_state.hCheckEdge) SendMessage(g_state.hCheckEdge, BM_SETCHECK, g_state.enableEdge ? BST_CHECKED : BST_UNCHECKED, 0);
     if (g_state.hCheckAutostart) SendMessage(g_state.hCheckAutostart, BM_SETCHECK, g_state.autostart ? BST_CHECKED : BST_UNCHECKED, 0);
     if (g_state.hCheckMinimizeTray) SendMessage(g_state.hCheckMinimizeTray, BM_SETCHECK, g_state.minimizeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_state.hCheckAutoApply) SendMessage(g_state.hCheckAutoApply, BM_SETCHECK, g_state.autoApply ? BST_CHECKED : BST_UNCHECKED, 0);
     if (g_state.hSliderBrightness) SendMessage(g_state.hSliderBrightness, TBM_SETPOS, TRUE, g_state.brightness);
     if (g_state.hSliderSpeed) SendMessage(g_state.hSliderSpeed, TBM_SETPOS, TRUE, g_state.speed);
     
@@ -2832,7 +3089,7 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         if (g_asusHwConfig.valid) {
             wchar_t fw[32];
             MultiByteToWideChar(CP_UTF8, 0, g_asusHwConfig.firmware, -1, fw, 32);
-            swprintf(title, 128, L"ASUS Aura - %s (%d Kan\x00E4le)", fw, numCh);
+            swprintf(title, 128, L"ASUS Aura - %s (%d Kan\u00E4le)", fw, numCh);
         } else {
             wcscpy(title, L"ASUS Aura Kanalsteuerung");
         }
@@ -3112,9 +3369,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int rowsTotalH = 240;
         int rowH = 48;
 
-        int row1Y = gy + (rowH * 0) + (rowH - 20) / 2;
-        int row2Y = gy + (rowH * 1) + (rowH - 20) / 2;
-        int row3Y = gy + (rowH * 2) + (rowH - 20) / 2;
+        int row1Y = gy + (rowH * 0) + (rowH - SLIDER_H) / 2;
+        int row2Y = gy + (rowH * 1) + (rowH - SLIDER_H) / 2;
+        int row3Y = gy + (rowH * 2) + (rowH - SLIDER_H) / 2;
 
         // Color Preview (Left side, repositioned with equal gaps)
         int previewSize = 100;
@@ -3160,7 +3417,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // R slider row
         CreateWindowW(L"STATIC", g_str->red, WS_CHILD | WS_VISIBLE | SS_RIGHT, labelX, row1Y+2, labelW, 18, hWnd, NULL, hInst, NULL);
         g_state.hSliderR = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
-            sliderX, row1Y, sliderW, 20, hWnd, (HMENU)ID_SLIDER_R, hInst, NULL);
+            sliderX, row1Y, sliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_R, hInst, NULL);
         SendMessage(g_state.hSliderR, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
         SendMessage(g_state.hSliderR, TBM_SETPOS, TRUE, g_state.red);
         SetWindowSubclass(g_state.hSliderR, SliderSubclassProc, 1, (DWORD_PTR)&g_sliderR);
@@ -3174,7 +3431,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // G slider row
         CreateWindowW(L"STATIC", g_str->green, WS_CHILD | WS_VISIBLE | SS_RIGHT, labelX, row2Y+2, labelW, 18, hWnd, NULL, hInst, NULL);
         g_state.hSliderG = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
-            sliderX, row2Y, sliderW, 20, hWnd, (HMENU)ID_SLIDER_G, hInst, NULL);
+            sliderX, row2Y, sliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_G, hInst, NULL);
         SendMessage(g_state.hSliderG, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
         SendMessage(g_state.hSliderG, TBM_SETPOS, TRUE, g_state.green);
         SetWindowSubclass(g_state.hSliderG, SliderSubclassProc, 2, (DWORD_PTR)&g_sliderG);
@@ -3188,7 +3445,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // B slider row
         CreateWindowW(L"STATIC", g_str->blue, WS_CHILD | WS_VISIBLE | SS_RIGHT, labelX, row3Y+2, labelW, 18, hWnd, NULL, hInst, NULL);
         g_state.hSliderB = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
-            sliderX, row3Y, sliderW, 20, hWnd, (HMENU)ID_SLIDER_B, hInst, NULL);
+            sliderX, row3Y, sliderW, SLIDER_H, hWnd, (HMENU)ID_SLIDER_B, hInst, NULL);
         SendMessage(g_state.hSliderB, TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
         SendMessage(g_state.hSliderB, TBM_SETPOS, TRUE, g_state.blue);
         SetWindowSubclass(g_state.hSliderB, SliderSubclassProc, 3, (DWORD_PTR)&g_sliderB);
@@ -3254,7 +3511,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int effY2 = gy + CTRL_H + ITEM_SPACING + 15;
         CreateWindowW(L"STATIC", g_str->brightness, WS_CHILD | WS_VISIBLE, gx, effY2+2, 70, 18, hWnd, NULL, hInst, NULL);
         g_state.hSliderBrightness = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
-            gx+75, effY2, 150, 20, hWnd, (HMENU)ID_SLIDER_BRIGHTNESS, hInst, NULL);
+            gx+75, effY2, 150, SLIDER_H, hWnd, (HMENU)ID_SLIDER_BRIGHTNESS, hInst, NULL);
         SendMessage(g_state.hSliderBrightness, TBM_SETRANGE, TRUE, MAKELPARAM(0, 4));
         SendMessage(g_state.hSliderBrightness, TBM_SETPOS, TRUE, g_state.brightness);
         SetWindowSubclass(g_state.hSliderBrightness, SliderSubclassProc, 4, (DWORD_PTR)&g_sliderBrightness);
@@ -3265,7 +3522,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Speed slider
         CreateWindowW(L"STATIC", g_str->speed, WS_CHILD | WS_VISIBLE, edgeX, effY2+2, 50, 18, hWnd, NULL, hInst, NULL);
         g_state.hSliderSpeed = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
-            edgeX+55, effY2, 150, 20, hWnd, (HMENU)ID_SLIDER_SPEED, hInst, NULL);
+            edgeX+55, effY2, 150, SLIDER_H, hWnd, (HMENU)ID_SLIDER_SPEED, hInst, NULL);
         SendMessage(g_state.hSliderSpeed, TBM_SETRANGE, TRUE, MAKELPARAM(0, 5));
         SendMessage(g_state.hSliderSpeed, TBM_SETPOS, TRUE, g_state.speed);
         SetWindowSubclass(g_state.hSliderSpeed, SliderSubclassProc, 5, (DWORD_PTR)&g_sliderSpeed);
@@ -3326,13 +3583,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int profLabelW = 50;
         int profComboW = 140;
         int profBtnW = 75;
-        int profGap = 15;  // gap between expanded controls
+        // One uniform gap for the whole row. The old code used 15 between the
+        // combo and the buttons but only 5 after the label, which is what made
+        // the spacing look wrong. The 15 was originally chosen to leave room for
+        // a +5px "glow" expansion, but comboboxes and buttons are both created
+        // with expand=false further down, so nothing expands and the extra
+        // allowance is dead - hence a single, honest gap value.
+        int profGap = 10;
         int profX = gx;
-        CreateWindowW(L"STATIC", g_str->profile, WS_CHILD | WS_VISIBLE, profX, gy+3, profLabelW, 18, hWnd, NULL, hInst, NULL);
-        profX += profLabelW + 5;
+        // Centre the label against the control height instead of a fixed +3.
+        CreateWindowW(L"STATIC", g_str->profile, WS_CHILD | WS_VISIBLE,
+            profX, gy + (BTN_H - 18) / 2, profLabelW, 18, hWnd, NULL, hInst, NULL);
+        profX += profLabelW + profGap;
         g_state.hComboProfiles = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWN | WS_VSCROLL,
             profX, gy, profComboW, 200, hWnd, (HMENU)ID_COMBO_PROFILES, hInst, NULL);
+        // Match the closed combo height to the buttons next to it, otherwise the
+        // row sits on three different baselines. -1 addresses the edit field.
+        SendMessage(g_state.hComboProfiles, CB_SETITEMHEIGHT, (WPARAM)-1, BTN_H - 8);
         profX += profComboW + profGap;
         CreateWindowW(L"BUTTON", g_str->save, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             profX, gy, profBtnW, BTN_H, hWnd, (HMENU)ID_BTN_SAVE_PROFILE, hInst, NULL);
@@ -3346,8 +3614,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             gx, setY, ck_width, 20, hWnd, (HMENU)ID_CHECK_AUTOSTART, hInst, NULL);
         g_state.hCheckMinimizeTray = CreateWindowW(L"BUTTON", g_str->tray, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             gx+ck_step, setY, ck_width, 20, hWnd, (HMENU)ID_CHECK_MINIMIZE_TRAY, hInst, NULL);
+        g_state.hCheckAutoApply = CreateWindowW(L"BUTTON", g_str->autoApply, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            gx+ck_step*2, setY, ck_width, 20, hWnd, (HMENU)ID_CHECK_AUTO_APPLY, hInst, NULL);
         SendMessage(g_state.hCheckAutostart, BM_SETCHECK, g_state.autostart ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessage(g_state.hCheckMinimizeTray, BM_SETCHECK, g_state.minimizeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessage(g_state.hCheckAutoApply, BM_SETCHECK, g_state.autoApply ? BST_CHECKED : BST_UNCHECKED, 0);
         curY = g_cards[3].rect.bottom + GROUP_MARGIN;
 
         // ============= ACTION BUTTONS =============
@@ -3425,12 +3696,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         UpdateSliders();
         UpdatePreview();
 
-        // Load saved profile if any
-        if (!g_state.lastProfile.empty()) {
-            if (LoadProfile(g_state.lastProfile)) {
-                UpdateAllControls();
-            }
-        }
+        // Deliberately NOT auto-loading lastProfile here. The colours the user
+        // last had are already in g_state from LoadAppSettings(); applying the
+        // profile on top would silently discard every manual change made since
+        // that profile was last used - the classic "I changed the colour, went
+        // away, came back and the old profile is on again". The name is only
+        // preselected in the combo so that Laden/Speichern target it with one
+        // click. A profile is applied when the user asks for it, never on its own.
+        g_state.currentProfile = g_state.lastProfile;
 
         // Register global hotkeys
         RegisterHotKey(hWnd, ID_HOTKEY_BLUE, MOD_CONTROL | MOD_ALT, 'B');
@@ -3565,6 +3838,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CTLCOLORBTN: {
         HDC hdcCtrl = (HDC)wParam;
         SetTextColor(hdcCtrl, g_currentTheme->textPrimary);
+        // A read-only EDIT is coloured via WM_CTLCOLORSTATIC, not
+        // WM_CTLCOLOREDIT. The status log is exactly such a control: with a
+        // hollow brush its background is never erased, so every append - and
+        // every EM_SCROLLCARET scroll - leaves the previous text standing and
+        // the lines pile up on top of each other. Give it the same opaque
+        // brush the editable fields get; real STATIC labels keep the
+        // transparent treatment so the gradient shows through.
+        if ((HWND)lParam == g_state.hStatus) {
+            SetBkMode(hdcCtrl, OPAQUE);
+            SetBkColor(hdcCtrl, g_currentTheme->bgControl);
+            if (!g_hBgBrush) g_hBgBrush = CreateSolidBrush(g_currentTheme->bgControl);
+            return (LRESULT)g_hBgBrush;
+        }
         SetBkMode(hdcCtrl, TRANSPARENT);
         return (LRESULT)GetStockObject(HOLLOW_BRUSH);
     }
@@ -3635,6 +3921,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_state.minimizeToTray = (SendMessage(g_state.hCheckMinimizeTray, BM_GETCHECK, 0, 0) == BST_CHECKED);
             SaveSettings();
         }
+        else if (id == ID_CHECK_AUTO_APPLY) {
+            g_state.autoApply = (SendMessage(g_state.hCheckAutoApply, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            SaveSettings();
+        }
         else if (id == ID_BTN_CHANNEL_SETTINGS) {
             // Open integrated Channel Settings dialog
             // Dialog commits through SaveSettings() on OK
@@ -3658,8 +3948,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             wchar_t name[64];
             GetWindowTextW(g_state.hComboProfiles, name, 64);
             if (wcslen(name) > 0) {
-                SaveProfile(name);
+                SaveProfile(name);      // also makes it the active profile
                 RefreshProfileList();
+                SaveSettings();         // persist the new lastProfile right away
+                UpdateAllControls();    // reselect it in the combo
             }
         }
         else if (id == ID_BTN_LOAD_PROFILE) {
@@ -3787,8 +4079,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // Resume detected by watchdog thread (time jump)
     case WM_USER + 100: {
         g_resumeDetected = false;
-        KillTimer(hWnd, ID_TIMER_RESUME);
-        SetTimer(hWnd, ID_TIMER_RESUME, 2000, NULL);
+        // A >5s time jump means the machine really was out, even if we never
+        // saw PBT_APMSUSPEND (it is not delivered for every sleep path).
+        g_suspendSeen = true;
+        ScheduleResumeReset(hWnd);
         return 0;
     }
 
@@ -3808,6 +4102,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_POWERBROADCAST: {
         // Handle SUSPEND - turn off all devices before sleep
         if (wParam == PBT_APMSUSPEND) {
+            g_suspendSeen = true;
             ClearStatus();
             AppendStatus(L"System entering standby...");
             // Turn off all RGB devices for clean state
@@ -3817,7 +4112,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (g_state.enableAura) SetAsusAura(0, 0, 0);
                 if (g_state.enableMouse) SetSteelSeries(0, 0, 0);
                 if (g_state.enableKeyboard) SetEVisionKeyboard(0, 0, 0, 0, 0, 0);
-                if (g_state.enableEdge) SetEVisionEdge(0, 0, 0, 0);
+                if (g_state.enableEdge) SetEVisionEdge(0, 0, 0, EDGE_MODE_OFF, 0, 0);
                 if (g_state.enableRAM) SetGSkillRAM(0, 0, 0);
                 hid_exit();
             }
@@ -3825,29 +4120,28 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         // Handle RESUME from sleep/hibernate
         else if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
-            KillTimer(hWnd, ID_TIMER_RESUME);
-            SetTimer(hWnd, ID_TIMER_RESUME, 3000, NULL);
+            g_suspendSeen = true;   // authoritative: we really were suspended
+            ScheduleResumeReset(hWnd);
         }
-        // Handle display power state change (monitor on)
+        // Display power state change. Monitor-on is NOT a resume - it fires on
+        // every AFK dim/wake cycle. Only honoured when a suspend preceded it.
         else if (wParam == PBT_POWERSETTINGCHANGE) {
             POWERBROADCAST_SETTING* pbs = (POWERBROADCAST_SETTING*)lParam;
             if (pbs && pbs->DataLength >= 4) {
                 DWORD displayState = *((DWORD*)pbs->Data);
                 if (displayState == 1) {
-                    KillTimer(hWnd, ID_TIMER_RESUME);
-                    SetTimer(hWnd, ID_TIMER_RESUME, 3000, NULL);
+                    ScheduleResumeReset(hWnd);
                 }
             }
         }
         return TRUE;
     }
 
-    // Session change (lock/unlock)
+    // Session change (lock/unlock). Unlock alone is not a resume either.
     case WM_WTSSESSION_CHANGE: {
         // WTS_SESSION_UNLOCK = 0x8
         if (wParam == 0x8) {
-            KillTimer(hWnd, ID_TIMER_RESUME);
-            SetTimer(hWnd, ID_TIMER_RESUME, 3000, NULL);
+            ScheduleResumeReset(hWnd);
         }
         return TRUE;
     }
@@ -3855,10 +4149,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_TIMER:
         if (wParam == ID_TIMER_RESUME) {
             KillTimer(hWnd, ID_TIMER_RESUME);
+            g_resetArmed = false;
+            // Consume the suspend: further display-on/unlock events must not
+            // queue another reset until the next genuine standby.
+            g_suspendSeen = false;
+            if (g_resetInFlight.exchange(true)) break;  // one at a time
             ClearStatus();
             AppendStatus(L"System resumed - resetting RGB...");
-            FullHIDReset();
-            CommitStateAndApply(true);
+            // Off the UI thread: FullHIDReset() sleeps ~800ms and re-enumerates
+            // the HID stack. Blocking the pump here lets power events pile up
+            // and re-arm this timer over and over.
+            std::thread([] {
+                FullHIDReset();
+                RequestApplyColors(true);
+                g_lastResetTick = GetTickCount64();  // cooldown starts at completion
+                g_resetInFlight = false;
+            }).detach();
         }
         else if (wParam == ID_TIMER_DEBOUNCE) {
             KillTimer(hWnd, ID_TIMER_DEBOUNCE);
@@ -4312,6 +4618,20 @@ LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow) {
     LogDebug("WinMain started");
 
+    // Command line flags - parsed before ANY device branch below.
+    //
+    // These used to be read further down, after --probe, --identify, --kbdump,
+    // --kbtest, --kbmode* and --mouse-zones-test had already executed and
+    // returned. g_state.dryRun was therefore still false while those branches
+    // ran: "--dry-run --kbmode-sweep" wrote 21 mode bytes into the keyboard's
+    // flash, and "--dry-run --kbtest=lock" set the Win-lock flag for real.
+    // The guard only ever protected the GUI apply path it was declared next to.
+    bool startMinimized = (strstr(lpCmdLine, "--minimized") != nullptr);
+    g_skipApplyOnStart  = (strstr(lpCmdLine, "--no-apply") != nullptr);
+    g_state.dryRun      = (strstr(lpCmdLine, "--dry-run") != nullptr);
+    bool forceForeground = (strstr(lpCmdLine, "--foreground") != nullptr);
+    if (g_state.dryRun) LogDebug("[dry-run] active - no device writes will be sent");
+
     // =========================================================
     // PHASE 0 DIAGNOSTIC PROBE: --probe / --probe-interactive
     // Headless, read-mostly hardware capability dump. Must run before any
@@ -4336,6 +4656,46 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         }
     }
 
+    // --kbdump : read-only hex dump of the whole on-board config memory to
+    // %APPDATA%\OneClickRGB\docs\kbdump.txt. The probe only covers the three
+    // 0x40-byte profile blocks (0x00..0xBF); the key-remap / macro table that
+    // follows at 0xC0+ has never been captured, and that is where Win-Lock is
+    // expected to live (the Win key remapped to a no-op rather than a flag).
+    // Pure reads - command 0x05 only, no 0x06 writes anywhere in this path.
+    if (strstr(lpCmdLine, "--kbdump")) {
+        hid_init();
+        hid_device* dev = nullptr;
+        struct hid_device_info* devs = hid_enumerate(Devices::EVISION_VID, Devices::EVISION_PID);
+        for (auto* c = devs; c; c = c->next)
+            if (c->usage_page == Devices::EVISION_USAGE_PAGE) { dev = hid_open_path(c->path); break; }
+        hid_free_enumeration(devs);
+        if (dev) {
+            EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr); Sleep(20);
+            uint8_t prof = 0;
+            EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &prof);
+
+            std::wstring dir = GetAppDataPath() + L"\\docs";
+            SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+            FILE* fp = _wfopen((dir + L"\\kbdump.txt").c_str(), L"w");
+            if (fp) {
+                fprintf(fp, "EVision GK650 config memory dump\nactiveProfile=%d\n\n", (int)prof);
+                for (int off = 0; off < 0x400; off += 16) {
+                    uint8_t buf[16] = {0};
+                    int rr = EVisionQuery(dev, 0x05, (uint16_t)off, nullptr, 16, buf);
+                    fprintf(fp, "%04X: ", off);
+                    for (int i = 0; i < 16; i++) fprintf(fp, "%02X ", buf[i]);
+                    fprintf(fp, "  rr=%d\n", rr);
+                    if (rr < 0 && off > 0x100) break;   // stop once the device stops answering
+                }
+                fclose(fp);
+            }
+            EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
+            hid_close(dev);
+        }
+        hid_exit();
+        return 0;
+    }
+
     // Keyboard Win-lock isolation test (no writes, just session commands):
     //   --kbtest=begin   send 0x01 begin-configure only
     //   --kbtest=end     send 0x02 end-configure only
@@ -4345,6 +4705,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         const char* kbt = strstr(lpCmdLine, "--kbtest=");
         if (kbt) {
             const char* what = kbt + strlen("--kbtest=");
+            if (g_state.dryRun) {
+                LogDebug("[dry-run] --kbtest skipped - it sends session commands "
+                         "and (lock/unlock) a real flag write");
+                return 0;
+            }
             hid_init();
             hid_device* dev = nullptr;
             struct hid_device_info* devs = hid_enumerate(Devices::EVISION_VID, Devices::EVISION_PID);
@@ -4367,14 +4732,146 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
                     int wr = EVisionQuery(dev, 0x06, off, &val, 1, nullptr); Sleep(10);
                     EVisionQuery(dev, 0x05, off, nullptr, 1, &after);
                     EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
-                    SHCreateDirectoryExA(NULL, "docs", NULL);
-                    FILE* fp = fopen("docs\\kbtest_unlock.txt", "w");
+                    // Absolute path next to config.json. A relative "docs" only
+                    // resolved when the exe happened to be started from the repo
+                    // root; everywhere else SHCreateDirectoryEx rejected it and
+                    // the fopen failed, so the test silently produced no report
+                    // even though the unlock write itself had gone through.
+                    std::wstring dir = GetAppDataPath() + L"\\docs";
+                    SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+                    std::wstring rep = dir + L"\\kbtest_unlock.txt";
+                    FILE* fp = _wfopen(rep.c_str(), L"w");
                     if (fp) { fprintf(fp, "profile=%d off=0x%02X val=0x%02X before=0x%02X writeRes=%d after=0x%02X\n",
                                       p, off, val, before, wr, after); fclose(fp); }
                 }
                 hid_close(dev);
             }
             hid_exit();
+            return 0;
+        }
+    }
+
+    // Live keyboard-mode probe - resolves open item 4 in docs/Keyboard_Protocol.md
+    // ("confirm which KB_MODE_* values actually animate"). Only 0x06 = STATIC was
+    // ever cross-validated against the hardware; every other entry in
+    // KB_MODE_TABLE is an unverified guess, which is why picking Breathing in the
+    // UI can leave the keyboard exactly as it was.
+    //
+    // The probe deliberately drives the production path (SetEVisionKeyboard) so
+    // it tests what the app really sends, and it reports the read-back from the
+    // device - never the value we asked for (CLAUDE.md rule 1).
+    //
+    //   --kbmode=<n>          write one mode (decimal or 0x-hex), verify, exit
+    //   --kbmode-sweep[=sec]  walk 0x00..0x14, hold each <sec> (default 5)
+    //
+    // Report: %APPDATA%\OneClickRGB\docs\kbmode_probe.txt
+    {
+        const char* sweepArg  = strstr(lpCmdLine, "--kbmode-sweep");
+        const char* singleArg = strstr(lpCmdLine, "--kbmode=");
+        if (sweepArg || singleArg) {
+            // The sweep drives SetEVisionKeyboard, which is dry-run guarded -
+            // but without this branch it would still walk 21 steps, sleep for
+            // the full hold time each and fill the report with "READ FAILED"
+            // rows. Nothing was attempted, so the report says exactly that.
+            if (g_state.dryRun) {
+                std::wstring dir = GetAppDataPath() + L"\\docs";
+                SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+                FILE* fp = _wfopen((dir + L"\\kbmode_probe.txt").c_str(), L"w");
+                if (fp) {
+                    fprintf(fp, "EVision GK650 keyboard mode probe\n"
+                                "DRY RUN - no write was sent and no value was read.\n"
+                                "Run without --dry-run to probe the hardware.\n");
+                    fclose(fp);
+                }
+                LogDebug("[dry-run] --kbmode/--kbmode-sweep skipped - "
+                         "would write mode bytes to keyboard flash");
+                return 0;
+            }
+
+            LoadSettings();
+
+            const uint8_t pr = g_state.red, pg = g_state.green, pb = g_state.blue;
+            // Full brightness so a working effect is unmistakable, and a non-zero
+            // speed because an animation at speed 0 does not visibly move.
+            const uint8_t pbright = 4;
+            const uint8_t pspeed  = g_state.speed ? g_state.speed : (uint8_t)2;
+
+            int holdMs = 5000;
+            if (sweepArg) {
+                const char* eq = sweepArg + strlen("--kbmode-sweep");
+                if (*eq == '=') {
+                    int s = atoi(eq + 1);
+                    if (s >= 1 && s <= 60) holdMs = s * 1000;
+                }
+            }
+
+            std::wstring dir = GetAppDataPath() + L"\\docs";
+            SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+            FILE* fp = _wfopen((dir + L"\\kbmode_probe.txt").c_str(), L"w");
+
+            if (fp) {
+                fprintf(fp, "EVision GK650 keyboard mode probe\n");
+                fprintf(fp, "colour=%02X%02X%02X brightness=%d speed=%d hold=%dms\n",
+                        pr, pg, pb, pbright, pspeed, holdMs);
+                fprintf(fp, "'got' columns are read back from the device after the write.\n\n");
+                fprintf(fp, "  t[s]  mode  writeRes readRes  got:mode br sp  rgb       verdict\n");
+                fprintf(fp, "  ----  ----  -------- -------  -------- --  --  --------  -------\n");
+                fflush(fp);
+            }
+
+            // Full read-back of the 18-byte block so the bytes the write path
+            // does NOT set stay visible - notably +0x0A, which is where the edge
+            // payload keeps its commit/save flag.
+            auto dumpBlock = [&](const KbVerifyResult& v) {
+                if (!fp || !v.valid) return;
+                fprintf(fp, "        block +0x01..+0x12:");
+                for (int i = 0; i < 18; i++) fprintf(fp, " %02X", v.got[i]);
+                fprintf(fp, "\n        (+0x0A = %02X)\n", v.got[9]);
+                fflush(fp);
+            };
+
+            auto probeOne = [&](uint8_t mode, int tSec) {
+                hid_init();
+                SetEVisionKeyboard(pr, pg, pb, mode, pbright, pspeed);
+                hid_exit();
+
+                const KbVerifyResult& v = g_lastKbVerify;
+                const char* verdict = !v.valid          ? "READ FAILED"
+                                    : v.got[0] != mode  ? "REJECTED"
+                                    : "accepted";
+                if (fp) {
+                    fprintf(fp, "  %4d  0x%02X  %8d %7d      0x%02X %2d  %2d  %02X%02X%02X    %s\n",
+                            tSec, mode, v.writeRes, v.readRes,
+                            v.got[0], v.got[1], v.got[2],
+                            v.got[5], v.got[6], v.got[7], verdict);
+                    fflush(fp);
+                }
+                dumpBlock(v);
+            };
+
+            if (sweepArg) {
+                // 0x00..0x14 rather than just the 11 table entries: if Breathing
+                // is not 0x05, the real value is most likely a neighbour that the
+                // table never lists.
+                int tSec = 0;
+                for (uint8_t m = 0x00; m <= 0x14; m++) {
+                    probeOne(m, tSec);
+                    Sleep(holdMs);
+                    tSec += holdMs / 1000;
+                }
+                if (fp) {
+                    fprintf(fp, "\nWatch the keyboard while this runs and note the wall-clock\n"
+                                "second at which it animates; the t[s] column maps that back to\n"
+                                "the mode byte. 'accepted' only means the byte was stored - it\n"
+                                "does not prove the effect renders.\n");
+                }
+            } else {
+                long m = strtol(singleArg + strlen("--kbmode="), nullptr, 0);
+                if (m < 0 || m > 0xFF) m = KB_MODE_STATIC;
+                probeOne((uint8_t)m, 0);
+            }
+
+            if (fp) fclose(fp);
             return 0;
         }
     }
@@ -4396,12 +4893,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         return 0;
     }
 
-    // Check for command line flags
-    bool startMinimized = (strstr(lpCmdLine, "--minimized") != nullptr);
-    g_skipApplyOnStart = (strstr(lpCmdLine, "--no-apply") != nullptr);
-    g_state.dryRun = (strstr(lpCmdLine, "--dry-run") != nullptr);
-    bool forceForeground = (strstr(lpCmdLine, "--foreground") != nullptr);
-
     // =========================================================
     // HEADLESS TEST MODE: --switch-test=<device>
     // Runs a hardware light sequence and exits without showing UI.
@@ -4415,8 +4906,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
         // ---- edge-diagnose: enumerate all EVision HID interfaces + write probe ----
         if (strncmp(devName, "edge-diagnose", 13) == 0) {
+            if (g_state.dryRun) {
+                LogDebug("[dry-run] --switch-test=edge-diagnose skipped - it writes "
+                         "a probe payload to the active profile");
+                return 0;
+            }
             hid_init();
-            FILE* diag = fopen("edge_diagnose.txt", "w");
+
+            // Report goes next to config.json, not into the CWD. The old
+            // fopen("edge_diagnose.txt") only landed somewhere useful when the
+            // exe happened to be started from the repo root, and its result was
+            // never checked - the very next fprintf dereferenced a possibly
+            // NULL FILE*.
+            std::wstring diagDir = GetAppDataPath() + L"\\docs";
+            SHCreateDirectoryExW(NULL, diagDir.c_str(), NULL);
+            std::wstring diagPath = diagDir + L"\\edge_diagnose.txt";
+            FILE* diag = _wfopen(diagPath.c_str(), L"w");
+            if (!diag) {
+                LogDebug("[EVision] edge-diagnose: cannot open report file - aborted");
+                hid_exit();
+                return 1;
+            }
             fprintf(diag, "=== OneClickRGB Edge HID Diagnose ===\n");
             fprintf(diag, "Scanning VID=0x%04X (EVision/Endorfy)...\n\n",
                     (unsigned)Devices::EVISION_VID);
@@ -4437,47 +4947,115 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
             hid_free_enumeration(all);
             fprintf(diag, "\n%d interface(s) found.\n", ifcount);
 
-            // Write-probe: attempt every candidate offset with a blue static colour
-            fprintf(diag, "\n--- Write probe (UsagePage 0xFF1C then 0xFF00) ---\n");
+            // ----------------------------------------------------------------
+            // Write probe: ONE write, to the one documented edge slot.
+            //
+            // This branch used to carry the 15-offset brute-force verbatim
+            // (0x13/0x16/0x19/0x1B/0x1E in every one of the three profile
+            // blocks) - the exact code that was removed from SetEVisionEdge
+            // because it scribbled the 10-byte payload straight through
+            // +0x14..0x1D in all three profiles, five times over at
+            // overlapping positions. That is where the "04 02 00 04 02 00 04
+            // 00 04 02" pattern in the live dump comes from, and it is what
+            // made the Windows-key lock stick. Running the diagnose was
+            // corrupting the very state it was meant to explain, in profiles
+            // the user may never have selected.
+            //
+            // CLAUDE.md rule 2: only documented offsets. The edge payload
+            // lives at profile_base+0x1E (Keyboard_Protocol.md 3.1), so the
+            // probe writes there and nowhere else, in the ACTIVE profile only.
+            // Payload and commit flag are identical to SetEVisionEdge - a
+            // diagnose that does not reproduce the production write proves
+            // nothing about the production path.
+            //
+            // The pre-write bytes are recorded below so the previous edge
+            // state stays recoverable; a normal apply restores it anyway.
+            // ----------------------------------------------------------------
+            fprintf(diag, "\n--- Write probe (single write, active profile +0x1E) ---\n");
             char path[512] = {};
             hid_device* dev = OpenEVisionEdgeDev(path, sizeof(path));
+            int rc = 0;
             if (!dev) {
                 fprintf(diag, "ERROR: Could not open any EVision RGB interface.\n");
+                rc = 2;
             } else {
                 fprintf(diag, "Opened: %s\n", path);
                 EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr); Sleep(25);
                 uint8_t activeProfile = 0;
                 EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &activeProfile);
                 if (activeProfile > 2) activeProfile = 0;
-                fprintf(diag, "Active profile index: %d\n\n", (int)activeProfile);
+                uint16_t edgeOff = (uint16_t)(activeProfile * 0x40 + 0x1E);
+                fprintf(diag, "Active profile index: %d  ->  edge slot 0x%02X\n\n",
+                        (int)activeProfile, (unsigned)edgeOff);
 
-                // Probe payload: STATIC BLUE – no permanent flash save (byte[9]=0x00)
-                uint8_t testData[10] = {0x04, 4, 2, 0, 0, 0, 0, 255, 0, 0x00};
-                struct { uint16_t off; const char* lbl; } probes[] = {
-                    {0x13,"P0+0x12"},{0x16,"P0+0x15"},{0x19,"P0+0x18"},
-                    {0x1B,"P0+0x1A"},{0x1E,"P0-direct"},
-                    {0x53,"P1+0x12"},{0x56,"P1+0x15"},{0x59,"P1+0x18"},
-                    {0x5B,"P1+0x1A"},{0x5E,"P1-direct"},
-                    {0x93,"P2+0x12"},{0x96,"P2+0x15"},{0x99,"P2+0x18"},
-                    {0x9B,"P2+0x1A"},{0x9E,"P2-direct"},
-                };
-                for (const auto& p : probes) {
-                    int res = EVisionQuery(dev, 0x06, p.off, testData, 10, nullptr);
-                    fprintf(diag, "  off=0x%02X (%s): res=%d %s\n",
-                            (unsigned)p.off, p.lbl, res, res >= 0 ? "OK" : "FAIL");
-                    Sleep(5);
+                // Probe payload: STATIC BLUE, commit flag set (byte[9]=0x01),
+                // same as SetEVisionEdge builds for EDGE_MODE_STATIC.
+                uint8_t testData[10] = {0x04, 4, 2, 0, 0, 0, 0, 255, 0, 0x01};
+
+                uint8_t before[10] = {0};
+                int beforeRes = EVisionQuery(dev, 0x05, edgeOff, nullptr, 10, before);
+                fprintf(diag, "  before (readRes=%d):", beforeRes);
+                for (int i = 0; i < 10; i++) fprintf(diag, " %02X", before[i]);
+                fprintf(diag, "\n");
+
+                int wr = EVisionQuery(dev, 0x06, edgeOff, testData, 10, nullptr);
+                Sleep(10);
+
+                // Read-back decides, not the write result: the firmware ACKs
+                // writes it discards (CLAUDE.md rule 1).
+                uint8_t after[10] = {0};
+                int afterRes = EVisionQuery(dev, 0x05, edgeOff, nullptr, 10, after);
+                fprintf(diag, "  wrote  (writeRes=%d):", wr);
+                for (int i = 0; i < 10; i++) fprintf(diag, " %02X", testData[i]);
+                fprintf(diag, "\n  after  (readRes=%d):", afterRes);
+                for (int i = 0; i < 10; i++) fprintf(diag, " %02X", after[i]);
+                fprintf(diag, "\n\n");
+
+                bool verified = (afterRes >= 0) &&
+                                after[0] == testData[0] && after[1] == testData[1] &&
+                                after[2] == testData[2] && after[5] == testData[5] &&
+                                after[6] == testData[6] && after[7] == testData[7];
+
+                if (afterRes < 0) {
+                    fprintf(diag, "VERDICT: read-back failed (%d) - nothing verified.\n", afterRes);
+                    rc = 1;
+                } else if (verified) {
+                    fprintf(diag, "VERDICT: verified - 0x%02X holds the payload we sent.\n",
+                            (unsigned)edgeOff);
+                } else {
+                    fprintf(diag, "VERDICT: MISMATCH - device kept mode=0x%02X br=%d sp=%d "
+                                  "rgb=%02X%02X%02X\n",
+                            after[0], after[1], after[2], after[5], after[6], after[7]);
+                    for (int i = 0; i < 10; i++)
+                        if (after[i] != testData[i])
+                            fprintf(diag, "  byte[%d]: want %02X, got %02X\n",
+                                    i, testData[i], after[i]);
+                    rc = 1;
                 }
-                uint8_t unlock[2] = {0, 0};
-                EVisionQuery(dev, 0x06, 0x14, unlock, 2, nullptr);
+
+                // No unlock write at 0x14 here anymore. It only existed to
+                // repair what the brute-force above had just destroyed; with
+                // the brute-force gone it is an unrelated side effect in a
+                // diagnostic, and it was addressed to profile 0 regardless of
+                // which profile is active. SetEVisionKeyboard clears the flag
+                // for the active profile on every apply.
                 EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
                 hid_close(dev);
-                fprintf(diag, "\nProbe complete. Offset rows marked OK accepted the write.\n");
-                fprintf(diag, "Observe which LED changed to blue to confirm the correct offset.\n");
+
+                fprintf(diag, "\nThe edge strip should now be blue. If the read-back says\n"
+                              "verified but nothing lit up, the offset is right and the\n"
+                              "problem is elsewhere (mode value, brightness, or wiring).\n");
             }
             fclose(diag);
             hid_exit();
-            LogDebug("[EVision] edge-diagnose complete – see edge_diagnose.txt");
-            return 0;
+            {
+                char done[320];
+                snprintf(done, sizeof(done),
+                         "[EVision] edge-diagnose rc=%d - report: %%APPDATA%%\\OneClickRGB\\docs\\edge_diagnose.txt",
+                         rc);
+                LogDebug(done);
+            }
+            return rc;
         }
 
         // ---- normal switch-test mode ----
@@ -4530,7 +5108,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
             if (doKeyboard) SetEVisionKeyboard(r, g, b, KB_MODE_STATIC, 4, 2);
             if (doEdge) {
                 uint8_t eMode = isOff ? EDGE_MODE_OFF : EDGE_MODE_STATIC;
-                bool ok = SetEVisionEdge(r, g, b, eMode);
+                bool ok = SetEVisionEdge(r, g, b, eMode, 4, 2);
                 char edgeRes[64];
                 snprintf(edgeRes, sizeof(edgeRes),
                          "[switch-test] SetEVisionEdge result=%d", (int)ok);

@@ -506,9 +506,11 @@ static json ProbeRAM() {
 //---------------------------------------------------------------------------
 // Markdown report writer
 //---------------------------------------------------------------------------
-static void WriteMarkdown(const json& root, const std::string& path) {
+// Returns false if the report could not be written, so the caller can say so
+// instead of printing a path that was never created.
+static bool WriteMarkdown(const json& root, const std::string& path) {
     std::ofstream f(path);
-    if (!f) return;
+    if (!f) return false;
     f << "# OneClickRGB - Hardware Capability Report\n\n";
     f << "Generated: " << root.value("probeTimestamp", "") << "  \n";
     f << "Schema version: " << root.value("schemaVersion", 0) << "\n\n";
@@ -572,6 +574,7 @@ static void WriteMarkdown(const json& root, const std::string& path) {
         f << "## Next steps\n\n";
         for (auto& s : root["nextSteps"]) f << "1. " << s.get<std::string>() << "\n";
     }
+    return f.good();
 }
 
 //---------------------------------------------------------------------------
@@ -628,20 +631,38 @@ static int RunHardwareProbe(bool /*interactive*/) {
         "Determine a confirmed Aura per-channel effect-mode GET for rainbow detection"
     });
 
-    // write outputs to ./docs (created if missing)
-    SHCreateDirectoryExA(NULL, "docs", NULL);
-    std::string jsonPath = "docs\\probe_results_" + root["probeTimestamp"].get<std::string>() + ".json";
-    std::string mdPath   = "docs\\Hardware_Capability_Report.md";
+    // Output goes next to config.json and the profiles, i.e. into
+    // %APPDATA%\OneClickRGB\docs.
+    //
+    // Two earlier choices were wrong. A relative "docs" only worked when the
+    // probe happened to be started from the repository root - SHCreateDirectoryEx
+    // requires a fully qualified path and simply fails on a relative one.
+    // Anchoring on the exe directory is no better: a directory created below
+    // build\ inherits only that tree's read-only Users ACE (the Full-Access
+    // entries on build\ itself are not marked inheritable), so the new folder
+    // is not writable even for an elevated process. The AppData location is
+    // per-user and always writable.
+    //
+    // Failures are reported rather than swallowed - the previous "if (jf)"
+    // guard made the probe announce file names it had never written.
+    std::string docsDir  = WToU8(GetAppDataPath().c_str()) + "\\docs";
+    SHCreateDirectoryExA(NULL, docsDir.c_str(), NULL);
+    std::string jsonPath = docsDir + "\\probe_results_" + root["probeTimestamp"].get<std::string>() + ".json";
+    std::string mdPath   = docsDir + "\\Hardware_Capability_Report.md";
 
-    { std::ofstream jf(jsonPath); if (jf) jf << std::setw(2) << root; }
-    WriteMarkdown(root, mdPath);
+    bool jsonOk = false, mdOk = false;
+    { std::ofstream jf(jsonPath); if (jf) { jf << std::setw(2) << root; jsonOk = jf.good(); } }
+    mdOk = WriteMarkdown(root, mdPath);
 
     DWORD dt = GetTickCount() - t0;
     Con("\nDevices detected: %d   (elapsed %lu ms)\n", hwCount, (unsigned long)dt);
-    Con("JSON  -> %s\n", jsonPath.c_str());
-    Con("Report-> %s\n", mdPath.c_str());
+    Con("JSON  -> %s%s\n", jsonPath.c_str(), jsonOk ? "" : "   [WRITE FAILED]");
+    Con("Report-> %s%s\n", mdPath.c_str(),   mdOk   ? "" : "   [WRITE FAILED]");
+    if (!jsonOk || !mdOk)
+        Con("!! Could not write probe output to %s - check that the directory\n"
+            "   exists and is writable.\n", docsDir.c_str());
     Con("=== Probe complete ===\n\n");
-    return 0;
+    return (jsonOk && mdOk) ? 0 : 2;
 }
 
 } // namespace probe
