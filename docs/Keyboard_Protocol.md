@@ -72,6 +72,92 @@ The edge strip data is written as the 10-byte payload at **`profile_base + 0x1E`
 ➡ **Phase 2 action:** replace the 15-offset brute-force loop in `SetEVisionEdge`
 with a single write to `activeProfile*0x40 + 0x1E`. The current "P-direct"
 candidates (`0x1E/0x5E/0x9E`) are the correct ones; the other 12 are noise.
+— *done; the write goes to `active_profile*0x40 + 0x1E` only.*
+
+#### Mode byte `+0x1E` — confidence per value
+
+The offset is [HIGH]. The **values** are not, and the two must not be conflated:
+the firmware acknowledges, stores and reads back mode bytes it then does not
+render. A matching read-back is therefore evidence about the flash, not about
+the light (rule 1).
+
+| Value | Meaning | Rendering confidence | Basis |
+|---|---|---|---|
+| `0x00` | static / freeze | **[HIGH]** | colour changes are visible on the strip |
+| `0x01` | wave? | **[?]** | payload layout only — never observed animating |
+| `0x02` | spectrum? | **[?]** | payload layout only — never observed animating |
+| `0x03` | breathing? | **[?]** | stored and read back, reported as **not animating** |
+| `0x05` | off | **[HIGH]** | strip goes dark |
+| `0x04` | legacy "static" | **[?]** | mapped to `0x00` by `NormalizeEdgeMode`; produced rainbow-only behaviour |
+
+Live state on 2026-08-17, straight from `--kbdump` (P0 `+0x1E..0x27`):
+
+```
+03 04 05 00 00 00 13 FF 00 01
+^mode 0x03 (breathing)  ^bright 4  ^speed 5           ^commit 01
+```
+
+Everything the protocol asks for is in place — mode set, brightness non-zero,
+speed non-zero, commit flag set — and the strip still does not move. That is the
+open question, and it is not answerable by reading bytes back.
+
+#### What narrows it (2026-08-17, from the device)
+
+Colour **does** render — a static colour change is visible on both the keyboard
+and the strip — while no effect animates on either. Colour (`+0x06..0x08`) and
+mode (`+0x01`) sit in the same 10-byte payload, leave in the same write and read
+back identically. If the firmware renders the colour from that block, it reads
+the block; so the offset is not the suspect any more. What is left is the **mode
+values**, and `KB_MODE_TABLE` is an unverified guess outside `0x06`.
+
+#### What is *not* evidence, despite being on disk
+
+* `edgemode_probe.txt` and `unlock_winkey.txt` in `%APPDATA%\OneClickRGB\docs`
+  are artefacts of `tools\check_dryrun_flags.ps1` (the deliberate
+  `--dry-run --edgemode=3 --edgemode-sweep` case, exit 2) and of a dry run. The
+  mode and speed sweeps have **never run on hardware**; there is no measurement
+  yet.
+* `A_vor_cycle.txt` / `B_nach_cycle.txt` are byte-identical (same MD5) and were
+  a failed attempt, not a null result. They prove nothing and are discarded.
+* The **13:11 edge mode sweep** wrote all eleven values `0x00..0x0A`, each
+  verified by read-back, and restored the pre-probe payload — technically a clean
+  run. Its
+  `animated?` column is empty because nobody was watching, so it establishes
+  nothing about rendering either. Do not read it as "no mode animates".
+
+One thing that run *did* show: the firmware stored **every** value, including
+`0x06..0x0A`, which can hardly all be valid edge modes. A block that is really
+interpreted would be expected to refuse something. That leans towards "this
+memory is not what renders" over "the values are wrong" — which is precisely
+what `--rendercheck` was built to decide, instead of another round of guessing.
+
+➡ **Tooling:** `--edgemode=<n>` writes one mode through the production path and
+reports the full 10-byte read-back; `--edgemode-sweep[=sec]` walks `0x00..0x0A`
+with a hold time; `--edgespeed-sweep[=sec]` holds one mode and walks the speed
+byte `0..5` (`--edgespeed-mode=<n>` picks the mode, default `0x03`). Report:
+`%APPDATA%\OneClickRGB\docs\edgemode_probe.txt`. Both sweeps restore the payload
+they found before the first step. `tools\edge_probe_session.ps1` drives the whole
+sequence including the `--kbdump` before/after collateral check.
+
+**Add `--confirm` to either sweep.** Without it the probe sleeps through the hold
+time and leaves an empty `animated?` column for someone to fill in later — which
+is exactly how the 2026-08-17 13:11 run produced eleven flawless rows and zero
+information. With it, each step holds its state while a dialog asks about that
+state, and the answer (`ja` / `nein` / `abgebrochen`) goes straight into the
+column. Nothing to time, nothing to reconstruct, nothing to remember. Cancel
+ends the sweep and triggers the restore; a dismissed dialog is never recorded as
+"nein" — an answer nobody gave is not a measurement.
+
+**Before any sweep, run the anchor:** `--rendercheck=edge` / `--rendercheck=kb`
+holds four states — white, off, red, green — and asks about each one. It answers
+the prior question that every mode sweep silently assumes: *does this memory
+drive the lighting at all?* If off does not darken and no colour arrives, the
+block is storage rather than live state, no mode value can help, and the probe
+says so in its own verdict line. Report: `rendercheck.txt`.
+
+The three `[?]` entries stay in `EDGE_MODE_TABLE` until that measurement exists —
+removing them first would delete the very entries the sweep has to test. Once it
+has run, whatever does not animate comes out of the table and out of the ComboBox.
 
 ### 3.2 Keyboard block is the same 10-byte payload — solved
 
@@ -101,18 +187,38 @@ set the tenth byte to `0x01`. A write result of `18` and a matching read-back ar
 ### 3.3 State of `+0x14..0x1D` in the live device (2026-08-17)
 
 The old brute-force left the pattern `04 02 00 04 02 00 04 00 04 02` in this
-region in **all three** profiles. The unlock write in `SetEVisionKeyboard`
-clears only the first two bytes and only in the **active** profile. Current dump:
+region in **all three** profiles. Current dump:
 
 | Profile | `+0x14..0x1D` |
 |---|---|
-| P0 (active) | `00 00 00 04 02 00 04 00 04 02` — first two cleared |
+| P0 (active) | `00 00 00 04 02 00 04 00 04 02` — first three read `00` |
 | P1 | `04 02 00 04 02 00 04 00 04 02` — untouched garbage |
 | P2 | `04 02 00 04 02 00 04 00 04 02` — untouched garbage |
 
 Switching to profile 1 or 2 therefore still exposes the corrupted region. Do not
 "clean" it by writing zeros across the range — the field semantics are unknown
 and section 3's rule applies. It needs an Identify pass first.
+
+**No apply writes here anymore.** `SetEVisionKeyboard` used to zero `+0x14/+0x15`
+of the active profile on *every* apply, unverified, as a "Win-key unlock". That
+write is gone. Three reasons, each sufficient on its own:
+
+* it targets a region this document marks `[?]` (rule 2), blindly (rule 3), and
+  never read the result back (rule 1);
+* section 4.1 below already disproves its purpose — the lock is not in this
+  config memory at all;
+* if `+0x14/+0x15` turn out to hold the **edge zone's** brightness and speed —
+  the leading suspicion for the frozen edge effects — then zeroing them on the
+  keyboard path, which runs *before* the edge write in `ApplyColors`, is what
+  sets the edge animation to speed 0 on every apply.
+
+It survives as the explicit one-shot `--unlock-winkey`, which reads the region
+first, writes only those two bytes, reads back and reports both states to
+`%APPDATA%\OneClickRGB\docs\unlock_winkey.txt`. Note what this means for
+verification: because P0 `+0x14/+0x15` already read `00 00`, a dump diff cannot
+distinguish "the write is gone" from "it wrote zeros over zeros". The removal is
+established by the source change; the dump only confirms no *new* collateral.
+Restoring the region needs the factory-reset dump from item 2 of section 5.
 
 ## 4. Region `0xC0`+ — key-remap table  [HIGH, decoded]
 
@@ -185,8 +291,20 @@ to `active_profile*0x40 + 0x1E`.
    `+0x14..0x1D` is untouched in **all three** profiles (P1 `0x54..0x5D` and
    P2 `0x94..0x9D` byte-identical), which is the direct counter-proof that the
    15-offset brute-force is gone. Confidence for `+0x1E..0x27` [HIGH] now rests
-   on a live read-back, not only on the capture. Remaining: the purely visual
-   confirmation that the strip renders mode `0x04`.*
+   on a live read-back, not only on the capture.*
+
+   *Correction to that run: the payload it wrote had mode `0x04`, not
+   `EDGE_MODE_STATIC` as the code comment beside it claimed — `0x04` is the
+   legacy value `NormalizeEdgeMode` maps away. So it verified the offset and the
+   commit flag, but it left the strip on an undocumented mode and it was not
+   byte-identical to the production path. The constant now reads
+   `EDGE_MODE_STATIC` and the collateral finding above is unaffected.*
+
+   *Automated since: `tools\kbdump_diff.ps1` performs this before/after
+   comparison over all `0x400` bytes and fails on any change outside a given
+   range; `tests\test_kbdump_diff.ps1` checks it against synthetic dumps that
+   contain known violations (a write to `+0x14`, a write into P1/P2, a write into
+   the remap table).*
 2. Decode `+0x14..0x1D` zone tuples (Identify per zone). Note these bytes were
    overwritten by the old brute-force, so the current contents are garbage and
    a factory reset is needed before they can be decoded meaningfully.
@@ -200,8 +318,75 @@ to `active_profile*0x40 + 0x1E`.
    Report goes to `%APPDATA%\OneClickRGB\docs\kbmode_probe.txt`. Note that the
    probe's "accepted" verdict only means the byte was stored — after the `+0x0A`
    fix (3.2) the remaining question is purely which modes the firmware renders.
+
+   *Since 2026-08-17 the sweep rolls back:* it snapshots the 18-byte block at
+   `profile_base+0x01` before the first step and restores it after the last,
+   read-back verified, and reports the outcome — the same contract the edge
+   sweeps already had via `RestoreEVisionEdgePayload`. Without it a run left the
+   keyboard parked on `0x14`, a value that is not even in `KB_MODE_TABLE`. A
+   failed read-back or a failed restore now makes the probe exit non-zero; a
+   `REJECTED` row does not, because which bytes the firmware refuses is the
+   measurement. `--kbmode=<n>` still deliberately keeps what it set. **The sweep
+   has not been run on hardware yet.**
 5. Per-key colour table at `0x2C0`+ is captured but undecoded. Per-key/per-zone
    keyboard colour is not implemented anywhere in the app; there is no
    `keyboardZones` model (only `mouseZones` in `light_zone.h`), and
    `SetSteelSeriesZones()` is reachable only from `--mouse-zones-test`, not from
    the UI or the normal apply path.
+6. **Which `+0x1E` mode bytes the firmware renders** — the open question that
+   `--edgemode-sweep` exists for, see the confidence table in 3.1. As of
+   2026-08-17 the strip holds `03 04 05 … 01` (breathing, brightness 4, speed 5,
+   commit set) and does not animate. Byte transfer is verified; rendering is not.
+   Candidates, in the order the evidence supports them:
+   1. `+0x14/+0x15` hold the edge zone's brightness/speed and the apply-time
+      zero-write was setting the animation to speed 0. Note carefully what
+      removing that write does and does not achieve: it stops *new* damage, but
+      P0 `+0x14/+0x15` already read `00 00` and nothing writes non-zero there, so
+      if this candidate is right the strip stays frozen on P0 even now.
+
+      **Cheapest way to separate this candidate from 3 and 4** — no undocumented
+      write, no factory reset. P1 and P2 still carry the original `04 02` at
+      `+0x14/+0x15` (3.3), while P0 has zeros. Switch the keyboard's on-board
+      profile (usually Fn+1/2/3), select Breathing so the app writes `0x03` to
+      that profile's own edge slot at `+0x5E`/`+0x9E` — a documented offset — and
+      look:
+
+      | Observation | Conclusion |
+      |---|---|
+      | animates on P1/P2, frozen on P0 | candidate 1 confirmed: `+0x14/+0x15` carry the edge zone's brightness/speed, and `04 02` is the value to restore |
+      | frozen on all three profiles | candidate 1 ruled out; `+0x14/+0x15` are not it, continue with `--edgespeed-sweep` and `--edgemode-sweep` |
+
+      The second row also disposes of candidate 2 as an explanation on its own,
+      since P1/P2 hold the *undamaged* pattern.
+   2. the whole region `+0x14..0x1D` is brute-force debris in all three profiles
+      and needs the factory reset from item 2 before anything there can be
+      trusted.
+   3. speed polarity is inverted, so the animation runs at the invisible end —
+      `--edgespeed-sweep` settles this.
+   4. `0x01/0x02/0x03` are simply the wrong bytes — `--edgemode-sweep` settles
+      this.
+7. **Speed byte `+0x03` / `+0x20` polarity is unknown.** The comment in
+   `SetEVisionKeyboard` claimed "0-5, inverted" while the probe next to it assumed
+   the opposite; neither had been checked against a moving light, so the claim has
+   been removed rather than picked. The value is passed through as the slider
+   gives it until `--edgespeed-sweep` produces an observation. Whichever way it
+   resolves, note that the range is 0..5 and **both** ends are now clamped on
+   every path into a write (`ClampSpeed`/`ClampBrightness` in
+   `src/effect_limits.h`) — including `LoadProfile`, which used to pass whatever
+   a `.rgb` file contained straight into the profile block.
+
+## 6. Automated checks
+
+Nothing here can prove an effect renders — that needs an eye. What it does prove
+is that the app writes only where it is allowed to, reports only what it read
+back, and does not write at all under `--dry-run`.
+
+| Command | Hardware | Checks |
+|---|---|---|
+| `tests\run_tests.cmd` | no | 138 unit checks over `cli_args.h` + `effect_limits.h`: flag tokenising, strict value parsing, clamps, edge-mode table round-trip, `NormalizeEdgeMode` closure over the ComboBox table, the `EDGE_MODE_STATIC != 0x04` invariant |
+| `tests\test_kbdump_diff.ps1` | no | the collateral checker itself, against synthetic dumps containing known rule-2 violations |
+| `tools\check_dryrun_flags.ps1` | reads only | every probe flag under `--dry-run`: exit code, immediate abort instead of sleeping through the hold times, report without measurement rows, skip line in `debug.log`; plus that a mistyped `--kbmode-sweep5` starts no sweep. Also covers the dialog paths (`--rendercheck`, `--confirm`) — under `--dry-run` they must return *before* the first `MessageBox`, since a dialog waiting for a click in an unattended test would hang it to the timeout and disguise the failure |
+| `--rendercheck=edge\|kb` | **writes** | the anchor: four held states (white / off / red / green), one dialog each, verdict line, snapshot + verified restore. Answers whether the block renders at all before any mode sweep is worth running |
+| `tools\kbdump_diff.ps1` | no | before/after dump comparison over `0x000..0x3FF`, fails on any change outside a given range |
+| `tools\edge_probe_session.ps1` | **writes** | drives dump → sweep → dump → collateral diff in one go, and refuses to start while the GUI is running. `-What mode` / `-What speed` sweep the edge payload, `-What kbmode` the keyboard block; the allowed-range check for the collateral diff follows the chosen path (`+0x1E..0x27` vs `+0x01..0x12`) |
+| `tools\validate_profiles.ps1` | no | `.rgb` profiles against what `LoadProfile` accepts |

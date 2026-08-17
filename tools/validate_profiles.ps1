@@ -11,6 +11,13 @@
     "funktionieren" und trotzdem unvollstaendig sein: die fehlenden Felder
     kommen dann still aus dem vorherigen Zustand statt aus der Datei.
     Genau das macht dieser Check sichtbar.
+
+    Seit den Edge-Fixes klemmt LoadProfile() brightness und speed beim Einlesen
+    (ClampBrightness/ClampSpeed aus src/effect_limits.h), so wie edgeMode schon
+    immer durch NormalizeEdgeMode() lief. Ein Wert ausserhalb 0..4 bzw. 0..5
+    gelangt also nicht mehr in den Profilblock der Tastatur - er wird gekappt.
+    Dieses Skript meldet ihn weiterhin, weil eine Datei, die geklemmt werden
+    muss, etwas anderes enthaelt als das, was die App danach benutzt.
 #>
 
 $profileDir = Join-Path $env:APPDATA "OneClickRGB\profiles"
@@ -67,6 +74,9 @@ foreach ($f in $files) {
 
     $found = @{}
     $problems = @()
+    # Hinweise sind keine Fehler: gueltige Werte, die aber erklaeren, warum
+    # nichts zu sehen ist. Sie aendern den Exitcode nicht.
+    $hints = @()
     $lineNo = 0
 
     foreach ($line in (Get-Content $f.FullName)) {
@@ -91,7 +101,8 @@ foreach ($f in $files) {
         $rule = $schema[$key]
         if ($rule.Contains('min')) {
             if ($val -lt $rule.min -or $val -gt $rule.max) {
-                $problems += "'$key' = $val liegt ausserhalb $($rule.min)..$($rule.max)"
+                $clamped = [Math]::Max($rule.min, [Math]::Min($rule.max, $val))
+                $problems += "'$key' = $val liegt ausserhalb $($rule.min)..$($rule.max) -> LoadProfile klemmt auf $clamped"
             }
         }
         elseif ($rule.Contains('allowed')) {
@@ -110,6 +121,29 @@ foreach ($f in $files) {
         $problems += "fehlende Schluessel: $($missing -join ', ') -> diese Felder kommen beim Laden still aus dem vorherigen Zustand, NICHT aus dem Profil"
     }
 
+    # --- Werte, die im Bereich liegen und trotzdem "nichts passiert" bedeuten ---
+    # speed=0 und brightness=0 sind gueltig, aber sie sind auch die haeufigste
+    # Erklaerung fuer "der Effekt laeuft nicht" bzw. "die LEDs sind aus". Ein
+    # Profil mit einem Animationsmodus und speed=0 friert jeden Effekt beim Laden
+    # wieder ein - solange die Polaritaet von +0x03/+0x20 nicht gemessen ist
+    # (Keyboard_Protocol.md 5.7), ist nicht einmal sicher, welches Ende das
+    # langsame ist. Deshalb Hinweis, nicht Fehler.
+    $animatedKb   = @(0x01,0x02,0x03,0x04,0x05,0x07,0x08,0x0A,0x0C,0x0D)
+    $animatedEdge = @(0x01,0x02,0x03)
+    if ($found.ContainsKey('speed') -and [int]$found['speed'] -eq 0) {
+        $kbAnim   = $found.ContainsKey('kbMode')   -and ($animatedKb   -contains [int]$found['kbMode'])
+        $edgeAnim = $found.ContainsKey('edgeMode') -and ($animatedEdge -contains [int]$found['edgeMode'])
+        if ($kbAnim -or $edgeAnim) {
+            $which = @(); if ($kbAnim) { $which += 'kbMode' }; if ($edgeAnim) { $which += 'edgeMode' }
+            $hints += "speed=0 zusammen mit einem Animationsmodus ($($which -join ' + ')) -> beim Laden steht der Effekt still"
+        } else {
+            $hints += "speed=0 -> bei einem statischen Modus ohne Wirkung, bei einem Effekt wuerde er stillstehen"
+        }
+    }
+    if ($found.ContainsKey('brightness') -and [int]$found['brightness'] -eq 0) {
+        $hints += "brightness=0 -> die LEDs bleiben dunkel, egal welcher Modus eingestellt ist"
+    }
+
     if ($found.Count -gt 0) {
         $kb = if ($found.ContainsKey('kbMode'))   { $kbModeNames[[int]$found['kbMode']] }     else { $null }
         $ed = if ($found.ContainsKey('edgeMode')) { $edgeModeNames[[int]$found['edgeMode']] } else { $null }
@@ -125,20 +159,32 @@ foreach ($f in $files) {
     } else {
         Write-Host "    OK - vollstaendig und alle Werte im gueltigen Bereich" -ForegroundColor Green
     }
+    if ($hints) {
+        Write-Host "    HINWEISE (gueltig, aber wirkungslos):" -ForegroundColor Cyan
+        $hints | ForEach-Object { Write-Host "      - $_" -ForegroundColor Cyan }
+    }
     Write-Host ""
 }
 
 # --- Abgleich mit der aktiven Konfiguration ---------------------------------
-# config.json wird bei jedem Beenden aus dem Laufzeitzustand geschrieben. Da
-# beim Start lastProfile geladen wird, sollte sie normalerweise mit genau
-# diesem Profil uebereinstimmen. Weicht sie ab, gehen manuelle Aenderungen
-# beim naechsten Start verloren, weil das Profil sie ueberschreibt.
+# config.json wird bei jedem Beenden aus dem Laufzeitzustand geschrieben.
+# lastProfile ist der Name, den die Combobox beim Start vorauswaehlt - das Profil
+# wird dabei aber NICHT geladen. Das ist ausdruecklich so gewollt und im Code
+# begruendet (WM_CREATE, "Deliberately NOT auto-loading lastProfile here"):
+# sonst wuerde ein Profil beim naechsten Start jede zwischenzeitliche Aenderung
+# ueberschreiben.
+#
+# Frueher stand hier das Gegenteil ("wird beim Start automatisch geladen") und
+# eine Abweichung galt als Fehler. Das war schlicht falsch: eine Abweichung ist
+# der Normalfall, sobald man nach dem Laden noch etwas verstellt hat. Sie ist
+# eine Information, kein Befund - und ein Pruefskript, das eine ueberholte
+# Behauptung durchsetzt, ist schlimmer als keines (Regel 1).
 $cfgPath = Join-Path $env:APPDATA "OneClickRGB\config.json"
 if (Test-Path $cfgPath) {
     $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
     $last = $cfg.lastProfile
     Write-Host "=== Abgleich config.json <-> lastProfile ===" -ForegroundColor Cyan
-    Write-Host "    lastProfile = '$last'  (wird beim Start automatisch geladen)"
+    Write-Host "    lastProfile = '$last'  (nur in der Combobox vorausgewaehlt, wird NICHT automatisch geladen)"
     $lastFile = Join-Path $profileDir "$last.rgb"
     if ($last -and (Test-Path $lastFile)) {
         $pf = @{}
@@ -150,9 +196,8 @@ if (Test-Path $cfgPath) {
             if ($pf.ContainsKey($k) -and $cfg.$k -ne $pf[$k]) { $diff += "$k : config=$($cfg.$k) profil=$($pf[$k])" }
         }
         if ($diff) {
-            Write-Host "    ABWEICHUNG - beim naechsten Start gewinnt das Profil:" -ForegroundColor Yellow
-            $diff | ForEach-Object { Write-Host "      - $_" -ForegroundColor Yellow }
-            $exit = 1
+            Write-Host "    Aktueller Zustand weicht vom Profil ab (erst 'Laden' uebernimmt es):" -ForegroundColor Cyan
+            $diff | ForEach-Object { Write-Host "      - $_" -ForegroundColor Cyan }
         } else {
             Write-Host "    identisch mit $last.rgb" -ForegroundColor Green
         }

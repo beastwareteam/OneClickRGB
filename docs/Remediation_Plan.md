@@ -249,6 +249,17 @@ ließ.
 `setCount++`). Ergebnis `WriteAcked` bei vollständiger Quittung, sonst
 `WriteFailed`. Meldung: „N Kanäle gesendet (nicht rücklesbar)".
 
+**Teilweise erledigt mit 5.2 (2026-08-17):** `SetAsusChannel` ist `bool` und
+wertet jeden `hid_write` aus; `ApplyAsusChannelColor` zählt `setCount` nur bei
+angenommenem Write und führt `attemptCount` mit. `SetAsusAura` meldet
+„`N/M` Kanäle geschrieben (ohne Read-back — nicht verifiziert)" und gibt nur
+`true` zurück, wenn jeder versuchte Kanal quittiert wurde; der Testdialog nutzt
+denselben Wortlaut. **Aura bleibt grundsätzlich unverifizierbar:** es gibt kein
+GET-Kommando für Direct-Mode-Farben, ein echtes Read-back nach Regel 1 ist auf
+diesem Pfad nicht möglich. „Geschrieben" ist hier die stärkste wahre Aussage —
+keine Meldung darf mehr behaupten. Offen bleibt der Direct-Mode-Teil (`0x35`
+mit gescannten Kanalnummern in den Apply-Pfad).
+
 Ebenfalls hier: das Direct-Mode-Kommando `0x35` wird **nur** in `FullHIDReset`
 ([:2270-2281](../src/oneclick_rgb_complete.cpp#L2270)) gesendet, und dort mit
 hartkodierten Kanälen `0..7` statt der gescannten `directChannel`-Werte. Bei
@@ -419,18 +430,34 @@ Globalfarbe ab → `SetSteelSeriesZones()`, sonst der bisherige Pfad. Nebenbei
 `steelseries`-Korrektur wird auf jede Zone angewandt, damit ist keine
 zonenweise Helligkeit ausdrückbar — auf `LightZone` verlagern.
 
-### [ ] 5.2 — ASUS-Kanalfarben nutzen *(Problem 23)*
-Der Testdialog schreibt Kanalfarben nach
-`g_asusHwConfig.channels[i].colorR/G/B`
-([:3203-3206](../src/oneclick_rgb_complete.cpp#L3203)) und speichert sie — aber
-`SetAsusAura` ([:1428-1436](../src/oneclick_rgb_complete.cpp#L1428)) ignoriert
-sie und schiebt eine Globalfarbe auf alle Kanäle. Die Einstellung ist
-schreibgeschützt in dem Sinn, dass sie beim nächsten Apply verlorengeht.
+### [x] 5.2 — ASUS-Kanalfarben nutzen *(Problem 23)* *(erledigt 2026-08-17)*
+Der Testdialog schrieb Kanalfarben nach `g_asusHwConfig.channels[i].colorR/G/B`
+und speicherte sie — aber `SetAsusAura` ignorierte sie und schob eine
+Globalfarbe auf alle Kanäle. Zusätzlich setzte `ParseAsusConfig()` jeden Kanal
+beim Programmstart hart auf `0,34,255 / enabled=true` zurück, und das Schließen
+per X/Esc speicherte gar nichts.
 
-→ Gleiche Logik wie 5.1. **Einheitlich über `light_zone.h`** lösen, nicht drei
-Sonderwege: `auraZones` ist in
-[app_config.h:68-71](../src/app_config.h#L68) bereits deklariert und
-serialisiert.
+**Umgesetzt:** Vorrang pro Kanal in `ChannelConfig`
+([channel_config.h](../src/channel_config.h)): `override_active` plus
+`override_r/g/b`, aufgelöst in `ResolveChannelColor()`. Der Vorrang entsteht
+beim Verstellen eines Sliders, nicht beim Schließen. Freigabe über „Folgt
+Global" je Kanal und „Alle folgen Global". Persistenz in `config.json`
+(`ovr/or/og/ob`), rückwärtskompatibel. `asus_hw_config.bin` ist damit wieder
+rein ein Hardware-Cache; der `ParseAsusConfig`-Clobber ist konstruktionsbedingt
+weg. Das `.rgb`-Profilformat bleibt bei seinen 12 Keys — ein Profil-Laden
+ändert Globalfarbe und Modi, übersteuerte Kanäle bleiben unangetastet.
+
+**Abweichung vom ursprünglichen Vorschlag:** *nicht* über `light_zone.h`
+gelöst. `auraZones` ist leer und wird von keinem Apply-Pfad gelesen, während
+`g_config.aura[8]` bereits existiert, serialisiert wird und sowohl vom
+Apply-Pfad als auch vom Kanaleinstellungen-Dialog gelesen wird. Ein Umzug auf
+`auraZones` hätte eine dritte Quelle geschaffen statt der einen, um die es hier
+geht. Für 5.1 (Maus) bleibt `light_zone.h` der richtige Weg — dort *sind* die
+Zonen bereits das Datenmodell.
+
+Getestet: `ResolveChannelColor` in
+[tests/test_cli_args.cpp](../tests/test_cli_args.cpp). Am Gerät steht die
+Abnahme noch aus (Vorrang über Apply, Neustart, Profil-Laden, Resume).
 
 ---
 

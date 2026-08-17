@@ -60,6 +60,8 @@
 #include "app_config.h"
 #include "themes.h"
 #include "modern_ui.h"
+#include "cli_args.h"        // token-exact flag parsing (unit-tested)
+#include "effect_limits.h"   // brightness/speed clamps + edge mode table
 
 using json = nlohmann::json;
 
@@ -618,48 +620,10 @@ inline uint8_t IndexToKbMode(int idx) {
     return KB_MODE_STATIC;
 }
 
-// Edge modes (Endorfy)
-enum EdgeMode {
-    EDGE_MODE_FREEZE = 0x00,
-    EDGE_MODE_WAVE = 0x01,
-    EDGE_MODE_SPECTRUM = 0x02,
-    EDGE_MODE_BREATHING = 0x03,
-    // On Endorfy EVision edge strips, solid color is encoded as 0x00.
-    // Keep the STATIC symbol for UI semantics, but map it to FREEZE.
-    EDGE_MODE_STATIC = EDGE_MODE_FREEZE,
-    EDGE_MODE_OFF = 0x05
-};
-
-// Maps ComboBox edge indices to hardware byte values
-// ComboBox order: Static(0), Breathing(1), Wave(2), Spectrum(3), Off(4)
-static const uint8_t EDGE_MODE_TABLE[] = {
-    EDGE_MODE_STATIC, EDGE_MODE_BREATHING, EDGE_MODE_WAVE, EDGE_MODE_SPECTRUM, EDGE_MODE_OFF
-};
-static const int EDGE_MODE_COUNT = 5;
-
-inline int EdgeModeToIndex(uint8_t mode) {
-    for (int i = 0; i < EDGE_MODE_COUNT; i++)
-        if (EDGE_MODE_TABLE[i] == mode) return i;
-    return 0; // fallback: Static
-}
-
-inline uint8_t IndexToEdgeMode(int idx) {
-    if (idx >= 0 && idx < EDGE_MODE_COUNT) return EDGE_MODE_TABLE[idx];
-    return EDGE_MODE_STATIC;
-}
-
-inline uint8_t NormalizeEdgeMode(uint8_t mode) {
-    // Legacy configs used 0x04 for "static" and often produced rainbow-only behavior.
-    if (mode == 0x04) return EDGE_MODE_STATIC;
-    if (mode == EDGE_MODE_OFF ||
-        mode == EDGE_MODE_STATIC ||
-        mode == EDGE_MODE_BREATHING ||
-        mode == EDGE_MODE_WAVE ||
-        mode == EDGE_MODE_SPECTRUM) {
-        return mode;
-    }
-    return EDGE_MODE_STATIC;
-}
+// Edge modes (Endorfy), the ComboBox index mapping, NormalizeEdgeMode() and the
+// brightness/speed clamps now live in src/effect_limits.h - they are the values
+// that reach the keyboard's flash, and there they can be unit-tested without
+// hardware (tests/test_cli_args.cpp) instead of only by looking at a light.
 
 //=============================================================================
 // GLOBAL STATE
@@ -1005,12 +969,25 @@ bool LoadProfile(const std::wstring& name) {
 
     file.close();
 
-    // Atomic commit: apply loaded snapshot in one state update
+    // Atomic commit: apply loaded snapshot in one state update.
+    //
+    // Deliberate exception: a profile carries the global colour and the modes,
+    // not per-channel overrides - the .rgb format keeps its 12 keys. An ASUS
+    // channel the user overrode in the test dialog therefore keeps its colour
+    // across a profile load; the precedence is resolved per channel in
+    // ApplyAsusChannelColor, so nothing here has to know about it.
     g_state.red = red;
     g_state.green = green;
     g_state.blue = blue;
-    g_state.brightness = brightness;
-    g_state.speed = speed;
+    // .rgb files are plain text and are also written by older builds, so the
+    // values in them are input, not truth. edgeMode already went through
+    // NormalizeEdgeMode; brightness and speed went in raw, straight from the
+    // file into the profile block of the keyboard's flash. Clamped to the ranges
+    // docs/Keyboard_Protocol.md section 3 documents (0..4 / 0..5) - the same
+    // clamp the device setters now apply, so what the UI shows after a load and
+    // what the hardware gets cannot drift apart.
+    g_state.brightness = ClampBrightness(brightness);
+    g_state.speed = ClampSpeed(speed);
     g_state.kbMode = kbMode;
     g_state.edgeMode = NormalizeEdgeMode(edgeMode);
     g_state.enableAura = enableAura;
@@ -1109,7 +1086,11 @@ static const AuraFallbackChannel AURA_FALLBACK_CHANNELS[] = {
 static const int AURA_FALLBACK_COUNT =
     (int)(sizeof(AURA_FALLBACK_CHANNELS) / sizeof(AURA_FALLBACK_CHANNELS[0]));
 
-// Hardware configuration from device scan
+// Hardware configuration from device scan. Pure cache of what the board
+// reported (firmware string, 0xB0 table, derived topology) - never user
+// settings. Those live in g_config.aura[] and config.json, because
+// ParseAsusConfig() rebuilds this struct from the device on every start and
+// would clobber them.
 struct AsusHardwareConfig {
     bool valid = false;
     char firmware[17] = {0};
@@ -1124,7 +1105,9 @@ struct AsusHardwareConfig {
         bool addressable = false;
         int directChannel = 0;  // The actual channel number to send to device
         char name[64] = {0};
-        // Saved color settings
+        // Dead fields, kept only so the on-disk layout of asus_hw_config.bin
+        // stays readable. Colour and enable state come from g_config.aura[]
+        // now; nothing reads these any more.
         uint8_t colorR = 0;
         uint8_t colorG = 34;
         uint8_t colorB = 255;
@@ -1408,12 +1391,16 @@ hid_device* OpenAsusAura() {
     return dev;
 }
 
-void SetAsusChannel(hid_device* dev, int channel, int numLEDs, uint8_t r, uint8_t g, uint8_t b) {
-    if (!dev) return;
+// Returns true only if every packet of the channel was accepted by the driver.
+// That is an *acknowledged send*, not a verified colour: Aura has no GET
+// command, so nothing here can prove what the LEDs are actually showing.
+bool SetAsusChannel(hid_device* dev, int channel, int numLEDs, uint8_t r, uint8_t g, uint8_t b) {
+    if (!dev) return false;
 
     if (numLEDs < 1) numLEDs = 1;
 
     int offset = 0;
+    bool allAcked = true;
 
     while (offset < numLEDs) {
         int count = ASUS_LEDS_PER_PACKET;
@@ -1436,27 +1423,46 @@ void SetAsusChannel(hid_device* dev, int channel, int numLEDs, uint8_t r, uint8_
             buf[0x05 + i*3 + 2] = b;
         }
 
-        hid_write(dev, buf, 65);
+        if (hid_write(dev, buf, 65) < 0) allAcked = false;
         Sleep(2);
         offset += count;
     }
+
+    return allAcked;
 }
 
+// The single funnel for every Aura colour write: startup apply, slider preview,
+// presets, profile load, resume after standby, and the test dialog all end up
+// here. Because the override/global decision lives in ResolveChannelColor, no
+// caller can accidentally bypass it.
+//
+// setCount counts *acknowledged sends*, not verified colours - see
+// SetAsusChannel. attemptCount, if given, counts the channels that were
+// actually tried, so a status line can say "3/5" instead of implying that the
+// missing two were fine.
 static void ApplyAsusChannelColor(hid_device* dev, int auraIndex, int directChannel, int ledCount,
                                   uint8_t baseR, uint8_t baseG, uint8_t baseB, bool applyCorrection,
                                   bool respectGlobalEnable,
-                                  int& setCount) {
+                                  int& setCount, int* attemptCount = nullptr) {
     if (!dev) return;
     if (auraIndex < 0 || auraIndex >= AURA_CONFIG_CHANNELS) return;
     if (respectGlobalEnable && !g_config.aura[auraIndex].enabled) return;
 
+    if (attemptCount) (*attemptCount)++;
+
     uint8_t cr = baseR, cg = baseG, cb = baseB;
     if (applyCorrection) {
-        g_config.aura[auraIndex].ApplyCorrection(cr, cg, cb);
+        ResolveChannelColor(g_config.aura[auraIndex], baseR, baseG, baseB, cr, cg, cb);
+    } else if (g_config.aura[auraIndex].override_active) {
+        // No correction requested, but the override still decides the source
+        // colour - otherwise an overridden channel would jump to the global
+        // colour on this path.
+        cr = g_config.aura[auraIndex].override_r;
+        cg = g_config.aura[auraIndex].override_g;
+        cb = g_config.aura[auraIndex].override_b;
     }
 
-    SetAsusChannel(dev, directChannel, ledCount, cr, cg, cb);
-    setCount++;
+    if (SetAsusChannel(dev, directChannel, ledCount, cr, cg, cb)) setCount++;
 }
 
 bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
@@ -1469,6 +1475,7 @@ bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
     }
 
     int setCount = 0;
+    int attempted = 0;
 
     // Use hardware config if available
     if (g_asusHwConfig.valid) {
@@ -1481,22 +1488,29 @@ bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
                 r, g, b,
                 true,
                 true,
-                setCount);
+                setCount, &attempted);
         }
     } else {
         for (int i = 0; i < AURA_FALLBACK_COUNT; i++) {
             ApplyAsusChannelColor(dev, i, AURA_FALLBACK_CHANNELS[i].channel,
                                   AURA_FALLBACK_CHANNELS[i].leds,
-                                  r, g, b, true, true, setCount);
+                                  r, g, b, true, true, setCount, &attempted);
         }
     }
 
     hid_close(dev);
 
-    wchar_t buf[64];
-    swprintf(buf, 64, L"[ASUS Aura] %d channels set", setCount);
+    // Aura has no GET command (see the note at AURA_FALLBACK_CHANNELS), so the
+    // strongest true statement is "the driver took the packets". CLAUDE.md
+    // rule 1 forbids calling that "set".
+    wchar_t buf[128];
+    swprintf(buf, 128, L"[ASUS Aura] %d/%d Kan\u00E4le geschrieben (ohne Read-back - nicht verifiziert)",
+             setCount, attempted);
     AppendStatus(buf);
-    return true;
+    // "Every channel I tried was acked." All channels switched off means
+    // attempted == 0 -> nothing was tried, so there is nothing to report as
+    // failed; the 0/0 in the status line says so plainly.
+    return (setCount == attempted);
 }
 
 // Quick update for live preview (single call, no status messages)
@@ -1727,6 +1741,14 @@ bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode, uint8_t b
     if (profile > 2) profile = 0;
     uint16_t profile_offset = profile * 0x40 + 0x01;
 
+    // Clamp to the ranges the protocol documents (brightness 0..4, speed 0..5).
+    // SetEVisionEdge has always done this; the keyboard path wrote both bytes
+    // through unchecked, so a hand-edited .rgb profile or a probe argument could
+    // put an out-of-range value into the flash and the read-back would then
+    // "verify" that out-of-range value as faithfully stored.
+    const uint8_t br = ClampBrightness(brightness);
+    const uint8_t sp = ClampSpeed(speed);
+
     // Read existing keyboard profile first, then patch only known fields.
     // This preserves unknown bytes that may store vendor-specific layout/profile state.
     uint8_t config[18] = {0};
@@ -1746,8 +1768,13 @@ bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode, uint8_t b
     // The mode byte reaches the flash but the firmware never applies it, which
     // is exactly the reported symptom: the colour changes, the effect does not.
     config[0] = mode;           // +0x01 Mode
-    config[1] = brightness;     // +0x02 Brightness (0-4)
-    config[2] = speed;          // +0x03 Speed (0-5, inverted)
+    config[1] = br;             // +0x02 Brightness (0-4, clamped)
+    // +0x03 Speed (0-5). Polarity is NOT established: the old comment here
+    // claimed "inverted" while the --kbmode probe next door assumed the
+    // opposite, and neither had been checked against a moving light. Until
+    // --edgespeed-sweep has settled it on the edge strip (which shares this
+    // payload layout), the value is passed through as the slider gives it.
+    config[2] = sp;
     config[3] = 0;              // +0x04 Direction
     config[4] = 0;              // +0x05 Random color off
     config[5] = cr;             // +0x06 Red (corrected)
@@ -1771,7 +1798,7 @@ bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode, uint8_t b
 
     const uint8_t* got = g_lastKbVerify.got;
     bool verified = g_lastKbVerify.valid &&
-                    got[0] == mode && got[1] == brightness && got[2] == speed &&
+                    got[0] == mode && got[1] == br && got[2] == sp &&
                     got[5] == cr && got[6] == cg && got[7] == cb;
 
     {
@@ -1782,28 +1809,37 @@ bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode, uint8_t b
                  "got[mode=%02X br=%02X sp=%02X rgb=%02X%02X%02X] verified=%d",
                  (int)profile, (unsigned)profile_offset, writeRes,
                  g_lastKbVerify.readRes,
-                 mode, brightness, speed, cr, cg, cb,
+                 mode, br, sp, cr, cg, cb,
                  got[0], got[1], got[2], got[5], got[6], got[7], (int)verified);
         LogDebug(dbg);
     }
 
-    // Unlock the Windows key: clear the two bytes at profile_base+0x14.
+    // No "Win-key unlock" write here anymore.
     //
-    // This call existed until commit f1c6aaa removed it from both device paths
-    // (keeping it only in the --switch-test=edge-diagnose branch). Removing it
-    // is what made the Win-key lock permanent: the old 15-offset brute-force in
-    // SetEVisionEdge wrote at 0x13 and 0x16, which straddle 0x14/0x15, so every
-    // apply stamped payload bytes (brightness 0x04, speed 0x02) into the
-    // Win-Lock field, and this unlock was the thing that cleared them again.
-    // A live dump with the key locked reads exactly "04 02" there.
+    // What used to stand at this spot was an unconditional, unverified
+    // EVisionQuery(0x06, profile*0x40 + 0x14, {0x00,0x00}) on *every* apply.
+    // Three things were wrong with it at once:
     //
-    // The brute-force is gone now, so nothing corrupts the field anymore, but
-    // the write is kept because it also clears a lock the user toggled via
-    // Fn+Win - and it is addressed per active profile rather than hardcoded to
-    // profile 0 as the original was.
-    uint8_t unlock[2] = {0x00, 0x00};
-    EVisionQuery(dev, 0x06, (uint16_t)(profile * 0x40 + 0x14), unlock, 2, nullptr);
-    Sleep(10);
+    //  * It writes into +0x14..0x1D, whose field semantics are unknown
+    //    (docs/Keyboard_Protocol.md section 3 marks the region [?]) - CLAUDE.md
+    //    rule 2 forbids exactly that, and rule 3 forbids the blind write.
+    //  * Its result was never read back, so it reported nothing either way -
+    //    rule 1.
+    //  * Section 4.1 of the same document already disproves its purpose: with
+    //    the Win key locked, a live dump shows the remap table fully intact and
+    //    clearing the per-profile flag at +0x2E did not unlock it either. The
+    //    lock is keyboard-side Fn-layer state that this config memory does not
+    //    expose. The comment that used to sit here argued from the *correlation*
+    //    that the old brute-force stamped "04 02" into 0x14/0x15 - but that is
+    //    evidence about the brute-force, not about a lock field.
+    //
+    // And if +0x14/+0x15 do hold the edge zone's brightness/speed - the open
+    // suspicion this whole investigation started from - then zeroing them here,
+    // on the keyboard path that runs *before* the edge write in ApplyColors, is
+    // what freezes every edge animation at speed 0.
+    //
+    // The write survives as an explicit, read-back-verified one-shot action:
+    // OneClickRGB.exe --unlock-winkey. It is not part of an apply.
 
     EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);  // End configure
     hid_close(dev);
@@ -1814,13 +1850,13 @@ bool SetEVisionKeyboard(uint8_t r, uint8_t g, uint8_t b, uint8_t mode, uint8_t b
                  mode, g_lastKbVerify.readRes);
     } else if (verified) {
         swprintf(buf, 192, L"[EVision] Keyboard verified: mode 0x%02X, brightness %d, speed %d",
-                 mode, brightness, speed);
+                 mode, br, sp);
     } else {
         // Report the mismatch instead of a blanket success - this is how a mode
         // the firmware refuses becomes visible instead of silently doing nothing.
         swprintf(buf, 192,
                  L"[EVision] Keyboard MISMATCH - mode 0x%02X->0x%02X, brightness %d->%d, speed %d->%d",
-                 mode, got[0], brightness, got[1], speed, got[2]);
+                 mode, got[0], br, got[1], sp, got[2]);
     }
     AppendStatus(buf);
     return verified;
@@ -1854,12 +1890,163 @@ static hid_device* OpenEVisionEdgeDev(char* pathOut, int pathMax) {
     return nullptr;
 }
 
+// Result of the last SetEVisionEdge read-back, mirroring KbVerifyResult above.
+// The edge path used to keep its read-back in locals, so the headless probes had
+// no way to report what the firmware stored other than re-implementing the write
+// - and a probe that does not drive the production path proves nothing about it
+// (CLAUDE.md rule 1). All ten payload bytes are kept, including the commit flag
+// at +0x27, because "mode stored but effect frozen" is exactly the class of bug
+// where the bytes nobody prints are the interesting ones.
+struct EdgeVerifyResult {
+    bool     valid    = false;   // read-back succeeded
+    int      writeRes = 0;
+    int      readRes  = 0;
+    uint8_t  profile  = 0;
+    uint16_t offset   = 0;
+    uint8_t  want[10] = {0};     // mode,bright,speed,dir,rand,R,G,B,coloff,save
+    uint8_t  got[10]  = {0};     // what the edge slot actually holds now
+};
+static EdgeVerifyResult g_lastEdgeVerify;
+
+// Opens the RGB collection, reads the 10-byte edge payload of the ACTIVE
+// profile, closes again. Read-only (command 0x05), therefore usable under
+// --dry-run: it is how a probe records the state it is about to disturb.
+// Returns false if the device could not be opened or did not answer.
+static bool ReadEVisionEdgePayload(uint8_t out[10], uint8_t* profileOut, uint16_t* offsetOut) {
+    if (out) memset(out, 0, 10);
+    if (profileOut) *profileOut = 0;
+    if (offsetOut)  *offsetOut  = 0;
+
+    hid_device* dev = OpenEVisionEdgeDev(nullptr, 0);
+    if (!dev) return false;
+
+    EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);
+    Sleep(20);
+    uint8_t profile = 0;
+    EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &profile);
+    if (profile > 2) profile = 0;
+    uint16_t off = (uint16_t)(profile * 0x40 + 0x1E);
+
+    uint8_t buf[10] = {0};
+    int rr = EVisionQuery(dev, 0x05, off, nullptr, 10, buf);
+    EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
+    hid_close(dev);
+
+    if (profileOut) *profileOut = profile;
+    if (offsetOut)  *offsetOut  = off;
+    if (rr < 0) return false;
+    if (out) memcpy(out, buf, 10);
+    return true;
+}
+
+// Writes a 10-byte payload back to the edge slot of the ACTIVE profile and
+// verifies it by read-back. Only ever called with a snapshot that
+// ReadEVisionEdgePayload took earlier, so a probe can put the strip back the way
+// it found it instead of leaving it parked on the last swept byte. Same offset,
+// same 10 bytes, same production semantics - no new byte range (CLAUDE.md rule 2).
+static bool RestoreEVisionEdgePayload(const uint8_t in[10]) {
+    if (!in) return false;
+    if (DryRunSkip(L"EVision Edge Restore")) return false;
+
+    hid_device* dev = OpenEVisionEdgeDev(nullptr, 0);
+    if (!dev) return false;
+
+    EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);
+    Sleep(20);
+    uint8_t profile = 0;
+    EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &profile);
+    if (profile > 2) profile = 0;
+    uint16_t off = (uint16_t)(profile * 0x40 + 0x1E);
+
+    EVisionQuery(dev, 0x06, off, in, 10, nullptr);
+    Sleep(10);
+    uint8_t back[10] = {0};
+    int rr = EVisionQuery(dev, 0x05, off, nullptr, 10, back);
+    EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
+    hid_close(dev);
+
+    return rr >= 0 && memcmp(back, in, 10) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// The keyboard-block counterparts of the two edge helpers above: read the
+// 18-byte block at profile_base+0x01, and put it back afterwards.
+//
+// The keyboard sweep needs exactly what the edge sweep needed. --kbmode-sweep
+// walks 21 mode bytes and used to have no rollback at all, so it left the
+// keyboard parked on whatever came last - 0x14, a value that is not even in
+// KB_MODE_TABLE. The edge path has restored since it was written; this closes
+// the same hole on the keyboard side before the sweep is run for the first time.
+//
+// Range: the same 18 bytes SetEVisionKeyboard itself reads and writes, so a
+// restore touches nothing the production path does not already touch
+// (CLAUDE.md rule 2). OpenEVisionEdgeDev despite the name - this device exposes
+// only one vendor collection (docs/Keyboard_Protocol.md section 1), and the
+// keyboard block and the edge payload live in the same config memory behind it.
+// ---------------------------------------------------------------------------
+static bool ReadEVisionKeyboardPayload(uint8_t out[18], uint8_t* profileOut, uint16_t* offsetOut) {
+    if (out) memset(out, 0, 18);
+    if (profileOut) *profileOut = 0;
+    if (offsetOut)  *offsetOut  = 0;
+
+    hid_device* dev = OpenEVisionEdgeDev(nullptr, 0);
+    if (!dev) return false;
+
+    EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);
+    Sleep(20);
+    uint8_t profile = 0;
+    EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &profile);
+    if (profile > 2) profile = 0;
+    uint16_t off = (uint16_t)(profile * 0x40 + 0x01);
+
+    uint8_t buf[18] = {0};
+    int rr = EVisionQuery(dev, 0x05, off, nullptr, 18, buf);
+    EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
+    hid_close(dev);
+
+    if (profileOut) *profileOut = profile;
+    if (offsetOut)  *offsetOut  = off;
+    if (rr < 0) return false;
+    if (out) memcpy(out, buf, 18);
+    return true;
+}
+
+static bool RestoreEVisionKeyboardPayload(const uint8_t in[18]) {
+    if (!in) return false;
+    if (DryRunSkip(L"EVision Keyboard Restore")) return false;
+
+    hid_device* dev = OpenEVisionEdgeDev(nullptr, 0);
+    if (!dev) return false;
+
+    EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);
+    Sleep(20);
+    uint8_t profile = 0;
+    EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &profile);
+    if (profile > 2) profile = 0;
+    uint16_t off = (uint16_t)(profile * 0x40 + 0x01);
+
+    EVisionQuery(dev, 0x06, off, in, 18, nullptr);
+    Sleep(10);
+    uint8_t back[18] = {0};
+    int rr = EVisionQuery(dev, 0x05, off, nullptr, 18, back);
+    EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
+    hid_close(dev);
+
+    return rr >= 0 && memcmp(back, in, 18) == 0;
+}
+
 // brightness 0-4, speed 0-5 - both come from the Effects group sliders. They
 // used to be hardcoded here (brightness 4, speed 2) and were not even function
 // parameters, which is why the Tempo slider had no effect on the edge strips
 // and every effect always animated at the same rate.
 bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode,
                     uint8_t brightness, uint8_t speed) {
+    // Invalidate the read-back record FIRST, before any early return can leave
+    // the previous call's values standing - the same trap the keyboard path fell
+    // into, where a device that dropped off the bus mid-sweep made every later
+    // report row repeat the last successful read-back as if it were fresh.
+    g_lastEdgeVerify = EdgeVerifyResult{};
+
     if (DryRunSkip(L"EVision Edge")) return false;
 
     char devPath[256] = "<not opened>";
@@ -1905,8 +2092,8 @@ bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode,
     // Build 10-byte edge payload
     // Layout: [mode, brightness, speed, direction, random, R, G, B, colorOff, save]
     // ------------------------------------------------------------------
-    uint8_t bright = (mode == EDGE_MODE_OFF) ? 0 : (brightness > 4 ? 4 : brightness);
-    uint8_t spd    = (speed > 5) ? 5 : speed;
+    uint8_t bright = (mode == EDGE_MODE_OFF) ? 0 : ClampBrightness(brightness);
+    uint8_t spd    = ClampSpeed(speed);
     uint8_t edgeData[10] = {
         mode,        // [0] effect mode
         bright,      // [1] brightness (0-4, from the Helligkeit slider)
@@ -1942,8 +2129,16 @@ bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode,
     // Read back rather than trusting the write result (CLAUDE.md rule 1). The
     // device ACKs writes it discards, so res>=0 on its own is not evidence that
     // the strip changed.
-    uint8_t edgeBack[10] = {0};
+    g_lastEdgeVerify.profile  = profile;
+    g_lastEdgeVerify.offset   = edgeOff;
+    g_lastEdgeVerify.writeRes = res;
+    memcpy(g_lastEdgeVerify.want, edgeData, 10);
+
+    uint8_t* edgeBack = g_lastEdgeVerify.got;
     int edgeRead = EVisionQuery(dev, 0x05, edgeOff, nullptr, 10, edgeBack);
+    g_lastEdgeVerify.readRes = edgeRead;
+    g_lastEdgeVerify.valid   = (edgeRead >= 0);
+
     bool edgeVerified = (edgeRead >= 0) &&
                         edgeBack[0] == mode   && edgeBack[1] == bright &&
                         edgeBack[2] == spd    && edgeBack[5] == cr &&
@@ -2419,27 +2614,64 @@ void ApplyColors() {
 
         hid_init();
 
-        // Deterministic adapter order
+        // Deterministic adapter order.
+        //
+        // Every setter's bool is collected instead of dropped. It used to be
+        // discarded for all five devices, so "=== Done! ===" printed even when
+        // the line right above it said "Edge ABWEICHUNG" or "Keyboard MISMATCH"
+        // - the final line of the log contradicted the finding two lines up, and
+        // the final line is the one people read. Same class of bug as reporting
+        // an unverified write as success (CLAUDE.md rule 1), one level up.
+        //
+        // What the bool means differs per device and the wording below keeps
+        // that apart: keyboard and edge read the value back and compare, so
+        // theirs is "verified". Aura, mouse and RAM only report that the write
+        // was handed to the device - their read-back verification is Phase 1 of
+        // the remediation plan and is not done yet.
+        const wchar_t* failedUnverified[3] = {nullptr, nullptr, nullptr};
+        int nFailedUnverified = 0;
+        const wchar_t* failedVerified[2] = {nullptr, nullptr};
+        int nFailedVerified = 0;
+
         if (doAura) {
-            SetAsusAura(r, g, b);
+            if (!SetAsusAura(r, g, b)) failedUnverified[nFailedUnverified++] = L"ASUS Aura";
         }
         if (doMouse) {
-            SetSteelSeries(r, g, b);
+            if (!SetSteelSeries(r, g, b)) failedUnverified[nFailedUnverified++] = L"SteelSeries";
         }
         if (doKeyboard) {
-            SetEVisionKeyboard(r, g, b, kbMode, brightness, speed);
+            if (!SetEVisionKeyboard(r, g, b, kbMode, brightness, speed))
+                failedVerified[nFailedVerified++] = L"Tastatur";
         }
         if (doEdge) {
-            SetEVisionEdge(r, g, b, edgeMode, (uint8_t)brightness, (uint8_t)speed);
+            if (!SetEVisionEdge(r, g, b, edgeMode, (uint8_t)brightness, (uint8_t)speed))
+                failedVerified[nFailedVerified++] = L"Edge";
         }
         if (doRAM) {
-            SetGSkillRAM(r, g, b);
+            if (!SetGSkillRAM(r, g, b)) failedUnverified[nFailedUnverified++] = L"G.Skill RAM";
         }
 
         hid_exit();
-    }
 
-    AppendStatus(L"=== Done! ===");
+        if (nFailedVerified == 0 && nFailedUnverified == 0) {
+            AppendStatus(L"=== Done! ===");
+        } else {
+            wchar_t line[256];
+            if (nFailedVerified > 0) {
+                std::wstring names = failedVerified[0];
+                for (int i = 1; i < nFailedVerified; i++) names += L", " + std::wstring(failedVerified[i]);
+                swprintf(line, 256, L"=== NICHT VERIFIZIERT: %s ===", names.c_str());
+                AppendStatus(line);
+            }
+            if (nFailedUnverified > 0) {
+                std::wstring names = failedUnverified[0];
+                for (int i = 1; i < nFailedUnverified; i++) names += L", " + std::wstring(failedUnverified[i]);
+                swprintf(line, 256, L"=== FEHLGESCHLAGEN: %s ===", names.c_str());
+                AppendStatus(line);
+            }
+            AppendStatus(L"=== Mit Abweichungen beendet - Details oben ===");
+        }
+    }
 
     g_state.applying = false;
 }
@@ -2965,31 +3197,53 @@ void ShowChannelSettingsDialog(HWND hParent) {
 #define ID_ASUS_SCAN 6301
 #define ID_ASUS_RESET 6302
 #define ID_ASUS_CLOSE 6303
+#define ID_ASUS_FOLLOW_ALL 6304
+#define ID_ASUS_CH_FOLLOW_BASE 6350
 
+// The dialog holds only window handles and the number of channels. Every value
+// the user changes goes straight into g_config.aura[i] and is saved from there,
+// so closing with X, Esc or a crash cannot lose it - and the apply path reads
+// exactly the same fields.
 struct AsusTestDialog {
     HWND hDlg;
     HWND hStatus;
     HWND hFirmwareLabel;
     HWND hColorPreview[8];
     HWND hCheckBox[8];
+    HWND hFollowBox[8];
     HWND hSliderR[8];
     HWND hSliderG[8];
     HWND hSliderB[8];
     HWND hLabelR[8];
     HWND hLabelG[8];
     HWND hLabelB[8];
-    bool channelActive[8];
-    uint8_t channelR[8];
-    uint8_t channelG[8];
-    uint8_t channelB[8];
     int numChannels;
 };
 
+// The colour a channel row currently shows: its override if it has one, the
+// global colour otherwise. Sliders, preview and the HID write all read this, so
+// they cannot disagree.
+static void AsusRowColor(int ch, uint8_t& r, uint8_t& g, uint8_t& b) {
+    if (ch < 0 || ch >= AURA_CONFIG_CHANNELS) { r = g = b = 0; return; }
+    const ChannelConfig& c = g_config.aura[ch];
+    if (c.override_active) { r = c.override_r; g = c.override_g; b = c.override_b; }
+    else                   { r = g_state.red; g = g_state.green; b = g_state.blue; }
+}
+
 AsusTestDialog* g_asusTest = nullptr;
+
+// Channel whose slider moved last. The debounce timer writes exactly this one;
+// it used to be set and never read, so the timer re-sent every channel.
+static int s_asusPendingChannel = -1;
 
 // Test a single ASUS channel with a specific color
 // 'channel' is the UI index (0, 1, 2...), we map it to the actual direct_channel
 bool TestAsusChannel(int channel, uint8_t r, uint8_t g, uint8_t b) {
+    // The last public setter that had no dry-run guard. The caller has already
+    // written the value to g_config by the time we get here, so --dry-run
+    // suppresses the HID write only - the setting itself is still stored.
+    if (DryRunSkip(L"ASUS Aura (Testmen\u00FC)")) return false;
+
     std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
 
     if (channel < 0 || channel >= AURA_CONFIG_CHANNELS) {
@@ -3020,6 +3274,35 @@ bool TestAsusChannel(int channel, uint8_t r, uint8_t g, uint8_t b) {
     return (setCount > 0);
 }
 
+// Send one dialog row to the hardware. Returns whether the write was
+// acknowledged - not whether the LEDs really changed; Aura cannot be read back.
+// A channel with "Aktiv" unchecked goes to 0,0,0 through ApplyCorrection.
+static bool AsusApplyRow(int ch) {
+    if (ch < 0 || ch >= AURA_CONFIG_CHANNELS) return false;
+    uint8_t r, g, b;
+    AsusRowColor(ch, r, g, b);
+    return TestAsusChannel(ch, r, g, b);
+}
+
+// Pull sliders, labels and preview of one row back from g_config - used after
+// something other than a slider changed what the row should show.
+static void AsusSyncRowControls(int ch) {
+    if (!g_asusTest || ch < 0 || ch >= g_asusTest->numChannels) return;
+    uint8_t r, g, b;
+    AsusRowColor(ch, r, g, b);
+
+    SendMessage(g_asusTest->hSliderR[ch], TBM_SETPOS, TRUE, r);
+    SendMessage(g_asusTest->hSliderG[ch], TBM_SETPOS, TRUE, g);
+    SendMessage(g_asusTest->hSliderB[ch], TBM_SETPOS, TRUE, b);
+
+    wchar_t v[8];
+    swprintf(v, 8, L"%d", r); SetWindowTextW(g_asusTest->hLabelR[ch], v);
+    swprintf(v, 8, L"%d", g); SetWindowTextW(g_asusTest->hLabelG[ch], v);
+    swprintf(v, 8, L"%d", b); SetWindowTextW(g_asusTest->hLabelB[ch], v);
+
+    InvalidateRect(g_asusTest->hColorPreview[ch], NULL, TRUE);
+}
+
 // Color preview subclass
 LRESULT CALLBACK AsusColorPreviewProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     if (msg == WM_PAINT) {
@@ -3031,9 +3314,9 @@ LRESULT CALLBACK AsusColorPreviewProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         int index = (int)dwRefData;
         COLORREF color = RGB(128, 128, 128);
         if (g_asusTest && index < g_asusTest->numChannels) {
-            color = RGB(g_asusTest->channelR[index],
-                       g_asusTest->channelG[index],
-                       g_asusTest->channelB[index]);
+            uint8_t r, g, b;
+            AsusRowColor(index, r, g, b);
+            color = RGB(r, g, b);
         }
 
         HBRUSH brush = CreateSolidBrush(color);
@@ -3063,26 +3346,13 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         memset(g_asusTest, 0, sizeof(AsusTestDialog));
         g_asusTest->hDlg = hWnd;
 
-        // Use scanned hardware config or fallback
+        // How many channels exist is hardware topology - g_asusHwConfig is the
+        // right source for that. What colour they carry is user configuration
+        // and comes from g_config.aura[] below.
         int numCh = g_asusHwConfig.valid ? g_asusHwConfig.numChannels : 3;
         if (numCh > 8) numCh = 8;
         if (numCh < 1) numCh = 1;
         g_asusTest->numChannels = numCh;
-
-        // Load saved colors from hardware config
-        for (int i = 0; i < numCh; i++) {
-            if (g_asusHwConfig.valid && i < g_asusHwConfig.numChannels) {
-                g_asusTest->channelR[i] = g_asusHwConfig.channels[i].colorR;
-                g_asusTest->channelG[i] = g_asusHwConfig.channels[i].colorG;
-                g_asusTest->channelB[i] = g_asusHwConfig.channels[i].colorB;
-                g_asusTest->channelActive[i] = g_asusHwConfig.channels[i].enabled;
-            } else {
-                g_asusTest->channelR[i] = g_state.red;
-                g_asusTest->channelG[i] = g_state.green;
-                g_asusTest->channelB[i] = g_state.blue;
-                g_asusTest->channelActive[i] = true;
-            }
-        }
 
         // Title with firmware info
         wchar_t title[128];
@@ -3109,12 +3379,22 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 swprintf(chName, 128, L"Kanal %d", i);
             }
 
-            // Channel header with checkbox
+            // Channel header with checkbox. The "active" flag is
+            // g_config.aura[i].enabled - the same field the channel-settings
+            // dialog and the apply path use. There used to be a second,
+            // competing flag in g_asusHwConfig; that one is gone.
             g_asusTest->hCheckBox[i] = CreateWindowW(L"BUTTON", chName,
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                15, y, 350, 20, hWnd, (HMENU)(INT_PTR)(ID_ASUS_CH_CHECK_BASE + i), NULL, NULL);
+                15, y, 225, 20, hWnd, (HMENU)(INT_PTR)(ID_ASUS_CH_CHECK_BASE + i), NULL, NULL);
             SendMessage(g_asusTest->hCheckBox[i], BM_SETCHECK,
-                g_asusTest->channelActive[i] ? BST_CHECKED : BST_UNCHECKED, 0);
+                g_config.aura[i].enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+
+            // "Follows global" - checked means no override for this channel.
+            g_asusTest->hFollowBox[i] = CreateWindowW(L"BUTTON", L"Folgt Global",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                245, y, 120, 20, hWnd, (HMENU)(INT_PTR)(ID_ASUS_CH_FOLLOW_BASE + i), NULL, NULL);
+            SendMessage(g_asusTest->hFollowBox[i], BM_SETCHECK,
+                g_config.aura[i].override_active ? BST_UNCHECKED : BST_CHECKED, 0);
 
             // Color preview
             g_asusTest->hColorPreview[i] = CreateWindowW(L"STATIC", L"",
@@ -3122,11 +3402,15 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 420, y + 25, 50, 50, hWnd, NULL, NULL, NULL);
             SetWindowSubclass(g_asusTest->hColorPreview[i], AsusColorPreviewProc, 0, (DWORD_PTR)i);
 
-            // Prepare value labels
+            // Sliders start on the colour this channel currently shows: its
+            // override if it has one, the global colour otherwise.
+            uint8_t chR, chG, chB;
+            AsusRowColor(i, chR, chG, chB);
+
             wchar_t valR[8], valG[8], valB[8];
-            swprintf(valR, 8, L"%d", g_asusTest->channelR[i]);
-            swprintf(valG, 8, L"%d", g_asusTest->channelG[i]);
-            swprintf(valB, 8, L"%d", g_asusTest->channelB[i]);
+            swprintf(valR, 8, L"%d", chR);
+            swprintf(valG, 8, L"%d", chG);
+            swprintf(valB, 8, L"%d", chB);
 
             // R slider row
             CreateWindowW(L"STATIC", L"R:", WS_CHILD | WS_VISIBLE,
@@ -3135,7 +3419,7 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
                 50, y + 22, 300, 25, hWnd, (HMENU)(INT_PTR)(ID_ASUS_CH_TEST_BASE + i * 10 + 0), NULL, NULL);
             SendMessage(g_asusTest->hSliderR[i], TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
-            SendMessage(g_asusTest->hSliderR[i], TBM_SETPOS, TRUE, g_asusTest->channelR[i]);
+            SendMessage(g_asusTest->hSliderR[i], TBM_SETPOS, TRUE, chR);
                         g_asusTest->hLabelR[i] = CreateWindowW(L"STATIC", valR,
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
                 355, y + 25, 35, 18, hWnd, NULL, NULL, NULL);
@@ -3147,7 +3431,7 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
                 50, y + 47, 300, 25, hWnd, (HMENU)(INT_PTR)(ID_ASUS_CH_TEST_BASE + i * 10 + 1), NULL, NULL);
             SendMessage(g_asusTest->hSliderG[i], TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
-            SendMessage(g_asusTest->hSliderG[i], TBM_SETPOS, TRUE, g_asusTest->channelG[i]);
+            SendMessage(g_asusTest->hSliderG[i], TBM_SETPOS, TRUE, chG);
                         g_asusTest->hLabelG[i] = CreateWindowW(L"STATIC", valG,
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
                 355, y + 50, 35, 18, hWnd, NULL, NULL, NULL);
@@ -3159,7 +3443,7 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
                 50, y + 72, 300, 25, hWnd, (HMENU)(INT_PTR)(ID_ASUS_CH_TEST_BASE + i * 10 + 2), NULL, NULL);
             SendMessage(g_asusTest->hSliderB[i], TBM_SETRANGE, TRUE, MAKELPARAM(0, 255));
-                        SendMessage(g_asusTest->hSliderB[i], TBM_SETPOS, TRUE, g_asusTest->channelB[i]);
+                        SendMessage(g_asusTest->hSliderB[i], TBM_SETPOS, TRUE, chB);
             g_asusTest->hLabelB[i] = CreateWindowW(L"STATIC", valB,
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
                 355, y + 75, 35, 18, hWnd, NULL, NULL, NULL);
@@ -3176,6 +3460,10 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         CreateWindowW(L"BUTTON", L"Alle aus",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             135, btnY, 80, 28, hWnd, (HMENU)ID_ASUS_RESET, NULL, NULL);
+
+        CreateWindowW(L"BUTTON", L"Alle folgen Global",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            225, btnY, 150, 28, hWnd, (HMENU)ID_ASUS_FOLLOW_ALL, NULL, NULL);
 
         CreateWindowW(L"BUTTON", L"Schliessen",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -3194,45 +3482,59 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         HWND hSlider = (HWND)lParam;
         if (!g_asusTest) break;
 
+        const uint8_t pos = (uint8_t)SendMessage(hSlider, TBM_GETPOS, 0, 0);
+
         // Find which channel and color component this slider belongs to
         for (int ch = 0; ch < g_asusTest->numChannels; ch++) {
             bool updated = false;
             wchar_t val[8];
 
             if (hSlider == g_asusTest->hSliderR[ch]) {
-                g_asusTest->channelR[ch] = (uint8_t)SendMessage(hSlider, TBM_GETPOS, 0, 0);
-                swprintf(val, 8, L"%d", g_asusTest->channelR[ch]);
+                g_config.aura[ch].override_r = pos;
+                swprintf(val, 8, L"%d", pos);
                 SetWindowTextW(g_asusTest->hLabelR[ch], val);
                 updated = true;
             }
             else if (hSlider == g_asusTest->hSliderG[ch]) {
-                g_asusTest->channelG[ch] = (uint8_t)SendMessage(hSlider, TBM_GETPOS, 0, 0);
-                swprintf(val, 8, L"%d", g_asusTest->channelG[ch]);
+                g_config.aura[ch].override_g = pos;
+                swprintf(val, 8, L"%d", pos);
                 SetWindowTextW(g_asusTest->hLabelG[ch], val);
                 updated = true;
             }
             else if (hSlider == g_asusTest->hSliderB[ch]) {
-                g_asusTest->channelB[ch] = (uint8_t)SendMessage(hSlider, TBM_GETPOS, 0, 0);
-                swprintf(val, 8, L"%d", g_asusTest->channelB[ch]);
+                g_config.aura[ch].override_b = pos;
+                swprintf(val, 8, L"%d", pos);
                 SetWindowTextW(g_asusTest->hLabelB[ch], val);
                 updated = true;
             }
 
             if (updated) {
-                // Update color preview
+                // Moving a slider is what makes a channel stop following the
+                // global colour. The precedence is established here, not on
+                // close - so it survives X, Esc and a crash alike.
+                if (!g_config.aura[ch].override_active) {
+                    // The other two components still hold whatever the row was
+                    // showing; take them over so the channel does not jump.
+                    uint8_t curR, curG, curB;
+                    AsusRowColor(ch, curR, curG, curB);
+                    if (hSlider != g_asusTest->hSliderR[ch]) g_config.aura[ch].override_r = curR;
+                    if (hSlider != g_asusTest->hSliderG[ch]) g_config.aura[ch].override_g = curG;
+                    if (hSlider != g_asusTest->hSliderB[ch]) g_config.aura[ch].override_b = curB;
+                    g_config.aura[ch].override_active = true;
+                    SendMessage(g_asusTest->hFollowBox[ch], BM_SETCHECK, BST_UNCHECKED, 0);
+                }
+
                 InvalidateRect(g_asusTest->hColorPreview[ch], NULL, TRUE);
 
                 // Live apply with debouncing (150ms delay)
-                static int s_pendingChannel = -1;
-                if (g_asusTest->channelActive[ch]) {
-                    s_pendingChannel = ch;
-                    KillTimer(hWnd, ID_TIMER_DEBOUNCE);
-                    SetTimer(hWnd, ID_TIMER_DEBOUNCE, 150, NULL);
-                }
+                s_asusPendingChannel = ch;
+                KillTimer(hWnd, ID_TIMER_DEBOUNCE);
+                SetTimer(hWnd, ID_TIMER_DEBOUNCE, 150, NULL);
 
-                wchar_t buf[64];
-                swprintf(buf, 64, L"Kanal %d: RGB(%d, %d, %d)", ch,
-                        g_asusTest->channelR[ch], g_asusTest->channelG[ch], g_asusTest->channelB[ch]);
+                wchar_t buf[80];
+                swprintf(buf, 80, L"Kanal %d: RGB(%d, %d, %d) - eigene Farbe", ch,
+                        g_config.aura[ch].override_r, g_config.aura[ch].override_g,
+                        g_config.aura[ch].override_b);
                 SetWindowTextW(g_asusTest->hStatus, buf);
                 break;
             }
@@ -3242,38 +3544,72 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
 
     case WM_COMMAND: {
         int id = LOWORD(wParam);
-        // Handle channel checkboxes
+        if (!g_asusTest) break;   // WM_COMMAND can arrive before WM_INITDIALOG
+
+        // "Aktiv" per channel -> g_config.aura[i].enabled
         for (int i = 0; i < g_asusTest->numChannels; i++) {
             if (id == ID_ASUS_CH_CHECK_BASE + i) {
-                g_asusTest->channelActive[i] = (SendMessage(g_asusTest->hCheckBox[i], BM_GETCHECK, 0, 0) == BST_CHECKED);
-                break;
+                g_config.aura[i].enabled =
+                    (SendMessage(g_asusTest->hCheckBox[i], BM_GETCHECK, 0, 0) == BST_CHECKED);
+                AsusApplyRow(i);
+                SaveSettings();
+                return TRUE;
             }
         }
-        if (id == ID_ASUS_TEST_ALL) {
-            for (int i = 0; i < g_asusTest->numChannels; i++) {
-                if (g_asusTest->channelActive[i]) {
-                    TestAsusChannel(i, g_asusTest->channelR[i], g_asusTest->channelG[i], g_asusTest->channelB[i]);
-                }
+
+        // "Folgt Global" per channel -> drop the override, back to global
+        for (int i = 0; i < g_asusTest->numChannels; i++) {
+            if (id == ID_ASUS_CH_FOLLOW_BASE + i) {
+                bool follows = (SendMessage(g_asusTest->hFollowBox[i], BM_GETCHECK, 0, 0) == BST_CHECKED);
+                g_config.aura[i].override_active = !follows;
+                if (follows) AsusSyncRowControls(i);   // sliders back to the global colour
+                AsusApplyRow(i);
+                SaveSettings();
+                wchar_t buf[80];
+                swprintf(buf, 80, follows ? L"Kanal %d folgt wieder der Globalfarbe"
+                                          : L"Kanal %d beh\u00E4lt seine eigene Farbe", i);
+                SetWindowTextW(g_asusTest->hStatus, buf);
+                return TRUE;
             }
-            SetWindowTextW(g_asusTest->hStatus, L"Alle Kanaele angewendet");
+        }
+
+        if (id == ID_ASUS_TEST_ALL) {
+            int sent = 0;
+            for (int i = 0; i < g_asusTest->numChannels; i++) {
+                if (AsusApplyRow(i)) sent++;
+            }
+            SaveSettings();
+            // No GET command for Aura -> "sent", never "applied". CLAUDE.md rule 1.
+            wchar_t buf[128];
+            swprintf(buf, 128, L"%d/%d Kan\u00E4le geschrieben (ohne Read-back - nicht verifiziert)",
+                     sent, g_asusTest->numChannels);
+            SetWindowTextW(g_asusTest->hStatus, buf);
         }
         else if (id == ID_ASUS_RESET) {
+            // Persistent now: this used to write transient black that the next
+            // apply undid.
             for (int i = 0; i < g_asusTest->numChannels; i++) {
-                TestAsusChannel(i, 0, 0, 0);
+                g_config.aura[i].enabled = false;
+                SendMessage(g_asusTest->hCheckBox[i], BM_SETCHECK, BST_UNCHECKED, 0);
+                AsusApplyRow(i);
             }
-            SetWindowTextW(g_asusTest->hStatus, L"Alle Kanaele ausgeschaltet");
+            SaveSettings();
+            SetWindowTextW(g_asusTest->hStatus, L"Alle Kanaele deaktiviert und gespeichert");
+        }
+        else if (id == ID_ASUS_FOLLOW_ALL) {
+            for (int i = 0; i < g_asusTest->numChannels; i++) {
+                g_config.aura[i].override_active = false;
+                SendMessage(g_asusTest->hFollowBox[i], BM_SETCHECK, BST_CHECKED, 0);
+                AsusSyncRowControls(i);
+            }
+            SaveSettings();
+            RequestApplyColors(true);
+            SetWindowTextW(g_asusTest->hStatus, L"Alle Kanaele folgen wieder der Globalfarbe");
         }
         else if (id == ID_ASUS_CLOSE) {
-            // Save colors back to hardware config
-            if (g_asusHwConfig.valid) {
-                for (int i = 0; i < g_asusTest->numChannels && i < g_asusHwConfig.numChannels; i++) {
-                    g_asusHwConfig.channels[i].colorR = g_asusTest->channelR[i];
-                    g_asusHwConfig.channels[i].colorG = g_asusTest->channelG[i];
-                    g_asusHwConfig.channels[i].colorB = g_asusTest->channelB[i];
-                    g_asusHwConfig.channels[i].enabled = g_asusTest->channelActive[i];
-                }
-                SaveAsusHardwareConfig();
-            }
+            // asus_hw_config.bin stays a pure hardware cache (firmware, 0xB0
+            // table, derived topology). Channel colours live in config.json.
+            SaveSettings();
             EndDialog(hWnd, IDOK);
         }
         break;
@@ -3282,17 +3618,19 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
     case WM_TIMER:
         if (wParam == ID_TIMER_DEBOUNCE) {
             KillTimer(hWnd, ID_TIMER_DEBOUNCE);
-            // Apply the pending channel
-            static int s_lastChannel = -1;
-            for (int ch = 0; ch < g_asusTest->numChannels; ch++) {
-                if (g_asusTest->channelActive[ch]) {
-                    TestAsusChannel(ch, g_asusTest->channelR[ch], g_asusTest->channelG[ch], g_asusTest->channelB[ch]);
-                }
+            int ch = s_asusPendingChannel;
+            s_asusPendingChannel = -1;
+            if (g_asusTest && ch >= 0 && ch < g_asusTest->numChannels) {
+                AsusApplyRow(ch);
+                SaveSettings();   // survives X, Esc and a crash
             }
         }
         break;
 
     case WM_CLOSE:
+        // Same as "Schliessen": the hardware was written long ago, so closing
+        // must not be the one path that loses the setting.
+        SaveSettings();
         EndDialog(hWnd, IDCANCEL);
         break;
 
@@ -3933,9 +4271,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             CommitStateAndApply(false);
         }
         else if (id == ID_BTN_ASUS_TEST) {
-            // Open ASUS Test dialog
+            // Open ASUS Test dialog. It saves its own changes as they happen;
+            // there is no read-back for Aura, so no success is claimed here.
             ShowAsusTestDialog(hWnd);
-            AppendStatus(L"ASUS channel settings updated");
+            AppendStatus(L"ASUS-Kanaleinstellungen gespeichert (Hardware nicht r\u00FCcklesbar)");
         }
         else if (id == ID_BTN_HID_RESET) {
             // Manual HID reset and re-apply
@@ -4765,10 +5104,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     //   --kbmode-sweep[=sec]  walk 0x00..0x14, hold each <sec> (default 5)
     //
     // Report: %APPDATA%\OneClickRGB\docs\kbmode_probe.txt
+    //
+    // Flags are matched as whole tokens via cli::Find, not with strstr over the
+    // command line. Two things that used to go wrong: anything merely starting
+    // with the flag name ("--kbmode-sweep5" with the '=' left out) began a
+    // 21-step sweep of writes into the keyboard's flash at the default hold time,
+    // and giving both flags at once ran the sweep without mentioning that
+    // --kbmode had been ignored - the sweep was simply tested first.
     {
-        const char* sweepArg  = strstr(lpCmdLine, "--kbmode-sweep");
-        const char* singleArg = strstr(lpCmdLine, "--kbmode=");
-        if (sweepArg || singleArg) {
+        const cli::Flag sweepArg   = cli::Find(lpCmdLine, "--kbmode-sweep");
+        const cli::Flag singleArg  = cli::Find(lpCmdLine, "--kbmode");
+        const cli::Flag confirmArg = cli::Find(lpCmdLine, "--confirm");
+        if (cli::CountPresent({&sweepArg, &singleArg}) > 1) {
+            LogDebug("[kbmode] --kbmode and --kbmode-sweep are mutually exclusive - nothing was written");
+            return 2;
+        }
+        if (sweepArg.present || singleArg.present) {
             // The sweep drives SetEVisionKeyboard, which is dry-run guarded -
             // but without this branch it would still walk 21 steps, sleep for
             // the full hold time each and fill the report with "READ FAILED"
@@ -4796,14 +5147,26 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
             const uint8_t pbright = 4;
             const uint8_t pspeed  = g_state.speed ? g_state.speed : (uint8_t)2;
 
-            int holdMs = 5000;
-            if (sweepArg) {
-                const char* eq = sweepArg + strlen("--kbmode-sweep");
-                if (*eq == '=') {
-                    int s = atoi(eq + 1);
-                    if (s >= 1 && s <= 60) holdMs = s * 1000;
-                }
-            }
+            const int holdMs = cli::HoldSeconds(sweepArg, 5, 1, 60) * 1000;
+
+            // Snapshot before the first write. Read-only, so it also answers
+            // "does the device respond at all" before anything is sent - and it
+            // is what the rollback at the end restores. Each probe step below
+            // does its own hid_init/hid_exit, so the snapshot and the restore
+            // bracket themselves the same way instead of nesting.
+            uint8_t  kbBefore[18] = {0};
+            uint8_t  snapProfile  = 0;
+            uint16_t snapOffset   = 0;
+            hid_init();
+            const bool haveSnapshot = ReadEVisionKeyboardPayload(kbBefore, &snapProfile, &snapOffset);
+            hid_exit();
+
+            // Only the sweep rolls back. --kbmode=<n> means "put the keyboard on
+            // this mode and leave it there", so the header must not promise a
+            // restore that never happens - a report that claims an action it did
+            // not take is the same defect as a status line claiming an unverified
+            // write succeeded.
+            const bool willRestore = sweepArg.present && haveSnapshot;
 
             std::wstring dir = GetAppDataPath() + L"\\docs";
             SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
@@ -4813,9 +5176,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
                 fprintf(fp, "EVision GK650 keyboard mode probe\n");
                 fprintf(fp, "colour=%02X%02X%02X brightness=%d speed=%d hold=%dms\n",
                         pr, pg, pb, pbright, pspeed, holdMs);
+                if (haveSnapshot) {
+                    fprintf(fp, "active profile=%d  keyboard block=0x%02X\n",
+                            (int)snapProfile, (unsigned)snapOffset);
+                    fprintf(fp, "block before probe:");
+                    for (int i = 0; i < 18; i++) fprintf(fp, " %02X", kbBefore[i]);
+                    fprintf(fp, "%s\n", willRestore
+                            ? "   (restored at the end)"
+                            : "   (single mode - NOT restored, see below)");
+                } else {
+                    fprintf(fp, "WARNING: could not read the keyboard block before starting -\n"
+                                "         no snapshot, so nothing will be restored afterwards.\n");
+                }
                 fprintf(fp, "'got' columns are read back from the device after the write.\n\n");
-                fprintf(fp, "  t[s]  mode  writeRes readRes  got:mode br sp  rgb       verdict\n");
-                fprintf(fp, "  ----  ----  -------- -------  -------- --  --  --------  -------\n");
+                fprintf(fp, "%s\n",
+                        confirmArg.present
+                            ? "The animated? column is answered per step in a dialog, while the\n"
+                              "mode is still on the keyboard."
+                            : "The animated? column has to be filled in by hand afterwards -\n"
+                              "use --confirm to be asked per step instead.");
+                fprintf(fp, "  t[s]  mode  writeRes readRes  got:mode br sp  rgb       "
+                            "verdict      animated?\n");
+                fprintf(fp, "  ----  ----  -------- -------  -------- --  --  --------  "
+                            "-----------  -------------\n");
                 fflush(fp);
             }
 
@@ -4830,6 +5213,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
                 fflush(fp);
             };
 
+            int rc = 0;
+
+            // --confirm turns the hold time into a question, exactly as in the
+            // edge probe: the state stays on the keyboard while the dialog asks
+            // about it, so nothing has to be reconstructed from a t[s] column
+            // afterwards. Without it the run behaves as before.
+            const bool confirm = confirmArg.present;
+            bool sweepAborted  = false;
+
+            // A REJECTED row is a *result*, not an error - which mode bytes the
+            // firmware refuses is exactly what this probe is for. A failed
+            // read-back is an error: then the step measured nothing, and the exit
+            // code has to say so instead of letting a gap-filled report look
+            // finished. Same split as the edge probe below.
             auto probeOne = [&](uint8_t mode, int tSec) {
                 hid_init();
                 SetEVisionKeyboard(pr, pg, pb, mode, pbright, pspeed);
@@ -4839,40 +5236,756 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
                 const char* verdict = !v.valid          ? "READ FAILED"
                                     : v.got[0] != mode  ? "REJECTED"
                                     : "accepted";
+                if (!v.valid) rc = 1;
+
+                // Asked while this mode is still on the keyboard. A dismissed
+                // dialog is "abgebrochen", never "nein" (rule 1).
+                const char* answer = "______";
+                if (confirm) {
+                    wchar_t msg[512];
+                    swprintf(msg, 512,
+                             L"Modus 0x%02X ist jetzt gesetzt.\n\n"
+                             L"Bewegt sich an der Tastaturbeleuchtung etwas?\n\n"
+                             L"Abbrechen beendet den Sweep und stellt den vorherigen\n"
+                             L"Zustand wieder her.",
+                             (unsigned)mode);
+                    const int res = MessageBoxW(NULL, msg, L"OneClickRGB Tastatur-Sweep",
+                                                MB_YESNOCANCEL | MB_ICONQUESTION |
+                                                MB_SETFOREGROUND | MB_TOPMOST);
+                    if      (res == IDYES) answer = "ja";
+                    else if (res == IDNO)  answer = "nein";
+                    else { answer = "abgebrochen"; sweepAborted = true; }
+                }
+
                 if (fp) {
-                    fprintf(fp, "  %4d  0x%02X  %8d %7d      0x%02X %2d  %2d  %02X%02X%02X    %s\n",
+                    fprintf(fp, "  %4d  0x%02X  %8d %7d      0x%02X %2d  %2d  %02X%02X%02X    "
+                                "%-11s  %s\n",
                             tSec, mode, v.writeRes, v.readRes,
                             v.got[0], v.got[1], v.got[2],
-                            v.got[5], v.got[6], v.got[7], verdict);
+                            v.got[5], v.got[6], v.got[7], verdict, answer);
                     fflush(fp);
                 }
                 dumpBlock(v);
             };
 
-            if (sweepArg) {
+            if (sweepArg.present) {
                 // 0x00..0x14 rather than just the 11 table entries: if Breathing
                 // is not 0x05, the real value is most likely a neighbour that the
                 // table never lists.
                 int tSec = 0;
                 for (uint8_t m = 0x00; m <= 0x14; m++) {
                     probeOne(m, tSec);
-                    Sleep(holdMs);
+                    if (sweepAborted) break;
+                    if (!confirm) Sleep(holdMs);   // --confirm waits on the dialog
                     tSec += holdMs / 1000;
                 }
-                if (fp) {
+                if (fp && !confirm) {
                     fprintf(fp, "\nWatch the keyboard while this runs and note the wall-clock\n"
                                 "second at which it animates; the t[s] column maps that back to\n"
                                 "the mode byte. 'accepted' only means the byte was stored - it\n"
                                 "does not prove the effect renders.\n");
                 }
             } else {
-                long m = strtol(singleArg + strlen("--kbmode="), nullptr, 0);
-                if (m < 0 || m > 0xFF) m = KB_MODE_STATIC;
-                probeOne((uint8_t)m, 0);
+                // Strict parse: strtol() used to turn "--kbmode=banana" into 0
+                // and then probe mode 0x00 while the report claimed the user's
+                // request. A bad argument now says so and writes nothing.
+                uint8_t m = 0;
+                if (!singleArg.hasValue || !cli::ParseByte(singleArg.value, m)) {
+                    if (fp) {
+                        fprintf(fp, "  ERROR: --kbmode needs a value 0..255 "
+                                    "(decimal or 0x-hex). Nothing was written.\n");
+                        fclose(fp);
+                    }
+                    LogDebug("[kbmode] --kbmode: invalid or missing value - nothing was written");
+                    return 2;
+                }
+                probeOne(m, 0);
+            }
+
+            if (sweepAborted) {
+                rc = 2;
+                if (fp) fprintf(fp, "\nABGEBROCHEN - die restlichen Modi wurden nicht gestellt.\n"
+                                    "Der Report ist unvollstaendig und belegt nichts ueber sie.\n");
+            }
+
+            // Put the keyboard back the way it was found. Same 18 bytes, same
+            // offset, verified by read-back - a diagnostic that changes state it
+            // was only supposed to measure is how the edge strip ended up parked
+            // on an undocumented mode after the earlier edge-diagnose run.
+            if (willRestore) {
+                hid_init();
+                const bool restored = RestoreEVisionKeyboardPayload(kbBefore);
+                hid_exit();
+                if (fp) {
+                    fprintf(fp, "\nrestore of the pre-probe block:");
+                    for (int i = 0; i < 18; i++) fprintf(fp, " %02X", kbBefore[i]);
+                    fprintf(fp, "  -> %s\n", restored ? "verified" : "FAILED (read-back differs)");
+                }
+                if (!restored) rc = 1;
+            } else if (singleArg.present && fp) {
+                fprintf(fp, "\nSingle mode set - not restored (that is the point of\n"
+                            "--kbmode=<n>). Run an apply to return to the UI state.\n");
             }
 
             if (fp) fclose(fp);
-            return 0;
+            {
+                char done[256];
+                snprintf(done, sizeof(done),
+                         "[kbmode] rc=%d - report: %%APPDATA%%\\OneClickRGB\\docs\\kbmode_probe.txt",
+                         rc);
+                LogDebug(done);
+            }
+            return rc;
+        }
+    }
+
+    // Live EDGE probe - the mirror image of the --kbmode block above, for the
+    // edge payload at profile_base+0x1E instead of the keyboard block at +0x01.
+    //
+    // Why it has to exist: the edge strip takes colour and static/off, but no
+    // effect moves - and the mode byte writes, reads back and matches. Under
+    // CLAUDE.md rule 1 a matching read-back proves only that the firmware
+    // *stored* the byte, never that it *renders* it. Distinguishing the two
+    // needs a human watching a light while something walks the byte values, and
+    // --kbmode/--kbmode-sweep cannot do it: they address +0x01.
+    //
+    //   --edgemode=<n>            write one mode (decimal or 0x-hex), verify, exit
+    //   --edgemode-sweep[=sec]    walk 0x00..0x0A, hold each <sec> (default 5)
+    //   --edgespeed-sweep[=sec]   hold one animated mode, walk speed 0..5
+    //   --edgespeed-mode=<n>      which mode --edgespeed-sweep holds (default 0x03)
+    //
+    // Report: %APPDATA%\OneClickRGB\docs\edgemode_probe.txt
+    //
+    // Rule 2 stays intact: the only bytes written are the ten documented ones at
+    // profile_base+0x1E, through SetEVisionEdge - the production path. Only the
+    // *values* vary, never the offsets. The payload found before the first step
+    // is restored afterwards, so a probe run does not leave the strip parked on
+    // whatever byte happened to come last (which is how the strip ended up on
+    // the undocumented mode 0x04 after the earlier edge-diagnose run).
+    {
+        const cli::Flag oneArg    = cli::Find(lpCmdLine, "--edgemode");
+        const cli::Flag modeSweep = cli::Find(lpCmdLine, "--edgemode-sweep");
+        const cli::Flag spdSweep  = cli::Find(lpCmdLine, "--edgespeed-sweep");
+        const cli::Flag spdMode   = cli::Find(lpCmdLine, "--edgespeed-mode");
+        const cli::Flag confirmArg = cli::Find(lpCmdLine, "--confirm");
+        const int actions = cli::CountPresent({&oneArg, &modeSweep, &spdSweep});
+
+        if (actions > 0) {
+            std::wstring dir = GetAppDataPath() + L"\\docs";
+            SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+            const std::wstring reportPath = dir + L"\\edgemode_probe.txt";
+
+            // Mutually exclusive actions are refused, not ranked. cli::Find
+            // matches whole tokens, so --edgemode= and --edgemode-sweep cannot
+            // catch each other the way substring matching would; if both are
+            // given anyway, that is a mistake worth naming rather than resolving
+            // by precedence behind the user's back.
+            if (actions > 1) {
+                FILE* fe = _wfopen(reportPath.c_str(), L"w");
+                if (fe) {
+                    fprintf(fe, "EVision GK650 edge probe\n"
+                                "ERROR: --edgemode / --edgemode-sweep / --edgespeed-sweep are\n"
+                                "mutually exclusive. Nothing was written.\n");
+                    fclose(fe);
+                }
+                LogDebug("[edgeprobe] more than one action flag given - nothing was written");
+                return 2;
+            }
+
+            // Dry run bails out here, before the first sleep. The old kbmode
+            // probe walked all its steps under --dry-run, slept the full hold
+            // time each and filled the report with READ FAILED rows for writes
+            // it had never attempted. Nothing was tried, so the report says
+            // exactly that and the process exits at once.
+            if (g_state.dryRun) {
+                FILE* fe = _wfopen(reportPath.c_str(), L"w");
+                if (fe) {
+                    fprintf(fe, "EVision GK650 edge probe\n"
+                                "DRY RUN - no write was sent and no value was read.\n"
+                                "Run without --dry-run to probe the hardware.\n");
+                    fclose(fe);
+                }
+                LogDebug("[dry-run] --edgemode/--edgemode-sweep/--edgespeed-sweep skipped - "
+                         "would write the edge payload to keyboard flash");
+                return 0;
+            }
+
+            LoadSettings();
+
+            const uint8_t pr = g_state.red, pg = g_state.green, pb = g_state.blue;
+
+            // Fixed, not taken from the saved settings: a probe whose parameters
+            // depend on whatever the user last had in the UI is not reproducible.
+            // Brightness 4 so a running effect is unmistakable, speed 2 as a
+            // mid-range value that means "moving" whichever way the polarity of
+            // +0x20 turns out to run - that polarity is what --edgespeed-sweep
+            // is here to settle.
+            const uint8_t pbright = EFFECT_BRIGHTNESS_MAX;
+            const uint8_t pspeed  = 2;
+
+            int holdMs = 5000;
+            if (modeSweep.present) holdMs = cli::HoldSeconds(modeSweep, 5, 1, 60) * 1000;
+            if (spdSweep.present)  holdMs = cli::HoldSeconds(spdSweep,  5, 1, 60) * 1000;
+
+            hid_init();
+
+            // Snapshot first - read-only, so it also tells us whether the device
+            // answers at all before any write is attempted.
+            uint8_t before[10] = {0};
+            uint8_t snapProfile = 0;
+            uint16_t snapOffset = 0;
+            const bool haveSnapshot = ReadEVisionEdgePayload(before, &snapProfile, &snapOffset);
+
+            // Only the sweeps roll back; --edgemode=<n> is meant to leave the
+            // strip where it put it. The header must not promise otherwise -
+            // a report that claims a restore that never happens is the same
+            // defect as a status line claiming an unverified write succeeded.
+            const bool willRestore = (modeSweep.present || spdSweep.present) && haveSnapshot;
+
+            FILE* fp = _wfopen(reportPath.c_str(), L"w");
+            if (fp) {
+                fprintf(fp, "EVision GK650 edge mode probe (payload at profile_base+0x1E)\n");
+                // During a speed sweep the speed is the variable, so naming one
+                // fixed value here would describe a run that did not happen. The
+                // per-step spd column is the truth either way.
+                if (spdSweep.present) {
+                    fprintf(fp, "colour=%02X%02X%02X brightness=%d speed=sweep 0..%d hold=%dms\n",
+                            pr, pg, pb, pbright, (int)EFFECT_SPEED_MAX, holdMs);
+                } else {
+                    fprintf(fp, "colour=%02X%02X%02X brightness=%d speed=%d hold=%dms\n",
+                            pr, pg, pb, pbright, pspeed, holdMs);
+                }
+                if (haveSnapshot) {
+                    fprintf(fp, "active profile=%d  edge slot=0x%02X\n",
+                            (int)snapProfile, (unsigned)snapOffset);
+                    fprintf(fp, "payload before probe:");
+                    for (int i = 0; i < 10; i++) fprintf(fp, " %02X", before[i]);
+                    fprintf(fp, "%s\n", willRestore
+                            ? "   (restored at the end)"
+                            : "   (single mode - NOT restored, see below)");
+                } else {
+                    fprintf(fp, "WARNING: could not read the edge slot before starting -\n"
+                                "         no snapshot, so nothing will be restored afterwards.\n");
+                }
+                fprintf(fp, "\nAll 'got' bytes are read back from the device after the write.\n"
+                            "Layout: [mode bright speed dir rand R G B coloff save]\n"
+                            "The verdict only says whether the firmware STORED the payload.\n"
+                            "%s\n\n",
+                        confirmArg.present
+                            ? "The animated? column is answered per step in a dialog, while the\n"
+                              "state is still on the strip."
+                            : "Whether the strip animates is the column you fill in yourself.");
+                fprintf(fp, "  t[s]  mode  spd  wRes rRes  got[0..9]                        "
+                            "verdict      confidence   animated?\n");
+                fprintf(fp, "  ----  ----  ---  ---- ----  -------------------------------  "
+                            "-----------  -----------  -------------\n");
+                fflush(fp);
+            }
+
+            int rc = 0;
+
+            // --confirm turns the hold time into a question. Why it exists: an
+            // animated? column that a human is meant to fill in afterwards stays
+            // empty - the run on 2026-08-17 wrote all eleven modes flawlessly and
+            // measured nothing, because the protocol asked for 55 seconds of
+            // uninterrupted watching plus a seconds-to-byte reconstruction. The
+            // dialog holds the state while the question is on screen, so there is
+            // nothing to reconstruct and nothing to remember.
+            const bool confirm = confirmArg.present;
+            bool sweepAborted  = false;
+
+            // One step: drive the production path, then report what came back.
+            // A REJECTED row is a *result*, not an error - finding out which mode
+            // bytes the firmware refuses is the point. A failed read-back is an
+            // error though: then the probe measured nothing, and the exit code
+            // has to say so instead of letting an incomplete report look finished.
+            auto probeStep = [&](uint8_t mode, uint8_t spd, int tSec) {
+                SetEVisionEdge(pr, pg, pb, mode, pbright, spd);
+
+                const EdgeVerifyResult& v = g_lastEdgeVerify;
+                // Brightness is forced to 0 for OFF by the production path, so
+                // compare against what it actually intended to write, not against
+                // the probe's own parameters.
+                bool stored = v.valid &&
+                              v.got[0] == v.want[0] && v.got[1] == v.want[1] &&
+                              v.got[2] == v.want[2] && v.got[5] == v.want[5] &&
+                              v.got[6] == v.want[6] && v.got[7] == v.want[7];
+                const char* verdict = !v.valid ? "READ FAILED" : (stored ? "accepted" : "REJECTED");
+                if (!v.valid) rc = 1;
+                const char* conf = (EdgeModeConfidenceOf(mode) == EDGE_CONF_RENDER_SEEN)
+                                 ? "seen"      // already observed rendering
+                                 : "stored?";  // never observed rendering
+
+                // Asked while this state is still showing, never afterwards. A
+                // dismissed dialog is "abgebrochen", not "nein" - an answer
+                // nobody gave must not become a measurement (rule 1).
+                const char* answer = "______";
+                if (confirm) {
+                    wchar_t msg[512];
+                    swprintf(msg, 512,
+                             L"Modus 0x%02X, Tempo %d ist jetzt gesetzt.\n\n"
+                             L"Bewegt sich an der Randbeleuchtung etwas?\n\n"
+                             L"Abbrechen beendet den Sweep und stellt den vorherigen\n"
+                             L"Zustand wieder her.",
+                             (unsigned)mode, (int)spd);
+                    const int res = MessageBoxW(NULL, msg, L"OneClickRGB Edge-Sweep",
+                                                MB_YESNOCANCEL | MB_ICONQUESTION |
+                                                MB_SETFOREGROUND | MB_TOPMOST);
+                    if      (res == IDYES) answer = "ja";
+                    else if (res == IDNO)  answer = "nein";
+                    else { answer = "abgebrochen"; sweepAborted = true; }
+                }
+
+                if (fp) {
+                    fprintf(fp, "  %4d  0x%02X  %3d  %4d %4d ", tSec, mode, spd,
+                            v.writeRes, v.readRes);
+                    for (int i = 0; i < 10; i++) fprintf(fp, " %02X", v.got[i]);
+                    fprintf(fp, "  %-11s  %-11s  %-13s  (%s)\n",
+                            verdict, conf, answer, EdgeModeName(mode));
+                    if (v.valid && !stored) {
+                        for (int i = 0; i < 10; i++)
+                            if (v.got[i] != v.want[i])
+                                fprintf(fp, "        byte[%d]: want %02X, got %02X\n",
+                                        i, v.want[i], v.got[i]);
+                    }
+                    fflush(fp);
+                }
+            };
+
+            if (modeSweep.present) {
+                // 0x00..0x0A: the four documented values plus their neighbours.
+                // Only 0x00 and 0x05 have ever been seen on the strip; if
+                // Breathing is not 0x03, the real byte is most likely nearby.
+                int tSec = 0;
+                for (uint8_t m = 0x00; m <= 0x0A; m++) {
+                    probeStep(m, pspeed, tSec);
+                    if (sweepAborted) break;
+                    if (!confirm) Sleep(holdMs);   // --confirm waits on the dialog
+                    tSec += holdMs / 1000;
+                }
+                if (fp && !confirm) {
+                    fprintf(fp, "\nWatch the strip while this runs and note the wall-clock second\n"
+                                "at which it starts moving; the t[s] column maps that back to the\n"
+                                "mode byte. 'accepted' means stored, nothing more.\n");
+                }
+            } else if (spdSweep.present) {
+                // Which mode to hold while the speed byte walks. Default 0x03
+                // (Breathing) because it is the one the user reported as frozen.
+                uint8_t holdMode = EDGE_MODE_BREATHING;
+                if (spdMode.present) {
+                    if (!spdMode.hasValue || !cli::ParseByte(spdMode.value, holdMode)) {
+                        if (fp) {
+                            fprintf(fp, "  ERROR: --edgespeed-mode needs a value 0..255 "
+                                        "(decimal or 0x-hex). Nothing was written.\n");
+                            fclose(fp);
+                        }
+                        LogDebug("[edgeprobe] --edgespeed-mode: invalid value - nothing was written");
+                        hid_exit();
+                        return 2;
+                    }
+                }
+                if (fp) fprintf(fp, "  (holding mode 0x%02X while speed walks 0..%d)\n",
+                                holdMode, (int)EFFECT_SPEED_MAX);
+                int tSec = 0;
+                for (uint8_t s = 0; s <= EFFECT_SPEED_MAX; s++) {
+                    probeStep(holdMode, s, tSec);
+                    if (sweepAborted) break;
+                    if (!confirm) Sleep(holdMs);   // --confirm waits on the dialog
+                    tSec += holdMs / 1000;
+                }
+                if (fp) {
+                    fprintf(fp, "\nThis settles the open question about +0x20: the comment in\n"
+                                "SetEVisionKeyboard claimed speed was inverted while the kbmode\n"
+                                "probe next to it assumed the opposite, and neither had been\n"
+                                "checked against a moving light. Note for each row whether the\n"
+                                "strip moves and how fast - if 0 is the fast end, the slider is\n"
+                                "inverted and Beast.rgb's speed=0 was never 'stopped' at all.\n");
+                }
+            } else {
+                uint8_t m = 0;
+                if (!oneArg.hasValue || !cli::ParseByte(oneArg.value, m)) {
+                    if (fp) {
+                        fprintf(fp, "  ERROR: --edgemode needs a value 0..255 "
+                                    "(decimal or 0x-hex). Nothing was written.\n");
+                        fclose(fp);
+                    }
+                    LogDebug("[edgeprobe] --edgemode: invalid or missing value - nothing was written");
+                    hid_exit();
+                    return 2;
+                }
+                probeStep(m, pspeed, 0);
+                // A single --edgemode is an explicit "put the strip on this mode
+                // and leave it there", so it keeps what it set instead of being
+                // rolled back. Only the sweeps restore.
+                if (fp) fprintf(fp, "\nSingle mode set - not restored (that is the point of\n"
+                                    "--edgemode=<n>). Run an apply to return to the UI state.\n");
+                if (!g_lastEdgeVerify.valid || g_lastEdgeVerify.got[0] != m) rc = 1;
+            }
+
+            if (sweepAborted) {
+                rc = 2;
+                if (fp) fprintf(fp, "\nABGEBROCHEN - die restlichen Modi wurden nicht gestellt.\n"
+                                    "Der Report ist unvollstaendig und belegt nichts ueber sie.\n");
+            }
+
+            // Put the strip back the way it was found. Same offset, same ten
+            // bytes, verified by read-back - a diagnostic that changes state it
+            // was only supposed to measure is how the previous run left the strip
+            // on an undocumented mode. An aborted run needs this most of all.
+            if (willRestore) {
+                const bool restored = RestoreEVisionEdgePayload(before);
+                if (fp) {
+                    fprintf(fp, "\nrestore of the pre-probe payload:");
+                    for (int i = 0; i < 10; i++) fprintf(fp, " %02X", before[i]);
+                    fprintf(fp, "  -> %s\n", restored ? "verified" : "FAILED (read-back differs)");
+                }
+                if (!restored) rc = 1;
+            }
+
+            if (fp) fclose(fp);
+            hid_exit();
+            {
+                char done[256];
+                snprintf(done, sizeof(done),
+                         "[edgeprobe] rc=%d - report: %%APPDATA%%\\OneClickRGB\\docs\\edgemode_probe.txt",
+                         rc);
+                LogDebug(done);
+            }
+            return rc;
+        }
+    }
+
+    // Anchor probe: does the firmware render this block AT ALL?
+    //
+    //   --rendercheck=edge    four held states on the edge payload (+0x1E)
+    //   --rendercheck=kb      the same on the keyboard block (+0x01)
+    //
+    // Why this exists. Every measurement so far produced a technically flawless
+    // report - written, read back byte-identical, restored, exit 0 - and settled
+    // nothing, because the only column that carries the answer ("did the light
+    // change?") is the one no program can fill. The protocol asked a human to
+    // watch a strip for 55 seconds straight and afterwards map wall-clock
+    // seconds back to byte values through a t[s] column. Nobody measures
+    // reliably that way, and an empty animated? column is what it produced.
+    //
+    // So this probe inverts the arrangement: it holds ONE state, asks ONE
+    // yes/no question about exactly that state while it is still showing, and
+    // writes the answer into the report itself. Four steps are enough to decide
+    // whether this memory drives the lighting at all:
+    //
+    //   white -> "is it white?"    off   -> "is it dark?"
+    //   red   -> "is it red?"      green -> "is it green?"
+    //
+    // If off does not darken and no colour arrives, the block is storage rather
+    // than state, and every further mode sweep is wasted - that is the branch
+    // this probe exists to decide, and it prints the verdict itself.
+    //
+    // A dismissed dialog is recorded as "unanswered", never as "no": an answer
+    // nobody gave must not turn into a measurement (CLAUDE.md rule 1).
+    //
+    // Rule 2 is untouched - the states go out through SetEVisionEdge /
+    // SetEVisionKeyboard, so only documented payload bytes move, and the
+    // pre-probe payload is snapshotted and restored exactly like the sweeps do.
+    //
+    // Dialog strings are deliberately ASCII-only: this file has no BOM and the
+    // build passes no /utf-8, so raw UTF-8 bytes inside L"..." would be decoded
+    // as CP1252 and reach the user as mojibake.
+    {
+        const cli::Flag rcFlag = cli::Find(lpCmdLine, "--rendercheck");
+        if (rcFlag.present) {
+            std::wstring dir = GetAppDataPath() + L"\\docs";
+            SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+            const std::wstring reportPath = dir + L"\\rendercheck.txt";
+
+            const bool wantEdge = rcFlag.hasValue && rcFlag.value == "edge";
+            const bool wantKb   = rcFlag.hasValue && rcFlag.value == "kb";
+            if (!wantEdge && !wantKb) {
+                FILE* fe = _wfopen(reportPath.c_str(), L"w");
+                if (fe) {
+                    fprintf(fe, "EVision GK650 render check\n"
+                                "ERROR: --rendercheck needs a target - use --rendercheck=edge\n"
+                                "or --rendercheck=kb. Nothing was written.\n");
+                    fclose(fe);
+                }
+                LogDebug("[rendercheck] missing or unknown target - nothing was written");
+                return 2;
+            }
+
+            // Must bail out BEFORE the first dialog: check_dryrun_flags.ps1 runs
+            // unattended, and a MessageBox waiting for a click would hang it
+            // until the test's timeout instead of failing honestly.
+            if (g_state.dryRun) {
+                FILE* fe = _wfopen(reportPath.c_str(), L"w");
+                if (fe) {
+                    fprintf(fe, "EVision GK650 render check\n"
+                                "DRY RUN - nothing was written and no question was asked.\n"
+                                "Run without --dry-run to probe the hardware.\n");
+                    fclose(fe);
+                }
+                LogDebug("[dry-run] --rendercheck skipped - would write the payload and open dialogs");
+                return 0;
+            }
+
+            LoadSettings();
+            hid_init();
+
+            uint8_t  edgeBefore[10] = {0};
+            uint8_t  kbBefore[18]   = {0};
+            uint8_t  snapProfile    = 0;
+            uint16_t snapOffset     = 0;
+            const bool haveSnapshot = wantEdge
+                ? ReadEVisionEdgePayload(edgeBefore, &snapProfile, &snapOffset)
+                : ReadEVisionKeyboardPayload(kbBefore, &snapProfile, &snapOffset);
+
+            const char* targetName = wantEdge ? "edge" : "keyboard";
+            const wchar_t* targetW = wantEdge ? L"Randbeleuchtung (Edge)" : L"Tastaturbeleuchtung";
+
+            FILE* fp = _wfopen(reportPath.c_str(), L"w");
+            if (fp) {
+                fprintf(fp, "EVision GK650 render check - target: %s\n", targetName);
+                if (haveSnapshot) {
+                    fprintf(fp, "active profile=%d  slot=0x%02X\n",
+                            (int)snapProfile, (unsigned)snapOffset);
+                    fprintf(fp, "payload before probe:");
+                    const int n = wantEdge ? 10 : 18;
+                    const uint8_t* src = wantEdge ? edgeBefore : kbBefore;
+                    for (int i = 0; i < n; i++) fprintf(fp, " %02X", src[i]);
+                    fprintf(fp, "   (restored at the end)\n");
+                } else {
+                    fprintf(fp, "WARNING: could not read the slot before starting - no\n"
+                                "         snapshot, so nothing will be restored afterwards.\n");
+                }
+                fprintf(fp, "\nEach step holds ONE state and asks ONE question about it while\n"
+                            "that state is still showing. 'verified' is the read-back from the\n"
+                            "device; 'answer' is what a human saw. A dismissed dialog is\n"
+                            "recorded as unanswered - never as no.\n\n");
+                fprintf(fp, "  step  state  verified  answer\n");
+                fprintf(fp, "  ----  -----  --------  ------------\n");
+                fflush(fp);
+            }
+
+            struct RcStep {
+                const wchar_t* question;
+                const char*    label;
+                uint8_t r, g, b;
+                uint8_t bright;
+                bool    dark;     // edge: EDGE_MODE_OFF, keyboard: brightness 0
+            };
+            const RcStep steps[4] = {
+                { L"Leuchtet es jetzt WEISS (hell)?", "white", 255, 255, 255, 4, false },
+                { L"Ist es jetzt AUS (dunkel)?",      "off",     0,   0,   0, 0, true  },
+                { L"Leuchtet es jetzt ROT?",          "red",   255,   0,   0, 4, false },
+                { L"Leuchtet es jetzt GRUEN?",        "green",   0, 255,   0, 4, false },
+            };
+
+            int  rc        = 0;
+            bool aborted   = false;
+            // 0 = unanswered, 1 = yes, 2 = no. Index matches steps[].
+            int  answers[4] = {0, 0, 0, 0};
+
+            for (int i = 0; i < 4 && !aborted; i++) {
+                const RcStep& s = steps[i];
+
+                bool verified;
+                if (wantEdge) {
+                    const uint8_t mode = s.dark ? (uint8_t)EDGE_MODE_OFF
+                                                : (uint8_t)EDGE_MODE_STATIC;
+                    SetEVisionEdge(s.r, s.g, s.b, mode, s.bright, 2);
+                    verified = g_lastEdgeVerify.valid && g_lastEdgeVerify.writeRes >= 0 &&
+                               g_lastEdgeVerify.got[0] == g_lastEdgeVerify.want[0];
+                } else {
+                    SetEVisionKeyboard(s.r, s.g, s.b, (uint8_t)KB_MODE_STATIC, s.bright, 2);
+                    verified = g_lastKbVerify.valid &&
+                               g_lastKbVerify.got[0] == (uint8_t)KB_MODE_STATIC &&
+                               g_lastKbVerify.got[1] == s.bright;
+                }
+                if (!verified) rc = 1;
+
+                wchar_t msg[512];
+                swprintf(msg, 512,
+                         L"Schritt %d von 4 - %s\n\n"
+                         L"%s\n\n"
+                         L"Ja / Nein beantworten. Abbrechen beendet den Test und stellt\n"
+                         L"den vorherigen Zustand wieder her.",
+                         i + 1, targetW, s.question);
+
+                const int res = MessageBoxW(NULL, msg, L"OneClickRGB Render-Check",
+                                            MB_YESNOCANCEL | MB_ICONQUESTION |
+                                            MB_SETFOREGROUND | MB_TOPMOST);
+                if      (res == IDYES) answers[i] = 1;
+                else if (res == IDNO)  answers[i] = 2;
+                else { aborted = true; answers[i] = 0; }
+
+                if (fp) {
+                    const char* ans = answers[i] == 1 ? "ja"
+                                    : answers[i] == 2 ? "nein"
+                                    : "unbeantwortet";
+                    fprintf(fp, "  %4d  %-5s  %-8s  %s\n",
+                            i + 1, s.label, verified ? "yes" : "NO", ans);
+                    fflush(fp);
+                }
+            }
+
+            if (aborted) {
+                rc = 2;
+                if (fp) fprintf(fp, "\nABGEBROCHEN - die restlichen Schritte wurden nicht gestellt.\n"
+                                    "Der Report ist unvollstaendig und belegt nichts ueber sie.\n");
+            }
+
+            // The verdict this probe exists for. Only stated when every step was
+            // actually answered - a partial run must not produce a conclusion.
+            if (fp && !aborted) {
+                const bool anyYes = answers[0] == 1 || answers[1] == 1 ||
+                                    answers[2] == 1 || answers[3] == 1;
+                const bool allYes = answers[0] == 1 && answers[1] == 1 &&
+                                    answers[2] == 1 && answers[3] == 1;
+                fprintf(fp, "\nVERDICT: ");
+                if (allYes) {
+                    fprintf(fp, "the firmware renders this block live - colour and off both\n"
+                                "arrive. What is left is which MODE bytes it implements; that is\n"
+                                "what --%smode-sweep --confirm measures next.\n",
+                            wantEdge ? "edge" : "kb");
+                } else if (!anyYes) {
+                    fprintf(fp, "nothing visible reacted to any of the four states, although the\n"
+                                "device stored and returned every payload. For this target the\n"
+                                "config memory is storage, not live state - further mode sweeps\n"
+                                "cannot answer anything. Next lever is --kbwatch (read-only):\n"
+                                "let the keyboard change its own lighting and watch which bytes\n"
+                                "move.\n");
+                } else {
+                    fprintf(fp, "partial - some states arrived, others did not. Note exactly which\n"
+                                "in docs/Keyboard_Protocol.md before drawing any conclusion; a\n"
+                                "half-reacting block is a finding, not a measurement error.\n");
+                }
+            }
+
+            // Put it back the way it was found, verified by read-back.
+            if (haveSnapshot) {
+                const bool restored = wantEdge
+                    ? RestoreEVisionEdgePayload(edgeBefore)
+                    : RestoreEVisionKeyboardPayload(kbBefore);
+                if (fp) {
+                    fprintf(fp, "\nrestore of the pre-probe payload:");
+                    const int n = wantEdge ? 10 : 18;
+                    const uint8_t* src = wantEdge ? edgeBefore : kbBefore;
+                    for (int i = 0; i < n; i++) fprintf(fp, " %02X", src[i]);
+                    fprintf(fp, "  -> %s\n", restored ? "verified" : "FAILED (read-back differs)");
+                }
+                if (!restored && rc == 0) rc = 1;
+            }
+
+            if (fp) fclose(fp);
+            hid_exit();
+            {
+                char done[256];
+                snprintf(done, sizeof(done),
+                         "[rendercheck] target=%s rc=%d - report: "
+                         "%%APPDATA%%\\OneClickRGB\\docs\\rendercheck.txt",
+                         targetName, rc);
+                LogDebug(done);
+            }
+            return rc;
+        }
+    }
+
+    // Explicit, one-shot Win-key unlock: --unlock-winkey
+    //
+    // This is the write that used to run unconditionally and unverified inside
+    // SetEVisionKeyboard, on every single apply. It is kept as an opt-in action
+    // for one reason only: it is the write whose removal the user might notice,
+    // so it stays reachable and testable rather than vanishing silently. What it
+    // does is clear the two bytes at profile_base+0x14 in the ACTIVE profile.
+    //
+    // Read the report before believing it did anything. Section 4.1 of
+    // docs/Keyboard_Protocol.md is evidence *against* this write mattering: with
+    // the Win key locked, the key-remap table is intact and clearing the
+    // per-profile flag at +0x2E left the key locked. The region +0x14..0x1D is
+    // marked [?] - undecoded - and the current suspicion is that it holds the
+    // edge zone's brightness and speed, in which case zeroing it is what froze
+    // the edge animation in the first place.
+    {
+        const cli::Flag unlockArg = cli::Find(lpCmdLine, "--unlock-winkey");
+        if (unlockArg.present) {
+            std::wstring dir = GetAppDataPath() + L"\\docs";
+            SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+            const std::wstring reportPath = dir + L"\\unlock_winkey.txt";
+
+            if (g_state.dryRun) {
+                FILE* fe = _wfopen(reportPath.c_str(), L"w");
+                if (fe) {
+                    fprintf(fe, "Win-key unlock (profile_base+0x14)\n"
+                                "DRY RUN - no write was sent and no value was read.\n");
+                    fclose(fe);
+                }
+                LogDebug("[dry-run] --unlock-winkey skipped - would write 00 00 to profile+0x14");
+                return 0;
+            }
+
+            hid_init();
+            hid_device* dev = nullptr;
+            struct hid_device_info* devs = hid_enumerate(Devices::EVISION_VID, Devices::EVISION_PID);
+            for (auto* c = devs; c; c = c->next)
+                if (c->usage_page == Devices::EVISION_USAGE_PAGE) { dev = hid_open_path(c->path); break; }
+            hid_free_enumeration(devs);
+
+            int rc = 2;
+            FILE* fp = _wfopen(reportPath.c_str(), L"w");
+            if (!dev) {
+                if (fp) fprintf(fp, "ERROR: EVision RGB interface not found - nothing written.\n");
+                LogDebug("[unlock-winkey] device not found");
+            } else {
+                EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);
+                Sleep(20);
+                uint8_t profile = 0;
+                EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &profile);
+                if (profile > 2) profile = 0;
+                const uint16_t off = (uint16_t)(profile * 0x40 + 0x14);
+
+                // Read-modify-write scope: the full ten bytes of the undecoded
+                // region are recorded so the previous contents stay recoverable,
+                // but only the two bytes the old code touched are written. No
+                // widening of the write range (CLAUDE.md rule 2).
+                uint8_t region[10] = {0};
+                const int beforeRes = EVisionQuery(dev, 0x05, off, nullptr, 10, region);
+                const uint8_t zero[2] = {0x00, 0x00};
+                const int wr = EVisionQuery(dev, 0x06, off, zero, 2, nullptr);
+                Sleep(10);
+                uint8_t after[10] = {0};
+                const int afterRes = EVisionQuery(dev, 0x05, off, nullptr, 10, after);
+                EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
+                hid_close(dev);
+
+                const bool verified = (afterRes >= 0) && after[0] == 0x00 && after[1] == 0x00;
+                rc = verified ? 0 : 1;
+
+                if (fp) {
+                    fprintf(fp, "Win-key unlock write\n");
+                    fprintf(fp, "profile=%d  offset=0x%02X  writeRes=%d\n",
+                            (int)profile, (unsigned)off, wr);
+                    fprintf(fp, "before +0x14..0x1D (readRes=%d):", beforeRes);
+                    for (int i = 0; i < 10; i++) fprintf(fp, " %02X", region[i]);
+                    fprintf(fp, "\nafter  +0x14..0x1D (readRes=%d):", afterRes);
+                    for (int i = 0; i < 10; i++) fprintf(fp, " %02X", after[i]);
+                    fprintf(fp, "\nVERDICT: %s\n", verified
+                            ? "the two bytes now read 00 00"
+                            : "NOT verified - the device kept different bytes");
+                    fprintf(fp, "\nThis says nothing about the Win key itself. Section 4.1 of\n"
+                                "docs/Keyboard_Protocol.md found the lock is Fn-layer hardware\n"
+                                "state that this config memory does not expose. If the key is\n"
+                                "still locked after this, that is the expected outcome, and the\n"
+                                "'before' line above is what to write back.\n");
+                }
+                {
+                    char dbg[160];
+                    snprintf(dbg, sizeof(dbg),
+                             "[unlock-winkey] profile=%d off=0x%02X writeRes=%d verified=%d",
+                             (int)profile, (unsigned)off, wr, (int)verified);
+                    LogDebug(dbg);
+                }
+            }
+            if (fp) fclose(fp);
+            hid_exit();
+            return rc;
         }
     }
 
@@ -4990,7 +6103,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
                 // Probe payload: STATIC BLUE, commit flag set (byte[9]=0x01),
                 // same as SetEVisionEdge builds for EDGE_MODE_STATIC.
-                uint8_t testData[10] = {0x04, 4, 2, 0, 0, 0, 0, 255, 0, 0x01};
+                //
+                // The mode byte used to be the literal 0x04 while this comment
+                // already claimed parity with EDGE_MODE_STATIC. It is not: static
+                // is 0x00, and 0x04 is the legacy value NormalizeEdgeMode() maps
+                // away precisely because it produced rainbow-only behaviour. So
+                // the "identical to the production path" claim held for the
+                // offset and the commit flag but not for the effect byte, and
+                // every run of this diagnostic parked the strip on an
+                // undocumented mode. Named constant, no literal.
+                uint8_t testData[10] = {
+                    EDGE_MODE_STATIC, EFFECT_BRIGHTNESS_MAX, 2, 0, 0, 0, 0, 255, 0, 0x01
+                };
 
                 uint8_t before[10] = {0};
                 int beforeRes = EVisionQuery(dev, 0x05, edgeOff, nullptr, 10, before);

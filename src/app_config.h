@@ -117,7 +117,9 @@ public:
         auto chOut = [](const ChannelConfig& c) -> json {
             return {{"name", c.name}, {"enabled", c.enabled},
                     {"r", c.red_adjust}, {"g", c.green_adjust},
-                    {"b", c.blue_adjust}, {"br", c.brightness}};
+                    {"b", c.blue_adjust}, {"br", c.brightness},
+                    {"ovr", c.override_active},
+                    {"or", c.override_r}, {"og", c.override_g}, {"ob", c.override_b}};
         };
         for (int i = 0; i < 8; i++) j["aura"][i] = chOut(aura[i]);
         for (int i = 0; i < 4; i++) j["ram"][i]  = chOut(ram[i]);
@@ -179,6 +181,12 @@ public:
                 dst.green_adjust= src.value("g",  dst.green_adjust);
                 dst.blue_adjust = src.value("b",  dst.blue_adjust);
                 dst.brightness  = src.value("br", dst.brightness);
+                // Absent in configs written by older builds -> override_active
+                // stays false and the channel keeps following the global colour.
+                dst.override_active = src.value("ovr", dst.override_active);
+                dst.override_r  = (uint8_t)src.value("or", (int)dst.override_r);
+                dst.override_g  = (uint8_t)src.value("og", (int)dst.override_g);
+                dst.override_b  = (uint8_t)src.value("ob", (int)dst.override_b);
             };
             if (j.contains("aura") && j["aura"].is_array())
                 for (int i = 0; i < 8 && i < (int)j["aura"].size(); i++)
