@@ -302,6 +302,32 @@ Examples of the other prefixes: `0x1F2 = 30 92 01` (consumer `0x0192`,
 Calculator), `0x204 = 30 E2 00` (Mute), `0x216 = 30 EA 00` (Volume Down),
 `0x195 = A0 01 00` (Fn, layer 1).
 
+### 4.2 Matrix dimensions  [HIGH]
+
+Decoding the whole table fixes its size, and the result reads back as a
+keyboard, which is what makes it a cross-validation rather than a plausible
+parse:
+
+| Item | Value | How it is fixed |
+|---|---|---|
+| Rows per column | 6 | column stride `0x12` / 3 bytes per entry |
+| Columns | 21 | everything from `0xC0 + 21*0x12 = 0x23A` to `0x2BF` reads `00` |
+| Matrix slots | 126 | 21 × 6 |
+| Assigned keys | 110 | the rest are `20 00 00` holes |
+| Table extent | `0xC0..0x239` | |
+
+Decoded, column by column, the six rows are Esc/`` ` ``/Tab/Caps/LShift/LCtrl,
+then (none)/1/Q/A/NonUS-\/LGUI, and so on through the function row, the nav
+cluster and the numpad — i.e. a full-size layout, in physical order. The 16
+holes sit where a full-size board has no key (under the numpad's tall `+`, the
+gaps around the arrow cluster).
+
+`src/keyboard_layout.h` implements exactly this decode, and
+`tests/test_cli_args.cpp` exercises it against a synthetic block. Note what the
+tests do and do not assert: the entry format and the HID usage names are spec
+and are checked directly; the **colour**-table geometry in the same header is an
+inference and is only checked for internal consistency (see 5.5).
+
 ### 4.1 Win-Lock is NOT in the config memory  [HIGH]
 
 The earlier assumption — that Win-Lock is implemented by remapping the Win key
@@ -377,11 +403,10 @@ to `active_profile*0x40 + 0x1E`.
    `REJECTED` row does not, because which bytes the firmware refuses is the
    measurement. `--kbmode=<n>` still deliberately keeps what it set. **The sweep
    has not been run on hardware yet.**
-5. Per-key colour table at `0x2C0`+ is captured but undecoded. Per-key/per-zone
-   keyboard colour is not implemented anywhere in the app; there is no
-   `keyboardZones` model (only `mouseZones` in `light_zone.h`), and
-   `SetSteelSeriesZones()` is reachable only from `--mouse-zones-test`, not from
-   the UI or the normal apply path.
+5. **Per-key colour table at `0x2C0`+ — geometry inferred [MED], not measured.**
+   See 5.5 below; this item used to read "captured but undecoded" and the model,
+   the probes and the UI that now exist do not change its confidence by
+   themselves.
 6. **Which `+0x1E` mode bytes the firmware renders** — the open question that
    `--edgemode-sweep` exists for, see the confidence table in 3.1. As of
    2026-08-17 the strip holds `03 04 05 … 01` (breathing, brightness 4, speed 5,
@@ -424,6 +449,155 @@ to `active_profile*0x40 + 0x1E`.
    `src/effect_limits.h`) — including `LoadProfile`, which used to pass whatever
    a `.rgb` file contained straight into the profile block.
 
+### 5.5 Per-key colour table at `0x2C0`+ — status
+
+**Nothing in this section is light-verified.** The app can now model, probe and
+write per-key colours; none of that is evidence that the keyboard renders them.
+Read the confidence column, not the feature list.
+
+#### What the dump shows
+
+Read-only, `--kbdump-range=0x2A0-0x5FF`, 2026-08-17. Every line answered
+(`rr=16`), so the boundaries below are the *data's*, not the memory's:
+
+```
+02A0..02BF: 00 (zero)
+02C0: 00 22 FF 00 22 FF 00 22 FF 00 22 FF 00 22 FF 00
+02D0: 22 FF 00 22 FF 00 22 FF 00 22 FF 00 22 FF 00 22
+02E0: FF 00 22 FF 00 22 FF 00 22 FF 00 22 FF 00 22 FF
+02F0: 06 00 22 06 00 22 06 00 22 06 00 22 06 00 22 FF   <- pattern changes
+0300: 06 00 22 06 00 22 06 00 22 06 00 22 06 00 22 FF   <- identical from here
+ ...  (every line the same)
+0430: 06 00 22 06 00 22 06 00 22 06 00 22 06 00 22 FF   <- last non-zero line
+0440..053F: 00 (zero)
+```
+
+`0x2C0..0x2EF` is 48 bytes, i.e. sixteen clean `00 22 FF` triples — exactly the
+profile's own colour `(0, 34, 255)`, phase-consistent across the line boundaries
+the way a triple array should be. From `0x2F0` the period is **16 bytes**
+(`06 00 22` ×5 + `FF`), identical on every line.
+
+**The region ends at `0x43F`.** That is new: the old dump was hardcoded to
+`0x000..0x3FF` and simply stopped mid-region, which is why nobody could see
+where it ended. `0x2C0..0x43F` is **384 bytes = exactly 128 triples**, and the
+matrix has **126** slots. Two triples too many — see the arithmetic below.
+
+Beyond it, `0x440..0x53F` is zero and then a few isolated bytes appear
+(`0x544/0x545 = FF FF`, `0x581/0x583/0x585/0x588`, `0x5EA`). Unrelated
+structures, unidentified, not touched by anything here.
+
+Three things must not be read into any of this:
+
+* A run of bytes that happens to equal the current colour is not proof of a
+  colour table. The same three values would appear in any structure that
+  mirrors the profile.
+* The 16-byte period is **unexplained**. It could be a second structure, an
+  address wrap, or a firmware buffer echoing stale data. Guessing between those
+  is exactly what rule 2 forbids.
+* **The editor must not paint these bytes, and no longer does.** It did once,
+  and the result was a board covered in reds, greens and blues that nobody had
+  ever set: from `0x2F0` the region repeats with a 16-byte period, so reading it
+  at a 3-byte stride drifts through the pattern and hands every few keys a
+  different triple. It looked like per-key state and was a picture of an
+  assumption. The editor now starts from `profile_base+0x06..0x08` — the colour
+  the board demonstrably shows — and paints the region's bytes only once 5.5
+  item 1 has established that they are colours.
+
+  The artefact also reached disk: one Apply was enough to persist those colours
+  into `keyboardZones`. `RGBConfig::keyboardZonesVersion` therefore drops any
+  key-colour list written before this fix instead of showing it back as the
+  user's own saved choice.
+
+#### What the code assumes, and where
+
+`src/keyboard_layout.h` keeps the measured boundary and the inferred one apart,
+because they disagree:
+
+| Constant | Value | Confidence | Basis |
+|---|---|---|---|
+| `KEYCOLOR_BASE` | `0x2C0` | [MED] | first byte of the run |
+| `KEYCOLOR_STRIDE` | 3 | [MED] | R, G, B |
+| slot order | matrix order (column-major), same as 4.2 | [MED] | inference |
+| `KEYCOLOR_REGION_END` | `0x440` | **[HIGH]** | last non-zero byte is `0x43F`, dump above |
+| `KEYCOLOR_TRIPLES` | 128 | **[HIGH]** | `384 / 3` |
+| `KEYCOLOR_SLOTS_END` | `0x43A` | [MED] | `0x2C0 + 126*3`, one triple per matrix slot |
+
+**The six-byte gap is the sharpest open question in this section.** 128 triples
+in the region, 126 slots in the matrix. Readings that would each explain it, none
+of them adopted here:
+
+* the table is indexed by a linear LED number, not by matrix position (128 is a
+  natural firmware constant);
+* it starts at a different phase, and `0x2C0` is not triple 0;
+* the last two triples are something else that happens to sit adjacent.
+
+`--keyidentify` can address the two unmapped triples (`0x43A`, `0x43D`) — the
+bounds check follows the *measured* region, deliberately, so the probe can reach
+the offsets where the assumption breaks instead of protecting it. They have no
+predicted key and the report says `(past matrix)`; whatever lights up there is
+the answer.
+
+#### The three measurements that would settle it
+
+Each has a tool, and none has been run yet.
+
+1. **Is it the colour table, and how far does it go?** — differential dump.
+   `tools\keycolor_map_session.ps1` drives it: dump, colour A, dump, colour B,
+   dump, diff, restore, collateral diff. The bytes that move with the colour are
+   the table; extent, stride and order fall out of the diff. If nothing outside
+   the profile block moves, the firmware does *not* fill the table from the
+   global colour — also a result, and one that sends stage 2 a different way.
+2. **Which key does an offset drive?** — `--keyidentify=<off>[,<off>...]`.
+   Sets one triple to white, names the key the model predicts for that offset,
+   asks whether that is the one that lit, restores verified. Samples at the
+   first column, the last column and a couple of column wraps are enough: if the
+   predictions hold there they hold everywhere, and if they break that is the
+   more valuable answer.
+3. **Which mode byte renders the table?** — `--keypattern` writes an
+   unmistakable alternating red/blue pattern (backed up first, restorable with
+   `--keypattern=restore`), then
+   `--kbmode-only=0x00,0x04,0x09,0x13,0x14 --ask=perkey --confirm` walks the five
+   candidates and asks, per step, whether different keys are showing different
+   colours. Those five are the bytes the keyboard block stores without
+   animating anything, so they are the only plausible candidates for "static
+   per-key". **If none of them renders the table, the chain ends there** and
+   that gets recorded here, rather than being worked around.
+
+#### What the app does in the meantime
+
+* `RGBConfig::keyboardZones` is filled from the device (`keyboard_layout.h`
+  builds it from the remap table at `0xC0`, never from a hardcoded map) and
+  persisted through the existing `LightZone` format. `LightZone::verified` stays
+  `false` for every key, because that flag means "Identify confirmed the
+  mapping" and item 2 above has not run.
+* `RGBConfig::kbCustomMode` defaults to `0xFF` = **not established**. While it
+  holds `0xFF` the per-key apply does not touch the profile block at all.
+* The layout dialog ("Tasten") writes read-modify-write over the whole measured
+  region `[0x2C0, 0x440)`, reads it back and compares. Its status line
+  reports the number of triples that read back identically **and states that
+  whether the keyboard displays them is unmeasured**. If the range cannot be
+  snapshotted stably, it writes nothing.
+* The dialog draws a **board**: 110 keycaps at their physical widths, with the
+  function-row groups, the nav cluster, and a numpad whose `KP+` and `KPEnter`
+  are two rows tall. Click, Ctrl+click, drag-select and double-click all address
+  single keys.
+
+  Where that geometry comes from matters, because it is the one thing in this
+  feature that is *not* read from the device. **Which** keys exist, what they
+  are called and which colour offset each owns comes from the remap table at
+  `0xC0`. **How wide** a key is drawn cannot: key sizes are not in the config
+  memory at all. So widths and cluster origins come from the key's own label
+  (`kblayout::KeyWidthUnits` / `ClusterOfLabel`), and a label the table does not
+  know gets a plain one-unit cap rather than disappearing. The one geometric
+  fact that *is* device-derived is double height: a numpad key with a hole in
+  the matrix slot directly below it occupies both rows.
+
+  This is not the "hardcoded keyboard map" the per-key plan rules out. A
+  hardcoded map would decide which keys the board has; this decides how many
+  pixels a key the board already reported gets. A bug here draws a cap at the
+  wrong width — it cannot send a byte to the wrong key, because the write path
+  addresses `kblayout::Key::colorOffset` and never a rectangle.
+
 ## 6. Automated checks
 
 Nothing here can prove an effect renders — that needs an eye. What it does prove
@@ -445,6 +619,25 @@ read-back can belong to the other one's request — and a snapshot read that way
 gets written back into flash at the end of the probe. That is how the keyboard
 was switched off by two diagnostics that both reported success. The lock is
 taken *after* the `--dry-run` bail-outs, so dry runs may still overlap freely.
-| `tools\kbdump_diff.ps1` | no | before/after dump comparison over `0x000..0x3FF`, fails on any change outside a given range |
+| `tools\kbdump_diff.ps1` | no | before/after dump comparison, fails on any change outside a given range |
 | `tools\edge_probe_session.ps1` | **writes** | drives dump → sweep → dump → collateral diff in one go, and refuses to start while the GUI is running. `-What mode` / `-What speed` sweep the edge payload, `-What kbmode` the keyboard block; the allowed-range check for the collateral diff follows the chosen path (`+0x1E..0x27` vs `+0x01..0x12`) |
+| `tools\keycolor_map_session.ps1` | **writes the profile block only** | the 5.5 item 1 measurement: dump → colour A → dump → colour B → dump → diff → restore → collateral diff. Never writes to `0x2C0`+ |
 | `tools\validate_profiles.ps1` | no | `.rgb` profiles against what `LoadProfile` accepts |
+
+### 6.1 Per-key flags
+
+| Flag | Hardware | What it does |
+|---|---|---|
+| `--kbdump-range=<lo>-<hi>` | reads | widens `--kbdump` past its old hardcoded `0x000..0x3FF`. The read stops where the device stops answering and the report names that offset — where the config memory ends is itself unknown |
+| `--kbcolor=RRGGBB` | **writes** | modifier for `--kbmode`/`--kbmode-sweep`: writes that colour instead of the saved one, so a differential dump needs no edit of `config.json`. Refused on its own |
+| `--keyidentify=<off>[,…]` | **writes** | one triple to white at a time inside `[0x2C0, 0x43A)`, one Yes/No/Cancel question naming the predicted key, verified restore after each. Report `keyidentify.txt` |
+| `--keypattern` | **writes** | alternating red/blue over the assigned matrix positions, read-modify-write, read-back verified. Saves what it replaced to `keycolor_backup.bin` before writing |
+| `--keypattern=restore` | **writes** | writes that backup back, verified |
+| `--kbmode-only=<csv>` | — | restricts `--kbmode-sweep` to the listed bytes. Refused without the sweep |
+| `--ask=motion\|lit\|perkey` | — | picks the question the `--confirm` dialog asks. Default `motion` (unchanged behaviour). A malformed value is refused, never defaulted — an answer only means something together with the question it answered |
+
+Every one of these is covered by `tools\check_dryrun_flags.ps1` (dry-run exit,
+no dialog, no measurement rows in the report) and its argument handling by
+`tests\test_cli_args.cpp`, including the invalid inputs: a reversed
+`--kbdump-range`, an offset in the middle of a triple, a byte list with one bad
+element, an unknown `--ask` value.

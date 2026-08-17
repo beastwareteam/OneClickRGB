@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <thread>
@@ -62,6 +63,7 @@
 #include "modern_ui.h"
 #include "cli_args.h"        // token-exact flag parsing (unit-tested)
 #include "effect_limits.h"   // brightness/speed clamps + edge mode table
+#include "keyboard_layout.h" // key matrix decoded from the device (unit-tested)
 
 using json = nlohmann::json;
 
@@ -274,6 +276,7 @@ static inline void FillCtrlBackground(HDC hdcMem, HWND hCtrl, const RECT& rc) {
 #define ID_BTN_CHANNEL_SETTINGS 1110
 #define ID_BTN_ASUS_TEST 1111
 #define ID_BTN_HID_RESET 1112
+#define ID_BTN_KEY_LAYOUT 1113
 
 // Removed struct Theme, g_darkTheme, g_lightTheme, and g_theme as part of theme consolidation
 HBRUSH g_hBgBrush = NULL;
@@ -2124,6 +2127,337 @@ static bool RestoreEVisionKeyboardPayload(const uint8_t in[18]) {
     return rr >= 0 && memcmp(back, in, 18) == 0;
 }
 
+// ---------------------------------------------------------------------------
+// Generic config-memory access: read a byte range, write a byte range.
+//
+// Pulled out of the --kbdump branch, where the read loop used to sit inline
+// with a hardcoded 0x000..0x3FF window. That window is the reason the per-key
+// colour table has never been seen whole: going by the matrix size it ends at
+// 0x43A, i.e. 58 bytes past where the dump stopped looking. A dump that cannot
+// be pointed at an address cannot answer a question about that address.
+//
+// Both work in 16-byte chunks, which is what EVisionQuery's size byte carries,
+// and both take an already-open device inside an already-open configure session
+// (0x01 ... 0x02) so a caller can bracket several operations in one session
+// instead of opening one per chunk.
+//
+// ReadEVisionConfig is pure reads (command 0x05) and therefore safe under
+// --dry-run: recording the state a probe is about to disturb is not a write.
+// Returns the number of bytes actually read; a chunk the device refuses stops
+// the read there, so the caller learns the real extent of the memory instead of
+// getting a zero-filled tail that looks like data.
+// ---------------------------------------------------------------------------
+static int ReadEVisionConfig(hid_device* dev, uint16_t lo, uint16_t hi, uint8_t* out,
+                             int* lastResOut = nullptr) {
+    if (lastResOut) *lastResOut = 0;
+    if (!dev || !out || hi < lo) return 0;
+
+    const int total = (int)hi - (int)lo + 1;
+    int done = 0;
+    while (done < total) {
+        const int want = (total - done) > 16 ? 16 : (total - done);
+        uint8_t buf[16] = {0};
+        const int rr = EVisionQuery(dev, 0x05, (uint16_t)(lo + done), nullptr,
+                                    (uint8_t)want, buf);
+        if (lastResOut) *lastResOut = rr;
+        if (rr < 0) break;
+        memcpy(out + done, buf, want);
+        done += want;
+    }
+    return done;
+}
+
+// Writes a byte range and verifies it by reading the same range back. Returns
+// true only when every byte matches - CLAUDE.md rule 1: the caller may report
+// success for exactly what came back, never for what it sent.
+//
+// Callers are responsible for staying inside a range docs/Keyboard_Protocol.md
+// documents (rule 2); this helper deliberately does no range policy of its own,
+// because the one place that would be enforced is the one place a future caller
+// would forget to update. The per-key paths above it each state their bounds.
+static bool WriteEVisionConfigVerified(hid_device* dev, uint16_t lo, const uint8_t* data,
+                                       int len, int* firstBadOffsetOut = nullptr) {
+    if (firstBadOffsetOut) *firstBadOffsetOut = -1;
+    if (!dev || !data || len <= 0) return false;
+
+    int done = 0;
+    while (done < len) {
+        const int want = (len - done) > 16 ? 16 : (len - done);
+        const int wr = EVisionQuery(dev, 0x06, (uint16_t)(lo + done), data + done,
+                                    (uint8_t)want, nullptr);
+        if (wr < 0) {
+            if (firstBadOffsetOut) *firstBadOffsetOut = (int)lo + done;
+            return false;
+        }
+        done += want;
+        Sleep(5);
+    }
+
+    std::vector<uint8_t> back((size_t)len, 0);
+    const int got = ReadEVisionConfig(dev, lo, (uint16_t)(lo + len - 1), back.data());
+    if (got != len) {
+        if (firstBadOffsetOut) *firstBadOffsetOut = (int)lo + got;
+        return false;
+    }
+    for (int i = 0; i < len; i++) {
+        if (back[(size_t)i] != data[i]) {
+            if (firstBadOffsetOut) *firstBadOffsetOut = (int)lo + i;
+            return false;
+        }
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// The key layout, read from the device.
+//
+// The remap table at 0xC0 says which key sits at which matrix position, so the
+// layout is a measurement rather than a picture of a keyboard someone assumed
+// this is. A device that does not answer produces an empty layout, and every
+// caller has to handle that - showing a plausible default grid instead would
+// mean the UI offers keys nobody has confirmed exist.
+//
+// `dev` must be open and inside a configure session (0x01 ... 0x02). Read-only.
+// `colorsCompleteOut` reports whether the colour table could be read over its
+// full assumed extent; it is false whenever the device stops answering early,
+// which is itself the open question about where that table ends.
+// ---------------------------------------------------------------------------
+// `probeColorTable` decides whether the 0x2C0 region is read at all. The probes
+// want the byte count (how far the device answers is part of what they report);
+// the editor does not, because it does not paint those bytes - see
+// kblayout::SeedKeyColors for why.
+static std::vector<kblayout::Key> ReadKeyLayout(hid_device* dev,
+                                                bool* colorsCompleteOut = nullptr,
+                                                int* colorBytesReadOut  = nullptr,
+                                                bool probeColorTable    = true) {
+    if (colorsCompleteOut) *colorsCompleteOut = false;
+    if (colorBytesReadOut) *colorBytesReadOut = 0;
+
+    std::vector<kblayout::Key> keys;
+    if (!dev) return keys;
+
+    const int remapLen = (int)kblayout::REMAP_END - (int)kblayout::REMAP_BASE;
+    std::vector<uint8_t> remap((size_t)remapLen, 0);
+    const int gotRemap = ReadEVisionConfig(dev, kblayout::REMAP_BASE,
+                                           (uint16_t)(kblayout::REMAP_END - 1), remap.data());
+    if (gotRemap <= 0) return keys;
+    keys = kblayout::BuildLayout(remap.data(), (size_t)gotRemap);
+
+    if (probeColorTable) {
+        const int colLen = (int)kblayout::KEYCOLOR_REGION_END - (int)kblayout::KEYCOLOR_BASE;
+        std::vector<uint8_t> cols((size_t)colLen, 0);
+        const int gotCols = ReadEVisionConfig(dev, kblayout::KEYCOLOR_BASE,
+                                              (uint16_t)(kblayout::KEYCOLOR_REGION_END - 1),
+                                              cols.data());
+        if (colorsCompleteOut) *colorsCompleteOut = (gotCols == colLen);
+        if (colorBytesReadOut) *colorBytesReadOut = gotCols;
+    }
+    return keys;
+}
+
+// Finds the key a colour-table offset is predicted to belong to. "Predicted",
+// not "belongs to": the mapping slot -> key is the [MED] inference the
+// --keyidentify probe exists to confirm or break.
+static const kblayout::Key* PredictKeyForColorOffset(const std::vector<kblayout::Key>& keys,
+                                                     uint16_t off) {
+    for (const kblayout::Key& k : keys)
+        if (k.colorOffset == off) return &k;
+    return nullptr;
+}
+
+// Self-contained wrappers: open, one configure session, close. Used by the
+// per-key probes and by the layout dialog, none of which want to hold a session
+// open across a modal dialog or a user's thinking time.
+
+// Reads a range twice and hands back only the prefix both reads agreed on. Two
+// separate guards in one function, and both earn their place:
+//
+//  * Two agreeing reads - the same discipline ReadEVisionEdgePayload and
+//    ReadEVisionKeyboardPayload carry. This value gets written back into flash
+//    at the end of a probe, so a single bad read does not merely spoil a report,
+//    it destroys the state the probe promised to preserve. That is not theory:
+//    a snapshot taken while a second process used the collection came back as
+//    all zeros, "successfully", and was restored.
+//  * A short answer is a result, not a failure. Where the config memory ends is
+//    one of the open questions here, so the caller is told how far the device
+//    answered instead of getting a zero-padded buffer that looks complete.
+//
+// Returns the number of stable bytes; `out` is sized to exactly that.
+static int SnapshotEVisionRange(uint16_t lo, int len, std::vector<uint8_t>& out) {
+    out.clear();
+    if (len <= 0) return 0;
+
+    hid_device* dev = OpenEVisionEdgeDev(nullptr, 0);
+    if (!dev) return 0;
+    EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);
+    Sleep(20);
+
+    std::vector<uint8_t> a((size_t)len, 0), b((size_t)len, 0);
+    const int ga = ReadEVisionConfig(dev, lo, (uint16_t)(lo + len - 1), a.data());
+    Sleep(5);
+    const int gb = ReadEVisionConfig(dev, lo, (uint16_t)(lo + len - 1), b.data());
+
+    EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
+    hid_close(dev);
+
+    const int common = ga < gb ? ga : gb;
+    if (common <= 0) return 0;
+    if (memcmp(a.data(), b.data(), (size_t)common) != 0) {
+        LogDebug("[EVision] config snapshot unstable - two reads differ, refusing to "
+                 "treat it as a restore point");
+        return 0;
+    }
+    a.resize((size_t)common);
+    out.swap(a);
+    return common;
+}
+
+static bool WriteEVisionRangeVerified(uint16_t lo, const uint8_t* data, int len,
+                                      int* firstBadOffsetOut = nullptr) {
+    if (firstBadOffsetOut) *firstBadOffsetOut = -1;
+    if (DryRunSkip(L"EVision Tastenfarben")) return false;
+
+    hid_device* dev = OpenEVisionEdgeDev(nullptr, 0);
+    if (!dev) return false;
+    EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);
+    Sleep(20);
+    const bool ok = WriteEVisionConfigVerified(dev, lo, data, len, firstBadOffsetOut);
+    EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
+    hid_close(dev);
+    return ok;
+}
+
+static std::vector<kblayout::Key> ReadKeyLayoutStandalone(bool* colorsCompleteOut = nullptr,
+                                                          int* colorBytesReadOut = nullptr,
+                                                          bool probeColorTable   = true) {
+    if (colorsCompleteOut) *colorsCompleteOut = false;
+    if (colorBytesReadOut) *colorBytesReadOut = 0;
+
+    hid_device* dev = OpenEVisionEdgeDev(nullptr, 0);
+    if (!dev) return std::vector<kblayout::Key>();
+    EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr);
+    Sleep(20);
+    std::vector<kblayout::Key> keys = ReadKeyLayout(dev, colorsCompleteOut, colorBytesReadOut,
+                                                    probeColorTable);
+    EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
+    hid_close(dev);
+    return keys;
+}
+
+// ---------------------------------------------------------------------------
+// Bridge between the decoded layout and RGBConfig::keyboardZones.
+//
+// keyboardZones has existed as an empty vector with a "filled from KB segment
+// map (later)" note since the generic zone model went in; this is that later.
+// No new persistence format - LightZone already saves everything a key needs,
+// and it is already written and read by RGBConfig::Save/Load.
+//
+// The zone id is the matrix position (kblayout::KeyId), not the key's label.
+// Colour belongs to a place on the board, not to a letter: remapping Y to Z must
+// not swap two keys' colours behind the user's back.
+// ---------------------------------------------------------------------------
+static void KeyLayoutToZones(const std::vector<kblayout::Key>& keys,
+                             std::vector<LightZone>& out) {
+    out.clear();
+    out.reserve(keys.size());
+    for (const kblayout::Key& k : keys) {
+        LightZone z;
+        z.id      = kblayout::KeyId(k.col, k.row);
+        z.name    = k.label;
+        z.x       = k.col;
+        z.y       = k.row;
+        z.hwIndex = (int)k.colorOffset;
+        z.enabled = true;
+        // "verified" stays false: it means Identify confirmed the physical
+        // mapping, and for these keys that is exactly what --keyidentify has to
+        // establish first. Setting it here would be a claim, not a fact.
+        z.color   = { k.r, k.g, k.b };
+        out.push_back(z);
+    }
+}
+
+// Copies saved colours onto a freshly read layout, matched by matrix position.
+// A key the saved config does not know keeps whatever the device reported, so an
+// added or newly assigned key shows its real colour rather than a default.
+static void ZonesToKeyLayout(const std::vector<LightZone>& zones,
+                             std::vector<kblayout::Key>& keys) {
+    for (kblayout::Key& k : keys) {
+        const std::string id = kblayout::KeyId(k.col, k.row);
+        for (const LightZone& z : zones) {
+            if (z.id != id) continue;
+            k.r = z.color.r; k.g = z.color.g; k.b = z.color.b;
+            k.colorKnown = true;
+            break;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The per-key write path.
+//
+// Read-modify-write over the documented colour-table extent, then read back and
+// compare (rules 1 and 3). Only the triples of the keys handed in are changed;
+// every other byte in the range keeps what the snapshot found, including the
+// slots of unassigned matrix positions whose meaning nobody has established.
+//
+// Order matters and is deliberate. If a custom mode byte is configured it is
+// written FIRST, through SetEVisionKeyboard: that write also carries the global
+// colour into the profile block, and if the firmware fills the per-key table
+// from that colour - the leading explanation for why 0x2C0.. was full of the
+// profile's own colour - then doing it afterwards would erase the table we just
+// wrote. With kbCustomMode still at the 0xFF sentinel nothing is written to the
+// profile block at all, and the caller must not claim the keyboard shows
+// anything.
+// ---------------------------------------------------------------------------
+struct KeyApplyResult {
+    bool    deviceFound    = false;
+    int     stableBytes    = 0;    // readable+stable extent of the colour table
+    int     keysPatched    = 0;
+    bool    tableVerified  = false;
+    int     firstBadOffset = -1;
+    bool    modeAttempted  = false;
+    bool    modeVerified   = false;
+    uint8_t modeWanted     = 0;
+    uint8_t modeGot        = 0;
+};
+
+static KeyApplyResult ApplyKeyColorsToDevice(const std::vector<kblayout::Key>& keys) {
+    KeyApplyResult res;
+    if (keys.empty()) return res;
+    if (g_state.dryRun) { DryRunSkip(L"EVision Tastenfarben"); return res; }
+
+    // A configured custom mode goes down the production path, commit flag and
+    // all (docs section 3.2), so this cannot become a second, divergent way of
+    // writing the profile block.
+    if (g_config.kbCustomMode != 0xFF) {
+        res.modeAttempted = true;
+        res.modeWanted    = g_config.kbCustomMode;
+        SetEVisionKeyboard(g_state.red, g_state.green, g_state.blue,
+                           g_config.kbCustomMode, g_state.brightness, g_state.speed);
+        res.modeVerified = g_lastKbVerify.valid && g_lastKbVerify.got[0] == g_config.kbCustomMode;
+        res.modeGot      = g_lastKbVerify.valid ? g_lastKbVerify.got[0] : (uint8_t)0;
+    }
+
+    const int tableLen = (int)kblayout::KEYCOLOR_REGION_END - (int)kblayout::KEYCOLOR_BASE;
+    std::vector<uint8_t> table;
+    res.stableBytes = SnapshotEVisionRange(kblayout::KEYCOLOR_BASE, tableLen, table);
+    if (res.stableBytes <= 0) return res;   // no restore point -> no write
+    res.deviceFound = true;
+
+    for (const kblayout::Key& k : keys) {
+        const int idx = (int)k.colorOffset - (int)kblayout::KEYCOLOR_BASE;
+        if (idx < 0 || idx + 2 >= (int)table.size()) continue;   // past the readable end
+        table[(size_t)idx + 0] = k.r;
+        table[(size_t)idx + 1] = k.g;
+        table[(size_t)idx + 2] = k.b;
+        res.keysPatched++;
+    }
+
+    res.tableVerified = WriteEVisionRangeVerified(kblayout::KEYCOLOR_BASE, table.data(),
+                                                  (int)table.size(), &res.firstBadOffset);
+    return res;
+}
+
 // brightness 0-4, speed 0-5 - both come from the Effects group sliders. They
 // used to be hardcoded here (brightness 4, speed 2) and were not even function
 // parameters, which is why the Tempo slider had no effect on the edge strips
@@ -2260,7 +2594,7 @@ bool SetEVisionEdge(uint8_t r, uint8_t g, uint8_t b, uint8_t mode,
     wchar_t wbuf[192];
     if (edgeRead < 0) {
         swprintf(wbuf, 192,
-                 L"[EVision] Edge: P%d+0x1E mode=0x%02X geschrieben, Rücklesen fehlgeschlagen (%d)",
+                 L"[EVision] Edge: P%d+0x1E mode=0x%02X geschrieben, R\u00FCcklesen fehlgeschlagen (%d)",
                  (int)profile, mode, edgeRead);
     } else if (edgeVerified) {
         swprintf(wbuf, 192,
@@ -3746,6 +4080,716 @@ void ShowAsusTestDialog(HWND hWnd) {
 }
 
 //=============================================================================
+// PER-KEY LIGHTING - visual layout editor
+//
+// A custom-drawn grid instead of ~120 button controls: one child window paints
+// every key from the model in WM_PAINT and resolves clicks with a hit test.
+// 120 HWNDs would each need their own subclass, their own colour, their own
+// focus handling and would repaint one at a time; the grid is one surface.
+//
+// What the grid shows is the key MATRIX as the device reports it (column,
+// row) - not the physical geometry of the keycaps. That is deliberate: the
+// matrix is what the remap table at 0xC0 actually contains, and the physical
+// shape of a GK650 keycap is not in the config memory anywhere. Drawing a
+// pretty keyboard picture would mean inventing the part that is not measured,
+// and the write path addresses matrix slots regardless.
+//
+// The honesty rule this dialog is built around: it may state that N triples
+// were written and read back identically, because it verifies that. It may NOT
+// state that the keyboard now shows those colours - which mode byte makes the
+// firmware render the table is unmeasured (docs section 5 item 5), and the
+// status line says so instead of implying success.
+//=============================================================================
+
+#define ID_KEY_GRID       6400
+#define ID_KEY_PICK       6401
+#define ID_KEY_APPLY      6402
+#define ID_KEY_SELECT_ALL 6403
+#define ID_KEY_SELECT_NONE 6404
+#define ID_KEY_RELOAD     6405
+#define ID_KEY_CLOSE      6406
+#define ID_KEY_MODE       6407
+#define ID_KEY_STATUS     6408
+#define ID_KEY_PREVIEW    6409
+
+// One key unit in pixels, plus the inset that turns touching unit rectangles
+// into separate-looking keycaps.
+static const int KEYUNIT_PX  = 40;
+static const int KEYCAP_GAP  = 3;
+static const int KEYGRID_PAD = 8;
+
+struct KeyLayoutDialog {
+    HWND hDlg      = nullptr;
+    HWND hGrid     = nullptr;
+    HWND hStatus   = nullptr;
+    HWND hPreview  = nullptr;
+    HWND hModeCombo = nullptr;
+
+    std::vector<kblayout::Key>    keys;
+    std::vector<kblayout::KeyBox> boxes;    // parallel to keys, in key units
+    std::vector<char>             selected; // parallel to keys; char, not bool,
+                                            // so &selected[i] stays addressable
+
+    // Rubber-band state
+    bool  dragging   = false;
+    bool  additive   = false;   // Ctrl was held when the drag started
+    POINT dragStart  = {0, 0};
+    POINT dragNow    = {0, 0};
+
+    // Colour the picker last produced; applied to the selection.
+    uint8_t r = 255, g = 255, b = 255;
+
+    bool    layoutFromDevice  = false;
+    bool    profileColorRead  = false;   // the live colour could be read
+    uint8_t profileMode       = 0;       // what the profile block's mode byte holds
+
+    HFONT font = nullptr;   // owned; released in WM_DESTROY
+};
+
+static KeyLayoutDialog* g_keyDlg = nullptr;
+
+// The five bytes that are candidates for "renders the per-key table": every
+// mode byte the 2026-08-17 keyboard sweep stored without animating anything.
+// A mode that animates cannot be the one that shows a static per-key pattern,
+// so these are the ones worth asking about - and until --ask=perkey has named
+// one, the list is a list of candidates and nothing more.
+static const uint8_t KEY_CUSTOM_MODE_CANDIDATES[] = { 0x00, 0x04, 0x09, 0x13, 0x14 };
+static const int KEY_CUSTOM_MODE_COUNT =
+    (int)(sizeof(KEY_CUSTOM_MODE_CANDIDATES) / sizeof(KEY_CUSTOM_MODE_CANDIDATES[0]));
+
+// Unit box -> pixel keycap. The gap is taken out of the box rather than added
+// between boxes, so a 2-unit key stays exactly twice as wide as a 1-unit one
+// and the rows keep lining up.
+static RECT KeyCapRect(const kblayout::KeyBox& b) {
+    RECT r;
+    r.left   = KEYGRID_PAD + (int)(b.x * KEYUNIT_PX) + KEYCAP_GAP;
+    r.top    = KEYGRID_PAD + (int)(b.y * KEYUNIT_PX) + KEYCAP_GAP;
+    r.right  = KEYGRID_PAD + (int)((b.x + b.w) * KEYUNIT_PX) - KEYCAP_GAP;
+    r.bottom = KEYGRID_PAD + (int)((b.y + b.h) * KEYUNIT_PX) - KEYCAP_GAP;
+    return r;
+}
+
+static int KeyGridWidth()  { return KEYGRID_PAD * 2 + (int)(kblayout::BOARD_WIDTH  * KEYUNIT_PX); }
+static int KeyGridHeight() { return KEYGRID_PAD * 2 + (int)(kblayout::BOARD_HEIGHT * KEYUNIT_PX); }
+
+static int KeyHitTest(int x, int y) {
+    if (!g_keyDlg) return -1;
+    for (size_t i = 0; i < g_keyDlg->boxes.size(); i++) {
+        const RECT c = KeyCapRect(g_keyDlg->boxes[i]);
+        if (x >= c.left && x < c.right && y >= c.top && y < c.bottom) return (int)i;
+    }
+    return -1;
+}
+
+static int KeySelectionCount() {
+    if (!g_keyDlg) return 0;
+    int n = 0;
+    for (char s : g_keyDlg->selected) if (s) n++;
+    return n;
+}
+
+static void KeySetStatus(const wchar_t* text) {
+    if (g_keyDlg && g_keyDlg->hStatus) SetWindowTextW(g_keyDlg->hStatus, text);
+}
+
+// Reads the layout from the device, seeds every key with the colour the
+// keyboard is actually showing, then overlays the colours the user last saved.
+//
+// The order is the whole point:
+//   1. matrix + labels from the device - hardware facts, never from a stale
+//      config file;
+//   2. the profile's live colour (profile_base+0x06..0x08, section 3 [HIGH]) as
+//      the starting point, because that IS what the board displays right now;
+//   3. the user's own per-key choices on top, because those are settings and
+//      have to survive a restart.
+static void KeyReloadLayout() {
+    if (!g_keyDlg) return;
+
+    std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
+    hid_init();
+    // The editor does not paint the 0x2C0 bytes, so it does not read them.
+    std::vector<kblayout::Key> keys = ReadKeyLayoutStandalone(nullptr, nullptr, false);
+
+    // The 18-byte keyboard block: [mode, bright, speed, dir, rand, R, G, B, ...]
+    // starting at profile_base+0x01, so R/G/B are indices 5..7.
+    uint8_t  kbBlock[18] = {0};
+    uint8_t  prof = 0;
+    uint16_t off  = 0;
+    const bool haveProfile = ReadEVisionKeyboardPayload(kbBlock, &prof, &off);
+    hid_exit();
+
+    g_keyDlg->layoutFromDevice = !keys.empty();
+    g_keyDlg->profileColorRead = haveProfile;
+    g_keyDlg->profileMode      = haveProfile ? kbBlock[0] : (uint8_t)0;
+
+    if (keys.empty()) {
+        // No fallback board. A layout nobody read is not a layout, and offering
+        // 126 clickable caps for a keyboard that did not answer would invite
+        // writes to slots whose existence is unconfirmed.
+        g_keyDlg->keys.clear();
+        g_keyDlg->boxes.clear();
+        g_keyDlg->selected.clear();
+        KeySetStatus(L"Tastatur nicht erreichbar - kein Layout gelesen. "
+                     L"Es wird nichts angezeigt und nichts geschrieben.");
+    } else {
+        // Live colour first, saved per-key choices second.
+        if (haveProfile) {
+            kblayout::SeedKeyColors(keys, kbBlock[5], kbBlock[6], kbBlock[7]);
+            // Keep the picker on the same colour, so the first click does not
+            // jump the board to something the user never chose.
+            g_keyDlg->r = kbBlock[5];
+            g_keyDlg->g = kbBlock[6];
+            g_keyDlg->b = kbBlock[7];
+            if (g_keyDlg->hPreview) InvalidateRect(g_keyDlg->hPreview, NULL, TRUE);
+        }
+        ZonesToKeyLayout(g_config.keyboardZones, keys);
+
+        g_keyDlg->keys  = keys;
+        g_keyDlg->boxes = kblayout::ComputeKeyBoxes(keys);
+        g_keyDlg->selected.assign(keys.size(), 0);
+
+        wchar_t msg[420];
+        if (!haveProfile) {
+            swprintf(msg, 420,
+                     L"%d Tasten vom Ger\u00E4t gelesen. Die aktuelle Profilfarbe war nicht "
+                     L"lesbar - die Tasten zeigen deshalb keine Farbe an.",
+                     (int)keys.size());
+        } else if (kbBlock[0] == (uint8_t)KB_MODE_STATIC) {
+            swprintf(msg, 420,
+                     L"%d Tasten. Aktuelle Profilfarbe %02X%02X%02X (P%d, Modus 0x%02X = "
+                     L"statisch) - das zeigt die Tastatur gerade. Taste anklicken oder "
+                     L"doppelklicken zum \u00C4ndern.",
+                     (int)keys.size(), kbBlock[5], kbBlock[6], kbBlock[7],
+                     (int)prof, (unsigned)kbBlock[0]);
+        } else {
+            // Not static: the board is running an effect, so what it shows is
+            // not this one colour. Saying "das zeigt die Tastatur gerade" here
+            // would be wrong, so it does not say it.
+            swprintf(msg, 420,
+                     L"%d Tasten. Profilfarbe %02X%02X%02X (P%d), aber Modus 0x%02X ist nicht "
+                     L"statisch - die Tastatur l\u00E4uft gerade auf einem Effekt, die "
+                     L"gezeigten Farben sind die Grundfarbe des Profils.",
+                     (int)keys.size(), kbBlock[5], kbBlock[6], kbBlock[7],
+                     (int)prof, (unsigned)kbBlock[0]);
+        }
+        KeySetStatus(msg);
+    }
+    if (g_keyDlg->hGrid) InvalidateRect(g_keyDlg->hGrid, NULL, TRUE);
+}
+
+static void KeyPaintGrid(HWND hWnd) {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hWnd, &ps);
+    RECT client;
+    GetClientRect(hWnd, &client);
+
+    // Double buffered: 126 cells drawn straight onto the DC flicker visibly on
+    // every selection change.
+    HDC     mem = CreateCompatibleDC(hdc);
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, client.right, client.bottom);
+    HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
+
+    HBRUSH bg = CreateSolidBrush(g_currentTheme->groupBodyBg);
+    FillRect(mem, &client, bg);
+    DeleteObject(bg);
+
+    HFONT font = CreateFontW(-11, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HFONT oldFont = (HFONT)SelectObject(mem, font);
+    SetBkMode(mem, TRANSPARENT);
+
+    if (g_keyDlg) {
+        for (size_t i = 0; i < g_keyDlg->keys.size() && i < g_keyDlg->boxes.size(); i++) {
+            const kblayout::Key& k = g_keyDlg->keys[i];
+            RECT c = KeyCapRect(g_keyDlg->boxes[i]);
+
+            // A key whose colour was never read is drawn as "unknown", not as
+            // black: black is a colour someone might have chosen, and claiming
+            // it for a byte nobody read would be the same lie as a status line
+            // reporting an unverified write.
+            const bool known = k.colorKnown;
+            COLORREF fill = known ? RGB(k.r, k.g, k.b) : g_currentTheme->bgControl;
+
+            const bool sel = (i < g_keyDlg->selected.size() && g_keyDlg->selected[i]);
+
+            // Rounded caps, so the board reads as keys rather than as a table.
+            HBRUSH capBrush = CreateSolidBrush(fill);
+            HPEN   pen = CreatePen(PS_SOLID, sel ? 3 : 1,
+                                   sel ? g_currentTheme->borderFocus : g_currentTheme->border);
+            HGDIOBJ oldBr  = SelectObject(mem, capBrush);
+            HPEN    oldPen = (HPEN)SelectObject(mem, pen);
+            RoundRect(mem, c.left, c.top, c.right, c.bottom, 6, 6);
+            SelectObject(mem, oldBr);
+            SelectObject(mem, oldPen);
+            DeleteObject(capBrush);
+            DeleteObject(pen);
+
+            // Label in whichever of black/white reads on this fill.
+            COLORREF text = g_currentTheme->textSecondary;
+            if (known) {
+                const int lum = (k.r * 299 + k.g * 587 + k.b * 114) / 1000;
+                text = (lum > 140) ? RGB(0, 0, 0) : RGB(255, 255, 255);
+            }
+            SetTextColor(mem, text);
+
+            wchar_t label[32] = {0};
+            MultiByteToWideChar(CP_ACP, 0, kblayout::ShortLabel(k.label), -1, label, 32);
+            RECT t = c;
+            t.left += 2; t.right -= 2;
+            DrawTextW(mem, label, -1, &t,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        }
+
+        if (g_keyDlg->dragging) {
+            RECT band;
+            band.left   = std::min(g_keyDlg->dragStart.x, g_keyDlg->dragNow.x);
+            band.right  = std::max(g_keyDlg->dragStart.x, g_keyDlg->dragNow.x);
+            band.top    = std::min(g_keyDlg->dragStart.y, g_keyDlg->dragNow.y);
+            band.bottom = std::max(g_keyDlg->dragStart.y, g_keyDlg->dragNow.y);
+            HPEN pen = CreatePen(PS_DOT, 1, g_currentTheme->borderFocus);
+            HPEN oldPen = (HPEN)SelectObject(mem, pen);
+            HGDIOBJ oldBr = SelectObject(mem, GetStockObject(NULL_BRUSH));
+            Rectangle(mem, band.left, band.top, band.right, band.bottom);
+            SelectObject(mem, oldBr);
+            SelectObject(mem, oldPen);
+            DeleteObject(pen);
+        }
+    }
+
+    SelectObject(mem, oldFont);
+    DeleteObject(font);
+    BitBlt(hdc, 0, 0, client.right, client.bottom, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    EndPaint(hWnd, &ps);
+}
+
+static void KeyUpdateSelectionStatus() {
+    if (!g_keyDlg) return;
+    const int n = KeySelectionCount();
+    wchar_t msg[256];
+    if (n == 0) {
+        swprintf(msg, 256, L"Keine Taste ausgew\u00E4hlt. Klicken, Strg+Klick f\u00FCr mehrere, "
+                           L"Ziehen f\u00FCr ein Rechteck.");
+    } else if (n == 1) {
+        for (size_t i = 0; i < g_keyDlg->selected.size(); i++) {
+            if (!g_keyDlg->selected[i]) continue;
+            const kblayout::Key& k = g_keyDlg->keys[i];
+            wchar_t label[32] = {0};
+            MultiByteToWideChar(CP_ACP, 0, k.label.c_str(), -1, label, 32);
+            swprintf(msg, 256, L"%s ausgew\u00E4hlt - Matrix (%d,%d), Farb-Offset 0x%04X",
+                     label, k.col, k.row, (unsigned)k.colorOffset);
+            break;
+        }
+    } else {
+        swprintf(msg, 256, L"%d Tasten ausgew\u00E4hlt.", n);
+    }
+    KeySetStatus(msg);
+}
+
+LRESULT CALLBACK KeyGridProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;   // WM_PAINT fills everything; erasing first only flickers
+
+    case WM_PAINT:
+        KeyPaintGrid(hWnd);
+        return 0;
+
+    case WM_LBUTTONDOWN: {
+        if (!g_keyDlg) break;
+        const int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
+        const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const int hit = KeyHitTest(x, y);
+
+        if (hit >= 0) {
+            if (ctrl) {
+                g_keyDlg->selected[(size_t)hit] = g_keyDlg->selected[(size_t)hit] ? 0 : 1;
+            } else {
+                std::fill(g_keyDlg->selected.begin(), g_keyDlg->selected.end(), (char)0);
+                g_keyDlg->selected[(size_t)hit] = 1;
+            }
+        } else if (!ctrl) {
+            std::fill(g_keyDlg->selected.begin(), g_keyDlg->selected.end(), (char)0);
+        }
+
+        // A drag always starts, even on a hit: press-and-drag from a key is the
+        // natural way to extend a selection, and a click that never moves is
+        // just a click.
+        g_keyDlg->dragging  = true;
+        g_keyDlg->additive  = ctrl;
+        g_keyDlg->dragStart.x = x; g_keyDlg->dragStart.y = y;
+        g_keyDlg->dragNow     = g_keyDlg->dragStart;
+        SetCapture(hWnd);
+        InvalidateRect(hWnd, NULL, FALSE);
+        KeyUpdateSelectionStatus();
+        return 0;
+    }
+
+    case WM_LBUTTONDBLCLK: {
+        // The shortest path to "colour this one key": double-click it. The
+        // select-then-pick flow still exists for multiple keys, but making the
+        // single-key case take two clicks in two different places is the kind of
+        // friction that makes a working feature feel like it is not there.
+        if (!g_keyDlg) break;
+        const int hit = KeyHitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        if (hit < 0) break;
+        g_keyDlg->dragging = false;
+        ReleaseCapture();
+        std::fill(g_keyDlg->selected.begin(), g_keyDlg->selected.end(), (char)0);
+        g_keyDlg->selected[(size_t)hit] = 1;
+        InvalidateRect(hWnd, NULL, FALSE);
+        PostMessageW(GetParent(hWnd), WM_COMMAND, MAKEWPARAM(ID_KEY_PICK, BN_CLICKED), 0);
+        return 0;
+    }
+
+    case WM_MOUSEMOVE:
+        if (g_keyDlg && g_keyDlg->dragging) {
+            g_keyDlg->dragNow.x = GET_X_LPARAM(lParam);
+            g_keyDlg->dragNow.y = GET_Y_LPARAM(lParam);
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+        return 0;
+
+    case WM_LBUTTONUP: {
+        if (!g_keyDlg || !g_keyDlg->dragging) break;
+        ReleaseCapture();
+        g_keyDlg->dragging = false;
+
+        RECT band;
+        band.left   = std::min(g_keyDlg->dragStart.x, g_keyDlg->dragNow.x);
+        band.right  = std::max(g_keyDlg->dragStart.x, g_keyDlg->dragNow.x);
+        band.top    = std::min(g_keyDlg->dragStart.y, g_keyDlg->dragNow.y);
+        band.bottom = std::max(g_keyDlg->dragStart.y, g_keyDlg->dragNow.y);
+
+        // Anything smaller than a few pixels was a click, and the click was
+        // already handled in WM_LBUTTONDOWN.
+        if ((band.right - band.left) > 3 || (band.bottom - band.top) > 3) {
+            if (!g_keyDlg->additive)
+                std::fill(g_keyDlg->selected.begin(), g_keyDlg->selected.end(), (char)0);
+            for (size_t i = 0; i < g_keyDlg->boxes.size(); i++) {
+                RECT c = KeyCapRect(g_keyDlg->boxes[i]);
+                RECT tmp;
+                if (IntersectRect(&tmp, &c, &band)) g_keyDlg->selected[i] = 1;
+            }
+        }
+        InvalidateRect(hWnd, NULL, FALSE);
+        KeyUpdateSelectionStatus();
+        return 0;
+    }
+
+    case WM_GETDLGCODE:
+        return DLGC_WANTARROWS | DLGC_WANTCHARS;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+// Applies the picked colour to every selected key in the MODEL only. Nothing
+// reaches the device until "Uebernehmen" - so a user can build a whole scheme
+// and pay for one verified write instead of one per click.
+static void KeyApplyColorToSelection(uint8_t r, uint8_t g, uint8_t b) {
+    if (!g_keyDlg) return;
+    int n = 0;
+    for (size_t i = 0; i < g_keyDlg->keys.size(); i++) {
+        if (!g_keyDlg->selected[i]) continue;
+        g_keyDlg->keys[i].r = r;
+        g_keyDlg->keys[i].g = g;
+        g_keyDlg->keys[i].b = b;
+        g_keyDlg->keys[i].colorKnown = true;   // now known: the user chose it
+        n++;
+    }
+    if (g_keyDlg->hGrid) InvalidateRect(g_keyDlg->hGrid, NULL, FALSE);
+
+    wchar_t msg[192];
+    if (n == 0) swprintf(msg, 192, L"Keine Auswahl - die Farbe wurde nirgends gesetzt.");
+    else        swprintf(msg, 192, L"Farbe %02X%02X%02X auf %d Taste%s gesetzt. "
+                                   L"Noch nicht geschrieben - daf\u00FCr \"\u00DCbernehmen\".",
+                         r, g, b, n, n == 1 ? L"" : L"n");
+    KeySetStatus(msg);
+}
+
+INT_PTR CALLBACK KeyLayoutDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_INITDIALOG: {
+        g_keyDlg = new KeyLayoutDialog();
+        g_keyDlg->hDlg = hWnd;
+        g_keyDlg->r = g_state.red; g_keyDlg->g = g_state.green; g_keyDlg->b = g_state.blue;
+
+        SetWindowTextW(hWnd, L"Tastenbeleuchtung - Layout aus dem Ger\u00E4t");
+
+        const int gridW = KeyGridWidth();
+        const int gridH = KeyGridHeight();
+        const int clientW = gridW + 24;
+        const int clientH = gridH + 190;
+
+        RECT want = {0, 0, clientW, clientH};
+        AdjustWindowRect(&want, (DWORD)GetWindowLongPtrW(hWnd, GWL_STYLE), FALSE);
+        const int wndW = want.right - want.left, wndH = want.bottom - want.top;
+        const int sx = (GetSystemMetrics(SM_CXSCREEN) - wndW) / 2;
+        const int sy = (GetSystemMetrics(SM_CYSCREEN) - wndH) / 2;
+        SetWindowPos(hWnd, NULL, sx > 0 ? sx : 0, sy > 0 ? sy : 0, wndW, wndH, SWP_NOZORDER);
+
+        HFONT font = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        g_keyDlg->font = font;
+
+        int y = 8;
+        HWND hInfo = CreateWindowW(L"STATIC",
+            L"Klick w\u00E4hlt eine Taste, Doppelklick \u00F6ffnet gleich die Farbwahl. "
+            L"Strg+Klick w\u00E4hlt mehrere, Ziehen w\u00E4hlt ein Rechteck. "
+            L"Welche Tasten es gibt, kommt aus dem Ger\u00E4t.",
+            WS_CHILD | WS_VISIBLE, 12, y, clientW - 24, 16, hWnd, NULL, NULL, NULL);
+        SendMessageW(hInfo, WM_SETFONT, (WPARAM)font, TRUE);
+        y += 22;
+
+        g_keyDlg->hGrid = CreateWindowExW(0, L"OCRGBKeyGrid", L"",
+            WS_CHILD | WS_VISIBLE, 12, y, gridW, gridH,
+            hWnd, (HMENU)(INT_PTR)ID_KEY_GRID, GetModuleHandleW(NULL), NULL);
+        y += gridH + 10;
+
+        // Colour row
+        g_keyDlg->hPreview = CreateWindowW(L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW, 12, y, 40, 24,
+            hWnd, (HMENU)(INT_PTR)ID_KEY_PREVIEW, NULL, NULL);
+        HWND hPick = CreateWindowW(L"BUTTON", L"Farbe w\u00E4hlen...",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 60, y, 120, 24,
+            hWnd, (HMENU)(INT_PTR)ID_KEY_PICK, NULL, NULL);
+        HWND hAll = CreateWindowW(L"BUTTON", L"Alle ausw\u00E4hlen",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 188, y, 120, 24,
+            hWnd, (HMENU)(INT_PTR)ID_KEY_SELECT_ALL, NULL, NULL);
+        HWND hNone = CreateWindowW(L"BUTTON", L"Auswahl aufheben",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 316, y, 130, 24,
+            hWnd, (HMENU)(INT_PTR)ID_KEY_SELECT_NONE, NULL, NULL);
+        HWND hReload = CreateWindowW(L"BUTTON", L"Neu vom Ger\u00E4t lesen",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 454, y, 150, 24,
+            hWnd, (HMENU)(INT_PTR)ID_KEY_RELOAD, NULL, NULL);
+
+        HWND hModeLbl = CreateWindowW(L"STATIC", L"Custom-Modus:",
+            WS_CHILD | WS_VISIBLE, 616, y + 4, 90, 18, hWnd, NULL, NULL, NULL);
+        g_keyDlg->hModeCombo = CreateWindowW(L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+            710, y, 170, 200, hWnd, (HMENU)(INT_PTR)ID_KEY_MODE, NULL, NULL);
+        SendMessageW(g_keyDlg->hModeCombo, CB_ADDSTRING, 0,
+                     (LPARAM)L"nicht gesetzt (ungemessen)");
+        for (int i = 0; i < KEY_CUSTOM_MODE_COUNT; i++) {
+            wchar_t item[48];
+            swprintf(item, 48, L"0x%02X (Kandidat)", (unsigned)KEY_CUSTOM_MODE_CANDIDATES[i]);
+            SendMessageW(g_keyDlg->hModeCombo, CB_ADDSTRING, 0, (LPARAM)item);
+        }
+        int modeSel = 0;
+        for (int i = 0; i < KEY_CUSTOM_MODE_COUNT; i++)
+            if (KEY_CUSTOM_MODE_CANDIDATES[i] == g_config.kbCustomMode) modeSel = i + 1;
+        SendMessage(g_keyDlg->hModeCombo, CB_SETCURSEL, modeSel, 0);
+        y += 32;
+
+        HWND hApply = CreateWindowW(L"BUTTON", L"\u00DCbernehmen (schreibt die Tabelle)",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 12, y, 240, 26,
+            hWnd, (HMENU)(INT_PTR)ID_KEY_APPLY, NULL, NULL);
+        HWND hClose = CreateWindowW(L"BUTTON", L"Schlie\u00DFen",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 260, y, 100, 26,
+            hWnd, (HMENU)(INT_PTR)ID_KEY_CLOSE, NULL, NULL);
+        y += 34;
+
+        g_keyDlg->hStatus = CreateWindowW(L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE | SS_LEFT, 12, y, clientW - 24, 48,
+            hWnd, (HMENU)(INT_PTR)ID_KEY_STATUS, NULL, NULL);
+
+        HWND fontTargets[] = { hInfo, hPick, hAll, hNone, hReload, hModeLbl,
+                               g_keyDlg->hModeCombo, hApply, hClose, g_keyDlg->hStatus };
+        for (HWND h : fontTargets)
+            if (h) SendMessageW(h, WM_SETFONT, (WPARAM)font, TRUE);
+
+        KeyReloadLayout();
+        return TRUE;
+    }
+
+    case WM_CTLCOLORDLG:
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, g_currentTheme->textPrimary);
+        SetBkColor(hdc, g_currentTheme->groupBodyBg);
+        // Kept alive for the lifetime of the process and rebuilt only when the
+        // theme colour actually changes. Returning a brush and deleting it on
+        // the next message hands Windows a handle it is still painting with.
+        static HBRUSH   brush     = NULL;
+        static COLORREF brushColor = 0;
+        if (!brush || brushColor != g_currentTheme->groupBodyBg) {
+            if (brush) DeleteObject(brush);
+            brushColor = g_currentTheme->groupBodyBg;
+            brush = CreateSolidBrush(brushColor);
+        }
+        return (INT_PTR)brush;
+    }
+
+    case WM_DRAWITEM: {
+        LPDRAWITEMSTRUCT dis = (LPDRAWITEMSTRUCT)lParam;
+        if (dis->CtlID == ID_KEY_PREVIEW && g_keyDlg) {
+            HBRUSH br = CreateSolidBrush(RGB(g_keyDlg->r, g_keyDlg->g, g_keyDlg->b));
+            FillRect(dis->hDC, &dis->rcItem, br);
+            DeleteObject(br);
+            FrameRect(dis->hDC, &dis->rcItem, (HBRUSH)GetStockObject(BLACK_BRUSH));
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_COMMAND: {
+        const int id = LOWORD(wParam);
+        // IDCANCEL can arrive before WM_INITDIALOG has built the state (Esc on a
+        // dialog that is still coming up), so every branch below needs it to
+        // exist first.
+        if (!g_keyDlg) { if (id == IDCANCEL) EndDialog(hWnd, IDCANCEL); break; }
+        if (id == ID_KEY_PICK) {
+            CHOOSECOLORW cc = {0};
+            static COLORREF custom[16] = {0};
+            cc.lStructSize = sizeof(cc);
+            cc.hwndOwner = hWnd;
+            cc.lpCustColors = custom;
+            cc.rgbResult = RGB(g_keyDlg->r, g_keyDlg->g, g_keyDlg->b);
+            cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+            if (ChooseColorW(&cc)) {
+                g_keyDlg->r = GetRValue(cc.rgbResult);
+                g_keyDlg->g = GetGValue(cc.rgbResult);
+                g_keyDlg->b = GetBValue(cc.rgbResult);
+                InvalidateRect(g_keyDlg->hPreview, NULL, TRUE);
+                KeyApplyColorToSelection(g_keyDlg->r, g_keyDlg->g, g_keyDlg->b);
+            }
+        }
+        else if (id == ID_KEY_SELECT_ALL) {
+            std::fill(g_keyDlg->selected.begin(), g_keyDlg->selected.end(), (char)1);
+            InvalidateRect(g_keyDlg->hGrid, NULL, FALSE);
+            KeyUpdateSelectionStatus();
+        }
+        else if (id == ID_KEY_SELECT_NONE) {
+            std::fill(g_keyDlg->selected.begin(), g_keyDlg->selected.end(), (char)0);
+            InvalidateRect(g_keyDlg->hGrid, NULL, FALSE);
+            KeyUpdateSelectionStatus();
+        }
+        else if (id == ID_KEY_RELOAD) {
+            KeyReloadLayout();
+        }
+        else if (id == ID_KEY_MODE && HIWORD(wParam) == CBN_SELCHANGE) {
+            const int sel = (int)SendMessage(g_keyDlg->hModeCombo, CB_GETCURSEL, 0, 0);
+            g_config.kbCustomMode = (sel > 0 && sel <= KEY_CUSTOM_MODE_COUNT)
+                                  ? KEY_CUSTOM_MODE_CANDIDATES[sel - 1]
+                                  : (uint8_t)0xFF;
+            SaveSettings();
+            if (g_config.kbCustomMode == 0xFF) {
+                KeySetStatus(L"Kein Custom-Modus gesetzt: \u00DCbernehmen schreibt nur die "
+                             L"Farbtabelle und fasst den Profilblock nicht an.");
+            } else {
+                wchar_t msg[256];
+                swprintf(msg, 256,
+                         L"Custom-Modus 0x%02X - ungemessener Kandidat. \u00DCbernehmen setzt "
+                         L"ihn vor der Tabelle und meldet nur, was zur\u00FCckgelesen wurde.",
+                         (unsigned)g_config.kbCustomMode);
+                KeySetStatus(msg);
+            }
+        }
+        else if (id == ID_KEY_APPLY) {
+            if (g_keyDlg->keys.empty()) {
+                KeySetStatus(L"Kein Layout geladen - es wird nichts geschrieben.");
+                break;
+            }
+            KeySetStatus(L"Schreibe Farbtabelle...");
+            UpdateWindow(g_keyDlg->hStatus);
+
+            KeyApplyResult res;
+            {
+                std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
+                hid_init();
+                res = ApplyKeyColorsToDevice(g_keyDlg->keys);
+                hid_exit();
+            }
+
+            // The model is persisted regardless of what the hardware did: the
+            // user's colour choices are settings, and losing them because a
+            // write failed would punish them for a device problem.
+            KeyLayoutToZones(g_keyDlg->keys, g_config.keyboardZones);
+            SaveSettings();
+
+            // Every clause below is something that was read back. What the
+            // keyboard SHOWS is deliberately not claimed - no measurement names
+            // the mode byte that renders this table yet (docs section 5 item 5).
+            wchar_t msg[640];
+            if (g_state.dryRun) {
+                swprintf(msg, 640, L"[DRY] Kein Write gesendet. Auswahl gespeichert.");
+            } else if (!res.deviceFound) {
+                swprintf(msg, 640,
+                         L"Kein stabiler Snapshot der Farbtabelle - es wurde NICHTS "
+                         L"geschrieben. Ohne Wiederherstellungspunkt wird hier nicht "
+                         L"geschrieben.");
+            } else if (res.tableVerified) {
+                swprintf(msg, 640,
+                         L"%d Tasten-Tripel geschrieben und zur\u00FCckgelesen: identisch "
+                         L"(0x%04X, %d Bytes).%s%s\n"
+                         L"Verifiziert ist damit der Speicher - ob die Tastatur diese Farben "
+                         L"ANZEIGT, ist ungemessen.",
+                         res.keysPatched, (unsigned)kblayout::KEYCOLOR_BASE, res.stableBytes,
+                         res.modeAttempted
+                            ? (res.modeVerified ? L"  Custom-Modus verifiziert."
+                                                : L"  Custom-Modus NICHT best\u00E4tigt.")
+                            : L"  Kein Custom-Modus gesetzt.",
+                         res.stableBytes < (int)kblayout::KEYCOLOR_REGION_END - (int)kblayout::KEYCOLOR_BASE
+                            ? L"  Die Tabelle ist k\u00FCrzer als angenommen." : L"");
+            } else {
+                swprintf(msg, 640,
+                         L"Schreiben NICHT best\u00E4tigt: R\u00FCcklesung weicht ab "
+                         L"(erste Abweichung 0x%04X). Es wird kein Erfolg gemeldet.",
+                         (unsigned)(res.firstBadOffset >= 0 ? res.firstBadOffset : 0));
+            }
+            KeySetStatus(msg);
+
+            // Show what the device holds now rather than what we sent.
+            if (!g_state.dryRun && res.deviceFound) KeyReloadLayout();
+        }
+        else if (id == ID_KEY_CLOSE || id == IDCANCEL) {
+            EndDialog(hWnd, IDOK);
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+        EndDialog(hWnd, IDCANCEL);
+        break;
+
+    case WM_DESTROY:
+        if (g_keyDlg) {
+            if (g_keyDlg->font) DeleteObject(g_keyDlg->font);
+            delete g_keyDlg;
+            g_keyDlg = nullptr;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+void ShowKeyLayoutDialog(HWND hWnd) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {sizeof(WNDCLASSEXW)};
+        wc.style         = CS_DBLCLKS;   // without this the grid never sees a double click
+        wc.lpfnWndProc   = KeyGridProc;
+        wc.hInstance     = GetModuleHandleW(NULL);
+        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+        wc.lpszClassName = L"OCRGBKeyGrid";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    BYTE dlgTemplate[512] = {0};
+    DLGTEMPLATE* pDlg = (DLGTEMPLATE*)dlgTemplate;
+    // Size is set for real in WM_INITDIALOG via AdjustWindowRect - dialog units
+    // depend on the dialog font, and this grid has to line up with pixels.
+    pDlg->style = DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
+    pDlg->cx = 400; pDlg->cy = 260;
+    DialogBoxIndirectW(GetModuleHandle(NULL), pDlg, hWnd, KeyLayoutDlgProc);
+}
+
+//=============================================================================
 // MAIN WINDOW PROCEDURE
 //=============================================================================
 
@@ -3995,6 +5039,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             gx+106, btnY2, 80, BTN_H, hWnd, (HMENU)ID_BTN_ASUS_TEST, hInst, NULL);
         CreateWindowW(L"BUTTON", L"HID Reset", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             gx+192, btnY2, 80, BTN_H, hWnd, (HMENU)ID_BTN_HID_RESET, hInst, NULL);
+        CreateWindowW(L"BUTTON", L"Tastenfarben", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            gx+278, btnY2, 110, BTN_H, hWnd, (HMENU)ID_BTN_KEY_LAYOUT, hInst, NULL);
         curY = g_cards[2].rect.bottom + GROUP_MARGIN;
 
         // ============= PROFILES & SETTINGS GROUP =============
@@ -4364,6 +5410,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // there is no read-back for Aura, so no success is claimed here.
             ShowAsusTestDialog(hWnd);
             AppendStatus(L"ASUS-Kanaleinstellungen gespeichert (Hardware nicht r\u00FCcklesbar)");
+        }
+        else if (id == ID_BTN_KEY_LAYOUT) {
+            // Per-key lighting. The dialog reads the layout from the device and
+            // reports only what it read back, so nothing is claimed here.
+            ShowKeyLayoutDialog(hWnd);
         }
         else if (id == ID_BTN_HID_RESET) {
             // Manual HID reset and re-apply
@@ -5084,49 +6135,516 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         }
     }
 
-    // --kbdump : read-only hex dump of the whole on-board config memory to
-    // %APPDATA%\OneClickRGB\docs\kbdump.txt. The probe only covers the three
-    // 0x40-byte profile blocks (0x00..0xBF); the key-remap / macro table that
-    // follows at 0xC0+ has never been captured, and that is where Win-Lock is
-    // expected to live (the Win key remapped to a no-op rather than a flag).
-    // Pure reads - command 0x05 only, no 0x06 writes anywhere in this path.
-    if (strstr(lpCmdLine, "--kbdump")) {
+    // --kbdump : read-only hex dump of the on-board config memory to
+    // %APPDATA%\OneClickRGB\docs\kbdump.txt. Pure reads - command 0x05 only, no
+    // 0x06 writes anywhere in this path.
+    //
+    //   --kbdump                     dump 0x000..0x3FF (unchanged default)
+    //   --kbdump --kbdump-range=lo-hi   dump exactly that range
+    //
+    // Why the range exists. The window was hardcoded to 0x400 bytes, and the
+    // per-key colour table starts at 0x2C0: if it holds one triple per matrix
+    // position it ends at 0x43A, so the last 58 bytes of the thing this dump is
+    // meant to decode have never been read. Worse, the dump *looks* complete -
+    // it just stops. The 16-byte pattern that appears from 0x2F0 onwards is the
+    // other half of the same question, and neither half can be settled by
+    // reading the same 0x400 bytes again.
+    //
+    // The range is deliberately not clamped to some assumed memory size. Where
+    // the config memory ends is one of the things being measured; the read stops
+    // where the device stops answering and the report says at which offset that
+    // was, which is a finding rather than a guess.
+    if (cli::Find(lpCmdLine, "--kbdump").present ||
+        cli::Find(lpCmdLine, "--kbdump-range").present) {
+        const std::wstring dumpPath = GetAppDataPath() + L"\\docs\\kbdump.txt";
+        std::wstring dir = GetAppDataPath() + L"\\docs";
+        SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+
+        uint16_t dumpLo = 0x0000, dumpHi = 0x03FF;
+        const cli::Flag rangeArg = cli::Find(lpCmdLine, "--kbdump-range");
+        if (rangeArg.present) {
+            if (!rangeArg.hasValue || !cli::ParseRange16(rangeArg.value, dumpLo, dumpHi)) {
+                FILE* fe = _wfopen(dumpPath.c_str(), L"w");
+                if (fe) {
+                    fprintf(fe, "EVision GK650 config memory dump\n"
+                                "ERROR: --kbdump-range needs <lo>-<hi>, both 0..0xFFFF and\n"
+                                "lo <= hi (e.g. --kbdump-range=0x2C0-0x4FF). Nothing was read.\n");
+                    fclose(fe);
+                }
+                LogDebug("[kbdump] --kbdump-range: invalid range - nothing was read");
+                return 2;
+            }
+        }
+
         // A dump taken while another instance writes is not a reference state -
         // and this dump is exactly what the collateral checks compare against.
-        if (!AcquireProbeLock())
-            return ProbeLockBusy(GetAppDataPath() + L"\\docs\\kbdump.txt", "kbdump");
+        if (!AcquireProbeLock()) return ProbeLockBusy(dumpPath, "kbdump");
         hid_init();
         hid_device* dev = nullptr;
         struct hid_device_info* devs = hid_enumerate(Devices::EVISION_VID, Devices::EVISION_PID);
         for (auto* c = devs; c; c = c->next)
             if (c->usage_page == Devices::EVISION_USAGE_PAGE) { dev = hid_open_path(c->path); break; }
         hid_free_enumeration(devs);
+        int rc = 0;
         if (dev) {
             EVisionQuery(dev, 0x01, 0, nullptr, 0, nullptr); Sleep(20);
             uint8_t prof = 0;
             EVisionQuery(dev, 0x05, 0x00, nullptr, 1, &prof);
 
-            std::wstring dir = GetAppDataPath() + L"\\docs";
-            SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
-            FILE* fp = _wfopen((dir + L"\\kbdump.txt").c_str(), L"w");
+            FILE* fp = _wfopen(dumpPath.c_str(), L"w");
             if (fp) {
-                fprintf(fp, "EVision GK650 config memory dump\nactiveProfile=%d\n\n", (int)prof);
-                for (int off = 0; off < 0x400; off += 16) {
+                fprintf(fp, "EVision GK650 config memory dump\nactiveProfile=%d\n", (int)prof);
+                fprintf(fp, "range=0x%04X-0x%04X\n\n", (unsigned)dumpLo, (unsigned)dumpHi);
+
+                // Line by line rather than one big ReadEVisionConfig call: the
+                // per-line rr= column is what kbdump_diff.ps1 uses to tell a
+                // failed read apart from sixteen bytes that really are zero.
+                for (int off = dumpLo; off <= (int)dumpHi; off += 16) {
+                    const int want = ((int)dumpHi - off + 1) > 16 ? 16 : ((int)dumpHi - off + 1);
                     uint8_t buf[16] = {0};
-                    int rr = EVisionQuery(dev, 0x05, (uint16_t)off, nullptr, 16, buf);
+                    int rr = 0;
+                    ReadEVisionConfig(dev, (uint16_t)off, (uint16_t)(off + want - 1), buf, &rr);
                     fprintf(fp, "%04X: ", off);
-                    for (int i = 0; i < 16; i++) fprintf(fp, "%02X ", buf[i]);
+                    for (int i = 0; i < 16; i++) {
+                        if (i < want) fprintf(fp, "%02X ", buf[i]);
+                        else          fprintf(fp, "   ");
+                    }
                     fprintf(fp, "  rr=%d\n", rr);
-                    if (rr < 0 && off > 0x100) break;   // stop once the device stops answering
+                    if (rr < 0) {
+                        // Where the device stops answering is a measurement, so
+                        // it is named instead of being left as a silent tail of
+                        // zeros. The old loop only broke past 0x100 and filled
+                        // everything before that with buffer zeros.
+                        fprintf(fp, "\nread refused at 0x%04X (rr=%d) - the config memory does not\n"
+                                    "extend this far, or the device stopped answering. Nothing past\n"
+                                    "this offset was read; treat it as unknown, not as zero.\n",
+                                (unsigned)off, rr);
+                        break;
+                    }
                 }
                 fclose(fp);
             }
             EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
             hid_close(dev);
+        } else {
+            FILE* fe = _wfopen(dumpPath.c_str(), L"w");
+            if (fe) {
+                fprintf(fe, "EVision GK650 config memory dump\n"
+                            "ERROR: keyboard not found - nothing was read.\n");
+                fclose(fe);
+            }
+            LogDebug("[kbdump] keyboard not found - nothing was read");
+            rc = 1;
         }
         hid_exit();
         ReleaseProbeLock();
-        return 0;
+        return rc;
+    }
+
+    // --keyidentify=<off>[,<off>...] : which key does a colour-table offset drive?
+    //
+    // The mapping "matrix slot -> colour triple at 0x2C0 + slot*3" is an
+    // inference from a dump, not a measurement. This probe turns it into one, the
+    // same way IdentifyMouseZone does for the mouse: set exactly ONE triple to
+    // white, name the key the model predicts for that offset, and ask whether
+    // that is the key which lit up. Then restore, verified.
+    //
+    // Sampling is the point - first column, last column, a couple of row changes.
+    // If the predictions hold at the edges and at the wrap-around between two
+    // columns, the order holds everywhere; if they do not, that is worth more
+    // than a confirmation, and it costs the same six dialogs.
+    //
+    // Deviation from a plain OK/Cancel: the dialog is Yes/No/Cancel, because
+    // "the user dismissed it" must not be recorded as "no". That distinction is
+    // load-bearing everywhere else in this file (rule 1) and there is no reason
+    // for this probe to be the exception. When the answer is "no", the report
+    // asks for the key that really lit - a free-text answer a MessageBox cannot
+    // collect, and a wrong guess written into the report would be worse than a
+    // gap.
+    //
+    // Rule 2: the only bytes written are three at a time inside
+    // [0x2C0, 0x43A) - the extent docs/Keyboard_Protocol.md section 5 item 5
+    // documents for the colour table - and every one of them is put back before
+    // the probe returns.
+    {
+        const cli::Flag idFlag = cli::Find(lpCmdLine, "--keyidentify");
+        if (idFlag.present) {
+            std::wstring dir = GetAppDataPath() + L"\\docs";
+            SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+            const std::wstring reportPath = dir + L"\\keyidentify.txt";
+
+            std::vector<uint16_t> offsets;
+            bool argOk = idFlag.hasValue && cli::ParseOffsetList(idFlag.value, offsets, 64);
+            uint16_t badOff = 0;
+            if (argOk) {
+                for (uint16_t o : offsets) {
+                    if (!kblayout::IsKeyColorOffset(o)) { argOk = false; badOff = o; break; }
+                }
+            }
+            if (!argOk) {
+                FILE* fe = _wfopen(reportPath.c_str(), L"w");
+                if (fe) {
+                    fprintf(fe, "EVision GK650 per-key identify\n"
+                                "ERROR: --keyidentify needs one or more colour-table offsets,\n"
+                                "comma separated, each inside 0x%04X..0x%04X and a multiple of %d\n"
+                                "bytes from the base (e.g. --keyidentify=0x2C0,0x2C3).\n"
+                                "Nothing was written.\n",
+                            (unsigned)kblayout::KEYCOLOR_BASE,
+                            (unsigned)(kblayout::KEYCOLOR_REGION_END - 1),
+                            kblayout::KEYCOLOR_STRIDE);
+                    if (badOff) fprintf(fe, "First offending value: 0x%04X\n", (unsigned)badOff);
+                    fclose(fe);
+                }
+                LogDebug("[keyidentify] invalid or missing offset list - nothing was written");
+                return 2;
+            }
+
+            // Before the first dialog, so an unattended check_dryrun_flags run
+            // cannot hang on a MessageBox waiting for a click.
+            if (g_state.dryRun) {
+                FILE* fe = _wfopen(reportPath.c_str(), L"w");
+                if (fe) {
+                    fprintf(fe, "EVision GK650 per-key identify\n"
+                                "DRY RUN - nothing was written and no question was asked.\n"
+                                "Run without --dry-run to probe the hardware.\n");
+                    fclose(fe);
+                }
+                LogDebug("[dry-run] --keyidentify skipped - would write colour triples and open dialogs");
+                return 0;
+            }
+
+            if (!AcquireProbeLock()) return ProbeLockBusy(reportPath, "keyidentify");
+
+            hid_init();
+            bool colorsComplete = false;
+            int  colorBytes = 0;
+            const std::vector<kblayout::Key> keys =
+                ReadKeyLayoutStandalone(&colorsComplete, &colorBytes);
+
+            FILE* fp = _wfopen(reportPath.c_str(), L"w");
+            int  rc = 0;
+            if (fp) {
+                fprintf(fp, "EVision GK650 per-key identify\n");
+                fprintf(fp, "layout read from the device: %d assigned matrix positions\n",
+                        (int)keys.size());
+                fprintf(fp, "colour table 0x%04X..0x%04X: %d of %d bytes readable%s\n",
+                        (unsigned)kblayout::KEYCOLOR_BASE, (unsigned)(kblayout::KEYCOLOR_REGION_END - 1),
+                        colorBytes,
+                        (int)kblayout::KEYCOLOR_REGION_END - (int)kblayout::KEYCOLOR_BASE,
+                        colorsComplete ? "" : "   <- SHORT, the assumed extent is not all readable");
+                fprintf(fp, "\nOne triple is set to white at a time and restored right after the\n"
+                            "question. 'predicted' is what the model derived from the remap table\n"
+                            "expects at that offset; 'answer' is what a human saw. A dismissed\n"
+                            "dialog is recorded as unanswered - never as no.\n\n");
+                fprintf(fp, "  offset  slot(col,row)  predicted      written   answer\n");
+                fprintf(fp, "  ------  -------------  -------------  --------  ------------\n");
+                fflush(fp);
+            }
+
+            bool aborted = false;
+            int  confirmed = 0, contradicted = 0;
+
+            for (size_t i = 0; i < offsets.size() && !aborted; i++) {
+                const uint16_t off = offsets[i];
+                int col = -1, row = -1;
+                const bool haveSlot = kblayout::KeyColorOffsetToSlot(off, col, row);
+                const kblayout::Key* pred = PredictKeyForColorOffset(keys, off);
+                // Three distinct cases, and they must not read alike in the
+                // report: a key the model names, a matrix hole, and an offset
+                // past the matrix altogether. The last one is the interesting
+                // one - the region holds two more triples than the matrix has
+                // slots (docs 5.5), and whatever lights up there is the answer
+                // to what the extra triples are.
+                const char* predName = pred      ? pred->label.c_str()
+                                     : haveSlot  ? "(matrix hole)"
+                                                 : "(past matrix)";
+                char slotText[16];
+                if (haveSlot) snprintf(slotText, sizeof(slotText), "(%2d,%d)", col, row);
+                else          snprintf(slotText, sizeof(slotText), "( --,-)");
+
+                std::vector<uint8_t> before;
+                if (SnapshotEVisionRange(off, kblayout::KEYCOLOR_STRIDE, before)
+                        != kblayout::KEYCOLOR_STRIDE) {
+                    if (fp) fprintf(fp, "  0x%04X  %-13s  %-13s  SNAPSHOT FAILED - skipped\n",
+                                    (unsigned)off, slotText, predName);
+                    rc = 1;
+                    continue;
+                }
+
+                const uint8_t white[3] = {0xFF, 0xFF, 0xFF};
+                const bool written = WriteEVisionRangeVerified(off, white, 3);
+                if (!written) rc = 1;
+
+                wchar_t wpred[64] = {0};
+                MultiByteToWideChar(CP_ACP, 0, predName, -1, wpred, 64);
+                wchar_t wslot[32] = {0};
+                MultiByteToWideChar(CP_ACP, 0, slotText, -1, wslot, 32);
+                wchar_t msg[640];
+                swprintf(msg, 640,
+                         L"Offset 0x%04X, Matrixplatz %s steht jetzt auf WEISS.\n\n"
+                         L"Erwartet wird die Taste: %s\n\n"
+                         L"Leuchtet genau diese Taste weiss?\n\n"
+                         L"Nein = eine andere (oder keine) Taste - bitte anschliessend im\n"
+                         L"Report notieren, welche es war.\n"
+                         L"Abbrechen beendet den Durchlauf und stellt alles wieder her.",
+                         (unsigned)off, wslot, wpred);
+                const int res = MessageBoxW(NULL, msg, L"OneClickRGB Tasten-Identify",
+                                            MB_YESNOCANCEL | MB_ICONQUESTION |
+                                            MB_SETFOREGROUND | MB_TOPMOST);
+
+                const char* answer = "unbeantwortet";
+                if      (res == IDYES) { answer = "ja";   confirmed++; }
+                else if (res == IDNO)  { answer = "nein"; contradicted++; }
+                else                   { aborted = true; }
+
+                // Restored whether or not the question was answered, and whether
+                // or not the write verified: a probe leaves the device the way it
+                // found it, especially when it failed.
+                const bool restored = WriteEVisionRangeVerified(off, before.data(), 3);
+                if (!restored) rc = 1;
+
+                if (fp) {
+                    fprintf(fp, "  0x%04X  %-13s  %-13s  %-8s  %s%s\n",
+                            (unsigned)off, slotText, predName,
+                            written ? "verified" : "NO",
+                            answer,
+                            restored ? "" : "   <- RESTORE FAILED");
+                    fprintf(fp, "          restored to %02X %02X %02X -> %s\n",
+                            before[0], before[1], before[2], restored ? "verified" : "FAILED");
+                    fflush(fp);
+                }
+            }
+
+            if (fp) {
+                if (aborted) {
+                    rc = 2;
+                    fprintf(fp, "\nABGEBROCHEN - die restlichen Offsets wurden nicht gestellt.\n"
+                                "Der Report ist unvollstaendig und belegt nichts ueber sie.\n");
+                } else if (confirmed > 0 && contradicted == 0) {
+                    fprintf(fp, "\nVERDICT: %d von %d Stichproben bestaetigt, keine widerlegt.\n"
+                                "Die aus der Remap-Tabelle abgeleitete Reihenfolge haelt an den\n"
+                                "geprueften Stellen. Erst damit darf 0x2C0+ in\n"
+                                "docs/Keyboard_Protocol.md von [MED] auf [HIGH] gehen - und nur\n"
+                                "fuer die geprueften Offsets.\n", confirmed, (int)offsets.size());
+                } else if (contradicted > 0) {
+                    fprintf(fp, "\nVERDICT: %d Stichprobe(n) widersprechen der Vorhersage.\n"
+                                "Das ist das wertvollere Ergebnis: die Reihenfolge slot -> Triple\n"
+                                "ist so nicht richtig. Welche Taste stattdessen leuchtete, gehoert\n"
+                                "hier hinein, bevor irgendein UI diese Zuordnung benutzt.\n",
+                            contradicted);
+                } else {
+                    fprintf(fp, "\nVERDICT: keine einzige Frage wurde mit ja oder nein beantwortet -\n"
+                                "es liegt keine Messung vor.\n");
+                }
+                fclose(fp);
+            }
+
+            hid_exit();
+            ReleaseProbeLock();
+            {
+                char done[224];
+                snprintf(done, sizeof(done),
+                         "[keyidentify] rc=%d ja=%d nein=%d - report: "
+                         "%%APPDATA%%\\OneClickRGB\\docs\\keyidentify.txt",
+                         rc, confirmed, contradicted);
+                LogDebug(done);
+            }
+            return rc;
+        }
+    }
+
+    // --keypattern[=restore] : stage 3's test pattern.
+    //
+    // Finding the mode byte that makes the firmware render the per-key table
+    // needs something in that table that is unmistakably per-key. A single
+    // colour cannot show it - it looks exactly like the global colour, which is
+    // how "the app already fills it" went unnoticed in the first place. So this
+    // writes alternating red/blue over the assigned matrix positions and leaves
+    // it there, and the mode walk (--kbmode-only=... --ask=perkey --confirm)
+    // then has a question with a visible answer: are different keys different
+    // colours, yes or no.
+    //
+    //   --keypattern           write the pattern, keep it, save what it replaced
+    //   --keypattern=restore   write the saved bytes back, verified
+    //
+    // The backup is a file rather than an in-process snapshot because the two
+    // halves are separate runs: the pattern has to survive while a different
+    // process walks the mode bytes. Without the file, "restore" would have
+    // nothing to restore to, and the table would keep the probe's pattern
+    // forever - the exact failure the edge sweep had before it learned to roll
+    // back.
+    {
+        const cli::Flag patFlag = cli::Find(lpCmdLine, "--keypattern");
+        if (patFlag.present) {
+            std::wstring dir = GetAppDataPath() + L"\\docs";
+            SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+            const std::wstring reportPath = dir + L"\\keypattern.txt";
+            const std::wstring backupPath = dir + L"\\keycolor_backup.bin";
+
+            const bool restore = patFlag.hasValue && patFlag.value == "restore";
+            if (patFlag.hasValue && !restore) {
+                FILE* fe = _wfopen(reportPath.c_str(), L"w");
+                if (fe) {
+                    fprintf(fe, "EVision GK650 per-key test pattern\n"
+                                "ERROR: --keypattern takes no value, or the value 'restore'.\n"
+                                "Nothing was written.\n");
+                    fclose(fe);
+                }
+                LogDebug("[keypattern] unknown value - nothing was written");
+                return 2;
+            }
+
+            if (g_state.dryRun) {
+                FILE* fe = _wfopen(reportPath.c_str(), L"w");
+                if (fe) {
+                    fprintf(fe, "EVision GK650 per-key test pattern\n"
+                                "DRY RUN - no write was sent and no value was read.\n"
+                                "Run without --dry-run to probe the hardware.\n");
+                    fclose(fe);
+                }
+                LogDebug("[dry-run] --keypattern skipped - would write the per-key colour table");
+                return 0;
+            }
+
+            if (!AcquireProbeLock()) return ProbeLockBusy(reportPath, "keypattern");
+
+            hid_init();
+            const int tableLen = (int)kblayout::KEYCOLOR_REGION_END - (int)kblayout::KEYCOLOR_BASE;
+            int rc = 0;
+            FILE* fp = _wfopen(reportPath.c_str(), L"w");
+
+            if (restore) {
+                std::vector<uint8_t> saved;
+                FILE* bf = _wfopen(backupPath.c_str(), L"rb");
+                if (bf) {
+                    saved.resize((size_t)tableLen, 0);
+                    const size_t got = fread(saved.data(), 1, (size_t)tableLen, bf);
+                    fclose(bf);
+                    saved.resize(got);
+                }
+                if (saved.empty()) {
+                    if (fp) fprintf(fp, "EVision GK650 per-key test pattern\n"
+                                        "ERROR: no backup at %%APPDATA%%\\OneClickRGB\\docs\\"
+                                        "keycolor_backup.bin - nothing to restore, nothing written.\n");
+                    if (fp) fclose(fp);
+                    hid_exit();
+                    ReleaseProbeLock();
+                    LogDebug("[keypattern] restore: no backup file - nothing was written");
+                    return 2;
+                }
+                int bad = -1;
+                const bool ok = WriteEVisionRangeVerified(kblayout::KEYCOLOR_BASE,
+                                                          saved.data(), (int)saved.size(), &bad);
+                if (!ok) rc = 1;
+                if (fp) {
+                    fprintf(fp, "EVision GK650 per-key test pattern - RESTORE\n");
+                    fprintf(fp, "wrote %d bytes back to 0x%04X -> %s\n",
+                            (int)saved.size(), (unsigned)kblayout::KEYCOLOR_BASE,
+                            ok ? "verified" : "FAILED (read-back differs)");
+                    if (!ok && bad >= 0)
+                        fprintf(fp, "first mismatch at 0x%04X\n", (unsigned)bad);
+                }
+            } else {
+                bool colorsComplete = false;
+                int  colorBytes = 0;
+                const std::vector<kblayout::Key> keys =
+                    ReadKeyLayoutStandalone(&colorsComplete, &colorBytes);
+
+                std::vector<uint8_t> table;
+                const int stableBytes =
+                    SnapshotEVisionRange(kblayout::KEYCOLOR_BASE, tableLen, table);
+
+                if (fp) {
+                    fprintf(fp, "EVision GK650 per-key test pattern\n");
+                    fprintf(fp, "layout: %d assigned matrix positions\n", (int)keys.size());
+                    fprintf(fp, "colour table 0x%04X..0x%04X: %d of %d bytes readable, "
+                                "%d stable across two reads\n",
+                            (unsigned)kblayout::KEYCOLOR_BASE,
+                            (unsigned)(kblayout::KEYCOLOR_REGION_END - 1), colorBytes, tableLen,
+                            stableBytes);
+                    if (stableBytes > 0 && stableBytes < tableLen)
+                        fprintf(fp, "NOTE: the device answered for %d bytes, not the %d the matrix\n"
+                                    "size predicts. Only the readable part is touched, and that\n"
+                                    "shortfall is itself a measurement - record it in section 5.\n",
+                                stableBytes, tableLen);
+                }
+
+                if (stableBytes <= 0 || keys.empty()) {
+                    if (fp) fprintf(fp, "\nERROR: could not take a stable snapshot of the table (or the\n"
+                                        "layout could not be read). Nothing was written - a pattern\n"
+                                        "without a restore point is how a table stays patterned.\n");
+                    if (fp) fclose(fp);
+                    hid_exit();
+                    ReleaseProbeLock();
+                    LogDebug("[keypattern] no snapshot or no layout - nothing was written");
+                    return 1;
+                }
+
+                // Save first, write second. The other order loses the original
+                // colours if the process dies between the two.
+                FILE* bf = _wfopen(backupPath.c_str(), L"wb");
+                if (bf) { fwrite(table.data(), 1, table.size(), bf); fclose(bf); }
+                else {
+                    if (fp) fprintf(fp, "\nERROR: could not write the backup file - nothing written.\n");
+                    if (fp) fclose(fp);
+                    hid_exit();
+                    ReleaseProbeLock();
+                    LogDebug("[keypattern] backup file could not be written - nothing was written");
+                    return 1;
+                }
+
+                // Read-modify-write: only the triples of assigned positions are
+                // touched, everything else keeps the bytes the snapshot found
+                // (rule 3). Alternating by slot index, so neighbouring keys
+                // differ in every direction of the matrix.
+                std::vector<uint8_t> patterned = table;
+                int painted = 0;
+                for (const kblayout::Key& k : keys) {
+                    const int idx = (int)k.colorOffset - (int)kblayout::KEYCOLOR_BASE;
+                    if (idx < 0 || idx + 2 >= (int)patterned.size()) continue;
+                    const bool red = ((kblayout::SlotIndex(k.col, k.row) % 2) == 0);
+                    patterned[(size_t)idx + 0] = red ? 0xFF : 0x00;
+                    patterned[(size_t)idx + 1] = 0x00;
+                    patterned[(size_t)idx + 2] = red ? 0x00 : 0xFF;
+                    painted++;
+                }
+
+                int bad = -1;
+                const bool ok = WriteEVisionRangeVerified(kblayout::KEYCOLOR_BASE,
+                                                          patterned.data(),
+                                                          (int)patterned.size(), &bad);
+                if (!ok) rc = 1;
+                if (fp) {
+                    fprintf(fp, "\npattern: %d keys alternating red/blue, %d bytes written to 0x%04X\n",
+                            painted, (int)patterned.size(), (unsigned)kblayout::KEYCOLOR_BASE);
+                    fprintf(fp, "read-back: %s\n", ok ? "verified" : "FAILED (read-back differs)");
+                    if (!ok && bad >= 0)
+                        fprintf(fp, "first mismatch at 0x%04X - the table is shorter than assumed,\n"
+                                    "or this region is not writable. That is a finding: note it in\n"
+                                    "docs/Keyboard_Protocol.md section 5 item 5.\n", (unsigned)bad);
+                    fprintf(fp, "backup of the previous %d bytes: "
+                                "%%APPDATA%%\\OneClickRGB\\docs\\keycolor_backup.bin\n"
+                                "Put it back with --keypattern=restore.\n", (int)table.size());
+                    fprintf(fp, "\nThe pattern is stored. Whether it is RENDERED is the next\n"
+                                "question - walk the non-animating mode candidates with\n"
+                                "  --kbmode-only=0x00,0x04,0x09,0x13,0x14 --ask=perkey --confirm\n"
+                                "and answer per step whether different keys show different colours.\n");
+                }
+            }
+
+            if (fp) fclose(fp);
+            hid_exit();
+            ReleaseProbeLock();
+            {
+                char done[224];
+                snprintf(done, sizeof(done),
+                         "[keypattern] %s rc=%d - report: "
+                         "%%APPDATA%%\\OneClickRGB\\docs\\keypattern.txt",
+                         restore ? "restore" : "apply", rc);
+                LogDebug(done);
+            }
+            return rc;
+        }
     }
 
     // Keyboard Win-lock isolation test (no writes, just session commands):
@@ -5209,10 +6727,66 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         const cli::Flag sweepArg   = cli::Find(lpCmdLine, "--kbmode-sweep");
         const cli::Flag singleArg  = cli::Find(lpCmdLine, "--kbmode");
         const cli::Flag confirmArg = cli::Find(lpCmdLine, "--confirm");
+        const cli::Flag onlyArg    = cli::Find(lpCmdLine, "--kbmode-only");
+        const cli::Flag askArg     = cli::Find(lpCmdLine, "--ask");
+        const cli::Flag colorArg   = cli::Find(lpCmdLine, "--kbcolor");
         if (cli::CountPresent({&sweepArg, &singleArg}) > 1) {
             LogDebug("[kbmode] --kbmode and --kbmode-sweep are mutually exclusive - nothing was written");
             return 2;
         }
+
+        // --kbmode-only restricts the walk, so it only means anything together
+        // with the walk. Ignoring it silently would run all 21 modes while the
+        // user believes five were tested - the report would then look like a
+        // measurement of something nobody asked for.
+        if (onlyArg.present && !sweepArg.present) {
+            LogDebug("[kbmode] --kbmode-only only applies to --kbmode-sweep - nothing was written");
+            return 2;
+        }
+
+        // --kbcolor overrides the colour this probe writes, for exactly one
+        // purpose: the differential dump that locates the per-key colour table.
+        // Write colour A, dump, write colour B, dump - the bytes that moved with
+        // the colour ARE the table, and its extent, stride and order fall out of
+        // the diff instead of being inferred from a pattern. Refused on its own
+        // for the same reason as --kbmode-only: a modifier that modifies nothing
+        // would let the user believe a colour was set.
+        uint8_t ovrR = 0, ovrG = 0, ovrB = 0;
+        bool haveColorOverride = false;
+        if (colorArg.present) {
+            if (!sweepArg.present && !singleArg.present) {
+                LogDebug("[kbmode] --kbcolor only applies to --kbmode/--kbmode-sweep - nothing was written");
+                return 2;
+            }
+            if (!colorArg.hasValue || !cli::ParseRgb(colorArg.value, ovrR, ovrG, ovrB)) {
+                LogDebug("[kbmode] --kbcolor needs exactly six hex digits (RRGGBB) - nothing was written");
+                return 2;
+            }
+            haveColorOverride = true;
+        }
+
+        // Which question --confirm asks. A malformed --ask is refused rather
+        // than defaulted: the whole value of these dialogs is that the answer
+        // belongs to the question that was on screen, and quietly substituting a
+        // different question destroys exactly that (rule 1).
+        cli::AskKind askKind = cli::ASK_MOTION;
+        if (!cli::ResolveAsk(askArg, askKind)) {
+            LogDebug("[kbmode] --ask needs motion|lit|perkey - nothing was written");
+            return 2;
+        }
+
+        // The bytes the sweep walks. Default is the full 0x00..0x14 range; with
+        // --kbmode-only it is exactly the listed values, in the given order.
+        std::vector<uint8_t> sweepModes;
+        if (onlyArg.present) {
+            if (!onlyArg.hasValue || !cli::ParseByteList(onlyArg.value, sweepModes, 64)) {
+                LogDebug("[kbmode] --kbmode-only needs a comma-separated byte list - nothing was written");
+                return 2;
+            }
+        } else {
+            for (int m = 0x00; m <= 0x14; m++) sweepModes.push_back((uint8_t)m);
+        }
+
         if (sweepArg.present || singleArg.present) {
             // The sweep drives SetEVisionKeyboard, which is dry-run guarded -
             // but without this branch it would still walk 21 steps, sleep for
@@ -5238,7 +6812,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
             LoadSettings();
 
-            const uint8_t pr = g_state.red, pg = g_state.green, pb = g_state.blue;
+            const uint8_t pr = haveColorOverride ? ovrR : g_state.red;
+            const uint8_t pg = haveColorOverride ? ovrG : g_state.green;
+            const uint8_t pb = haveColorOverride ? ovrB : g_state.blue;
             // Full brightness so a working effect is unmistakable, and a non-zero
             // speed because an animation at speed 0 does not visibly move.
             const uint8_t pbright = 4;
@@ -5271,8 +6847,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
             if (fp) {
                 fprintf(fp, "EVision GK650 keyboard mode probe\n");
-                fprintf(fp, "colour=%02X%02X%02X brightness=%d speed=%d hold=%dms\n",
-                        pr, pg, pb, pbright, pspeed, holdMs);
+                fprintf(fp, "colour=%02X%02X%02X%s brightness=%d speed=%d hold=%dms\n",
+                        pr, pg, pb,
+                        haveColorOverride ? " (--kbcolor, not the saved colour)" : "",
+                        pbright, pspeed, holdMs);
                 if (haveSnapshot) {
                     fprintf(fp, "active profile=%d  keyboard block=0x%02X\n",
                             (int)snapProfile, (unsigned)snapOffset);
@@ -5285,7 +6863,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
                     fprintf(fp, "WARNING: could not read the keyboard block before starting -\n"
                                 "         no snapshot, so nothing will be restored afterwards.\n");
                 }
-                fprintf(fp, "'got' columns are read back from the device after the write.\n\n");
+                fprintf(fp, "'got' columns are read back from the device after the write.\n");
+                if (sweepArg.present) {
+                    fprintf(fp, "modes walked (%d):", (int)sweepModes.size());
+                    for (size_t si = 0; si < sweepModes.size(); si++)
+                        fprintf(fp, " 0x%02X", sweepModes[si]);
+                    fprintf(fp, "%s\n", onlyArg.present ? "   (--kbmode-only)" : "   (default range)");
+                }
+                // Which question was asked belongs in the report, not just in
+                // the command line: an answer only means something together
+                // with the question it answered.
+                fprintf(fp, "question asked per step: %s\n\n",
+                        askKind == cli::ASK_PERKEY
+                            ? "perkey - are DIFFERENT keys showing DIFFERENT colours?"
+                        : askKind == cli::ASK_LIT
+                            ? "lit - is the keyboard lit at all?"
+                            : "motion - does anything move?");
                 fprintf(fp, "%s\n",
                         confirmArg.present
                             ? "The animated? column is answered per step in a dialog, while the\n"
@@ -5339,13 +6932,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
                 // dialog is "abgebrochen", never "nein" (rule 1).
                 const char* answer = "______";
                 if (confirm) {
-                    wchar_t msg[512];
-                    swprintf(msg, 512,
+                    // --ask picks the question. "Does anything move?" is the
+                    // right question for an animation sweep and the wrong one
+                    // for the per-key hunt, where the modes under test are
+                    // precisely the ones that do NOT animate - answering "nein"
+                    // to motion there says nothing about whether the colour
+                    // table renders.
+                    const wchar_t* question =
+                        askKind == cli::ASK_PERKEY
+                            ? L"Zeigen jetzt VERSCHIEDENE Tasten VERSCHIEDENE Farben?"
+                        : askKind == cli::ASK_LIT
+                            ? L"Leuchtet die Tastatur jetzt ueberhaupt?"
+                            : L"Bewegt sich an der Tastaturbeleuchtung etwas?";
+                    wchar_t msg[640];
+                    swprintf(msg, 640,
                              L"Modus 0x%02X ist jetzt gesetzt.\n\n"
-                             L"Bewegt sich an der Tastaturbeleuchtung etwas?\n\n"
+                             L"%s\n\n"
                              L"Abbrechen beendet den Sweep und stellt den vorherigen\n"
                              L"Zustand wieder her.",
-                             (unsigned)mode);
+                             (unsigned)mode, question);
                     const int res = MessageBoxW(NULL, msg, L"OneClickRGB Tastatur-Sweep",
                                                 MB_YESNOCANCEL | MB_ICONQUESTION |
                                                 MB_SETFOREGROUND | MB_TOPMOST);
@@ -5366,12 +6971,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
             };
 
             if (sweepArg.present) {
-                // 0x00..0x14 rather than just the 11 table entries: if Breathing
-                // is not 0x05, the real value is most likely a neighbour that the
-                // table never lists.
+                // Default 0x00..0x14 rather than just the 11 table entries: if
+                // Breathing is not 0x05, the real value is most likely a
+                // neighbour that the table never lists. --kbmode-only narrows
+                // that to a named set - five candidates instead of twenty-one is
+                // the difference between a question someone answers and a
+                // question someone abandons halfway.
                 int tSec = 0;
-                for (uint8_t m = 0x00; m <= 0x14; m++) {
-                    probeOne(m, tSec);
+                for (size_t si = 0; si < sweepModes.size(); si++) {
+                    probeOne(sweepModes[si], tSec);
                     if (sweepAborted) break;
                     if (!confirm) Sleep(holdMs);   // --confirm waits on the dialog
                     tSec += holdMs / 1000;
@@ -5466,9 +7074,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         const cli::Flag spdSweep  = cli::Find(lpCmdLine, "--edgespeed-sweep");
         const cli::Flag spdMode   = cli::Find(lpCmdLine, "--edgespeed-mode");
         const cli::Flag confirmArg = cli::Find(lpCmdLine, "--confirm");
+        const cli::Flag askArg     = cli::Find(lpCmdLine, "--ask");
         const int actions = cli::CountPresent({&oneArg, &modeSweep, &spdSweep});
 
         if (actions > 0) {
+            // Same modifier as on the keyboard path, and refused the same way
+            // when it is malformed: a dialog that asks a different question than
+            // the one the user selected collects an answer to nothing.
+            cli::AskKind askKind = cli::ASK_MOTION;
+            if (!cli::ResolveAsk(askArg, askKind)) {
+                LogDebug("[edgeprobe] --ask needs motion|lit|perkey - nothing was written");
+                return 2;
+            }
             std::wstring dir = GetAppDataPath() + L"\\docs";
             SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
             const std::wstring reportPath = dir + L"\\edgemode_probe.txt";
@@ -5621,13 +7238,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
                 // nobody gave must not become a measurement (rule 1).
                 const char* answer = "______";
                 if (confirm) {
-                    wchar_t msg[512];
-                    swprintf(msg, 512,
+                    const wchar_t* question =
+                        askKind == cli::ASK_PERKEY
+                            ? L"Zeigen jetzt VERSCHIEDENE Stellen VERSCHIEDENE Farben?"
+                        : askKind == cli::ASK_LIT
+                            ? L"Leuchtet die Randbeleuchtung jetzt ueberhaupt?"
+                            : L"Bewegt sich an der Randbeleuchtung etwas?";
+                    wchar_t msg[640];
+                    swprintf(msg, 640,
                              L"Modus 0x%02X, Tempo %d ist jetzt gesetzt.\n\n"
-                             L"Bewegt sich an der Randbeleuchtung etwas?\n\n"
+                             L"%s\n\n"
                              L"Abbrechen beendet den Sweep und stellt den vorherigen\n"
                              L"Zustand wieder her.",
-                             (unsigned)mode, (int)spd);
+                             (unsigned)mode, (int)spd, question);
                     const int res = MessageBoxW(NULL, msg, L"OneClickRGB Edge-Sweep",
                                                 MB_YESNOCANCEL | MB_ICONQUESTION |
                                                 MB_SETFOREGROUND | MB_TOPMOST);

@@ -136,6 +136,86 @@ $cases = @(
        Args = @('--dry-run','--kbmode-sweep=5','--confirm')
        Report = 'kbmode_probe.txt'; Exit = 0; MaxSec = 15
        LogMatch = '\[dry-run\].*kbmode.*skipped' }
+
+    # --- Per-Tasten-Pfade ---------------------------------------------------
+    # --keyidentify oeffnet im Echtbetrieb pro Offset einen Dialog und schreibt
+    # ein Tripel in die Farbtabelle. Unter --dry-run darf beides nicht passieren,
+    # und der Ausstieg muss VOR der ersten MessageBox liegen - sonst haengt
+    # dieser unbeaufsichtigte Lauf bis MaxSec und tarnt den Fehler als Timeout.
+    @{ Name = '--keyidentify (dry-run, kein Dialog, kein Write)'
+       Args = @('--dry-run','--keyidentify=0x2C0,0x2C3')
+       Report = 'keyidentify.txt'; Exit = 0; MaxSec = 15
+       ReportMatch = 'no question was asked'
+       LogMatch = '\[dry-run\].*keyidentify skipped' }
+
+    # Ein Offset mitten in einem Tripel wuerde jede folgende Tastenfarbe um
+    # einen Kanal verschieben. Argumentpruefung vor allem anderen: Exit 2, und
+    # der Report sagt, was gefordert ist.
+    @{ Name = '--keyidentify mit Offset in der Tripel-Mitte -> Abbruch'
+       Args = @('--dry-run','--keyidentify=0x2C1')
+       Report = 'keyidentify.txt'; Exit = 2; MaxSec = 15
+       ReportMatch = 'multiple of 3'
+       LogMatch = '\[keyidentify\].*invalid or missing offset' }
+
+    @{ Name = '--keyidentify ausserhalb der Farbtabelle -> Abbruch'
+       Args = @('--dry-run','--keyidentify=0x100')
+       Report = 'keyidentify.txt'; Exit = 2; MaxSec = 15
+       ReportMatch = 'Nothing was written'
+       LogMatch = '\[keyidentify\].*nothing was written' }
+
+    @{ Name = '--keypattern (dry-run, schreibt die Farbtabelle nicht)'
+       Args = @('--dry-run','--keypattern')
+       Report = 'keypattern.txt'; Exit = 0; MaxSec = 15
+       LogMatch = '\[dry-run\].*keypattern skipped' }
+
+    @{ Name = '--keypattern mit unbekanntem Wert -> Abbruch'
+       Args = @('--dry-run','--keypattern=off')
+       Report = 'keypattern.txt'; Exit = 2; MaxSec = 15
+       ReportMatch = 'Nothing was written'
+       LogMatch = '\[keypattern\].*unknown value' }
+
+    # --- Modifier, die ohne ihre Aktion nichts tun duerfen -------------------
+    # Ein Modifier, der stillschweigend ignoriert wird, ist schlimmer als ein
+    # Fehler: --kbmode-only=0x00,0x04 wuerde dann alle 21 Modi laufen lassen,
+    # waehrend der Bediener zwei erwartet und der Report zwei nennt.
+    @{ Name = '--kbmode-only ohne Sweep -> Abbruch'
+       Args = @('--dry-run','--kbmode-only=0x00,0x04')
+       Report = $null; Exit = 2; MaxSec = 15
+       LogMatch = '\[kbmode\].*kbmode-only only applies' }
+
+    @{ Name = '--kbmode-only mit Muell -> Abbruch'
+       Args = @('--dry-run','--kbmode-sweep=5','--kbmode-only=0x00,banane')
+       Report = $null; Exit = 2; MaxSec = 15
+       LogMatch = '\[kbmode\].*comma-separated byte list' }
+
+    @{ Name = '--ask mit unbekanntem Wert -> Abbruch'
+       Args = @('--dry-run','--kbmode-sweep=5','--confirm','--ask=farbe')
+       Report = $null; Exit = 2; MaxSec = 15
+       LogMatch = '\[kbmode\].*ask needs motion' }
+
+    @{ Name = '--kbcolor ohne Modus-Aktion -> Abbruch'
+       Args = @('--dry-run','--kbcolor=FF0000')
+       Report = $null; Exit = 2; MaxSec = 15
+       LogMatch = '\[kbmode\].*kbcolor only applies' }
+
+    @{ Name = '--kbcolor mit ungueltigem Wert -> Abbruch'
+       Args = @('--dry-run','--kbmode=0x06','--kbcolor=#FF0000')
+       Report = $null; Exit = 2; MaxSec = 15
+       LogMatch = '\[kbmode\].*six hex digits' }
+
+    # --kbdump ist rein lesend, deswegen laeuft dieser Fall ohne --dry-run: die
+    # Argumentpruefung muss greifen, bevor ueberhaupt ein Handle geoeffnet wird.
+    @{ Name = '--kbdump-range mit verdrehtem Bereich -> Abbruch'
+       Args = @('--kbdump','--kbdump-range=0x300-0x200')
+       Report = 'kbdump.txt'; Exit = 2; MaxSec = 15
+       ReportMatch = 'Nothing was read'
+       LogMatch = '\[kbdump\].*invalid range' }
+
+    @{ Name = '--kbdump-range ohne Wert -> Abbruch'
+       Args = @('--kbdump','--kbdump-range')
+       Report = 'kbdump.txt'; Exit = 2; MaxSec = 15
+       ReportMatch = 'Nothing was read'
+       LogMatch = '\[kbdump\].*invalid range' }
 )
 
 $fail = 0
@@ -264,6 +344,40 @@ try {
     } else {
         Write-Host "  FAIL zweite Instanz wurde nicht sauber abgewiesen" -ForegroundColor Red
         $probs | ForEach-Object { Write-Host "         - $_" -ForegroundColor Red }
+        $fail++
+    }
+
+    # Derselbe Test fuer den Pfad mit Bereichsargument: die Argumentpruefung
+    # laeuft VOR der Sperre (ein kaputtes Argument soll auch dann benannt
+    # werden, wenn gerade jemand anders misst), die Sperre aber vor jedem
+    # HID-Zugriff. Beide Reihenfolgen zusammen sind das, was hier geprueft wird.
+    #
+    # Warum --keyidentify und --keypattern hier NICHT einzeln vorkommen: sie
+    # wuerden im Fehlerfall - also genau dann, wenn die Sperre nicht greift -
+    # auf die Hardware schreiben und einen Dialog oeffnen, in einem Skript, das
+    # unbeaufsichtigt laeuft und laut eigener Zusage nichts schreibt. Sie nehmen
+    # dieselbe Sperre ueber dieselben zwei Funktionen (AcquireProbeLock /
+    # ProbeLockBusy) wie --kbdump; ein eigener Fall wuerde denselben Code
+    # nochmal pruefen und dafuer das Risiko eintauschen.
+    if (Test-Path $dump) { Remove-Item $dump -Force }
+    $sw2 = [System.Diagnostics.Stopwatch]::StartNew()
+    $p3 = Start-Process -FilePath $Exe -ArgumentList @('--kbdump','--kbdump-range=0x2C0-0x43F') `
+                        -WorkingDirectory $workDir -PassThru -Wait
+    $sw2.Stop()
+    $probs2 = @()
+    if ($p3.ExitCode -ne 3) { $probs2 += "Exitcode $($p3.ExitCode) statt 3" }
+    if ($sw2.Elapsed.TotalSeconds -gt 15) { $probs2 += "hat $([int]$sw2.Elapsed.TotalSeconds)s gebraucht" }
+    if (-not (Test-Path $dump)) {
+        $probs2 += "kein Report geschrieben"
+    } elseif ((Get-Content $dump -Raw) -match '^\s*02C0:') {
+        $probs2 += "Report enthaelt Dumpzeilen - es wurde doch gelesen"
+    }
+    if ($probs2.Count -eq 0) {
+        Write-Host ("  OK   --kbdump-range respektiert die Sperre ({0:N1}s)" -f $sw2.Elapsed.TotalSeconds) -ForegroundColor Green
+        $pass++
+    } else {
+        Write-Host "  FAIL --kbdump-range hat die Sperre ignoriert" -ForegroundColor Red
+        $probs2 | ForEach-Object { Write-Host "         - $_" -ForegroundColor Red }
         $fail++
     }
 } finally {

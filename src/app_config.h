@@ -38,6 +38,16 @@ public:
     uint8_t kbMode     = 0x06; // KB_MODE_STATIC default
     uint8_t edgeMode   = 0x00; // EDGE_MODE_STATIC/FREEZE default (solid color)
 
+    // Which mode byte makes the firmware render the per-key colour table.
+    // 0xFF is the sentinel for "not established", and it is the default on
+    // purpose: no measurement has named this byte yet (docs/Keyboard_Protocol.md
+    // section 5 item 5). While it holds 0xFF the per-key apply writes the table
+    // and says so, and claims nothing about what the keyboard shows - a value
+    // picked here to make the UI feel finished would be exactly the invented
+    // constant CLAUDE.md rule 1 forbids. --kbmode-only --ask=perkey is what
+    // fills it in.
+    uint8_t kbCustomMode = 0xFF;
+
     //--- Device enables ---
     bool enableAura     = true;
     bool enableMouse    = true;
@@ -68,7 +78,22 @@ public:
     std::vector<LightZone> mouseZones;     // SteelSeries Rival 600 (8, known)
     std::vector<LightZone> auraZones;      // filled from Aura 0xB0 scan (later)
     std::vector<LightZone> ramZones;       // filled from SMBus scan (later)
-    std::vector<LightZone> keyboardZones;  // filled from KB segment map (later)
+    std::vector<LightZone> keyboardZones;  // one entry per key, from the KB matrix
+
+    // Schema marker for keyboardZones only.
+    //
+    // Version 0 means "written by the build whose key editor seeded its colours
+    // from the raw 0x2C0 region". Those colours were an artefact - the region
+    // repeats with a 16-byte period and reading it at a 3-byte stride invented a
+    // different colour every few keys (docs/Keyboard_Protocol.md 5.5) - so a
+    // version 0 list holds colours no user ever picked, and pressing Apply once
+    // was enough to persist them. They are dropped on load rather than shown
+    // back as if they were choices.
+    //
+    // Version 1 lists are seeded from the profile's live colour and edited by
+    // hand, so they are kept.
+    int keyboardZonesVersion = 0;
+    static const int KEYBOARD_ZONES_SCHEMA = 1;
 
     RGBConfig() { InitNames(); InitZones(); }
 
@@ -98,6 +123,7 @@ public:
         j["speed"]      = speed;
         j["kbMode"]     = kbMode;
         j["edgeMode"]   = edgeMode;
+        j["kbCustomMode"] = kbCustomMode;
 
         j["enableAura"]     = enableAura;
         j["enableMouse"]    = enableMouse;
@@ -137,6 +163,7 @@ public:
         j["auraZones"]     = zonesOut(auraZones);
         j["ramZones"]      = zonesOut(ramZones);
         j["keyboardZones"] = zonesOut(keyboardZones);
+        j["keyboardZonesVersion"] = KEYBOARD_ZONES_SCHEMA;
 
         std::ofstream f(path);
         if (f) f << std::setw(4) << j;
@@ -158,6 +185,7 @@ public:
             speed      = (uint8_t)j.value("speed",      (int)speed);
             kbMode     = (uint8_t)j.value("kbMode",     (int)kbMode);
             edgeMode   = (uint8_t)j.value("edgeMode",   (int)edgeMode);
+            kbCustomMode = (uint8_t)j.value("kbCustomMode", (int)kbCustomMode);
 
             enableAura     = j.value("enableAura",     enableAura);
             enableMouse    = j.value("enableMouse",    enableMouse);
@@ -211,7 +239,17 @@ public:
                 for (auto& z : mouseZones) z.color = { red, green, blue };
             loadZones(j, "auraZones",     auraZones);
             loadZones(j, "ramZones",      ramZones);
-            loadZones(j, "keyboardZones", keyboardZones);
+
+            // Key colours are only restored from a list this build wrote. An
+            // older list carries the display artefact described above; showing
+            // it back would present invented colours as the user's own saved
+            // choices, which is the same defect as reporting an unverified
+            // write as success.
+            keyboardZonesVersion = j.value("keyboardZonesVersion", 0);
+            if (keyboardZonesVersion >= KEYBOARD_ZONES_SCHEMA)
+                loadZones(j, "keyboardZones", keyboardZones);
+            else
+                keyboardZones.clear();
         } catch (...) {}
     }
 

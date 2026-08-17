@@ -149,4 +149,132 @@ inline int HoldSeconds(const Flag& f, int defSec, int minSec, int maxSec) {
     return (int)s;
 }
 
+// 16-bit config-memory offset. Separate from ParseByte because the address
+// space of the on-board config memory is wider than a byte - the per-key colour
+// table starts at 0x2C0 and, going by the matrix size, does not end inside the
+// 0x400 window the old --kbdump was hardcoded to.
+inline bool ParseOffset16(const std::string& s, uint16_t& out) {
+    unsigned long v = 0;
+    if (!ParseUInt(s, v) || v > 0xFFFFuL) return false;
+    out = (uint16_t)v;
+    return true;
+}
+
+// "<lo>-<hi>", both ends inclusive, both 16-bit, lo <= hi. Used by
+// --kbdump-range. Deliberately strict in the ways a range argument goes wrong:
+// a missing end ("0x300-"), a reversed pair ("0x300-0x200") and a bare single
+// value are all rejected rather than repaired, because each of them would make
+// the dump cover something other than what was asked for - and a dump is the
+// reference state every collateral check is compared against.
+inline bool ParseRange16(const std::string& s, uint16_t& lo, uint16_t& hi) {
+    const size_t dash = s.find('-');
+    if (dash == std::string::npos || dash == 0 || dash + 1 >= s.size()) return false;
+    // A second '-' means something like "1-2-3": not a range.
+    if (s.find('-', dash + 1) != std::string::npos) return false;
+
+    uint16_t a = 0, b = 0;
+    if (!ParseOffset16(s.substr(0, dash), a)) return false;
+    if (!ParseOffset16(s.substr(dash + 1), b)) return false;
+    if (b < a) return false;
+    lo = a; hi = b;
+    return true;
+}
+
+// Comma-separated list of byte values ("0x00,0x04,9"). Every element must parse
+// or the whole list is refused: a list where one entry silently vanished would
+// make a --kbmode-only walk skip a candidate while the report still names it.
+// An empty list, a trailing comma and duplicates-only-garbage all fail.
+inline bool ParseByteList(const std::string& s, std::vector<uint8_t>& out,
+                          size_t maxItems = 256) {
+    out.clear();
+    if (s.empty()) return false;
+
+    size_t start = 0;
+    while (true) {
+        const size_t comma = s.find(',', start);
+        const std::string item = s.substr(start, comma == std::string::npos
+                                                     ? std::string::npos
+                                                     : comma - start);
+        uint8_t v = 0;
+        if (!ParseByte(item, v)) { out.clear(); return false; }
+        if (out.size() >= maxItems)  { out.clear(); return false; }
+        out.push_back(v);
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return true;
+}
+
+// The same for 16-bit offsets ("0x2C0,0x2C3,0x2F0"), used by --keyidentify.
+inline bool ParseOffsetList(const std::string& s, std::vector<uint16_t>& out,
+                            size_t maxItems = 256) {
+    out.clear();
+    if (s.empty()) return false;
+
+    size_t start = 0;
+    while (true) {
+        const size_t comma = s.find(',', start);
+        const std::string item = s.substr(start, comma == std::string::npos
+                                                     ? std::string::npos
+                                                     : comma - start);
+        uint16_t v = 0;
+        if (!ParseOffset16(item, v)) { out.clear(); return false; }
+        if (out.size() >= maxItems)  { out.clear(); return false; }
+        out.push_back(v);
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return true;
+}
+
+// "RRGGBB", exactly six hex digits, no 0x prefix and no '#'. Used by --kbcolor
+// to make a differential dump possible without a script editing the user's
+// config.json behind their back: the colour table at 0x2C0 can only be found by
+// writing colour A, dumping, writing colour B and dumping again, and the two
+// colours have to differ or the diff is empty by construction.
+inline bool ParseRgb(const std::string& s, uint8_t& r, uint8_t& g, uint8_t& b) {
+    if (s.size() != 6) return false;
+    unsigned v[6];
+    for (size_t i = 0; i < 6; i++) {
+        const char c = s[i];
+        if      (c >= '0' && c <= '9') v[i] = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f') v[i] = (unsigned)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v[i] = (unsigned)(c - 'A' + 10);
+        else return false;
+    }
+    r = (uint8_t)((v[0] << 4) | v[1]);
+    g = (uint8_t)((v[2] << 4) | v[3]);
+    b = (uint8_t)((v[4] << 4) | v[5]);
+    return true;
+}
+
+// Which question a --confirm dialog asks. The sweeps used to have exactly one
+// wording ("does anything move?"), which is the right question for a mode sweep
+// looking for an animation and the wrong one for every other probe: a run
+// looking for the per-key colour mode needs "are different keys different
+// colours?", and an answer to a question nobody meant to ask is worse than no
+// answer at all (rule 1). Default stays MOTION, so existing command lines
+// behave exactly as before.
+enum AskKind {
+    ASK_MOTION = 0,
+    ASK_LIT    = 1,
+    ASK_PERKEY = 2
+};
+
+inline bool ParseAsk(const std::string& s, AskKind& out) {
+    if (s == "motion") { out = ASK_MOTION; return true; }
+    if (s == "lit")    { out = ASK_LIT;    return true; }
+    if (s == "perkey") { out = ASK_PERKEY; return true; }
+    return false;
+}
+
+// Resolves the flag; a missing flag is the default, a malformed one is an error
+// the caller has to refuse rather than paper over with the default.
+inline bool ResolveAsk(const Flag& f, AskKind& out) {
+    out = ASK_MOTION;
+    if (!f.present) return true;
+    if (!f.hasValue) return false;
+    return ParseAsk(f.value, out);
+}
+
 } // namespace cli
