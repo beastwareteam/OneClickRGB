@@ -1050,6 +1050,70 @@ static bool DryRunSkip(const wchar_t* what) {
 }
 
 //=============================================================================
+// PROBE INSTANCE LOCK
+//
+// Every probe drives the keyboard over HID and reads its own writes back. That
+// only proves something while this process is the ONLY one touching the device:
+// g_state.deviceIoMutex serialises threads inside one process and is worth
+// nothing across two of them. EVisionQuery writes a report and then reads
+// whatever answer arrives next - with a second process on the same collection,
+// that answer may belong to the other one's request.
+//
+// This is not hypothetical. On 2026-08-17 a --rendercheck=edge and a
+// --rendercheck=kb ran at the same time. The two runs interleaved their reports
+// into one file, each read back traffic the other had caused, one of them
+// "successfully" read the keyboard block as 18 zero bytes - and then restored
+// those zeros into flash. The keyboard went dark while every single line of the
+// report said "verified". A read-back is only evidence under exclusivity.
+//
+// So: one hardware probe at a time. A second one refuses to start instead of
+// producing a report that looks like a measurement. Acquired AFTER the
+// --dry-run bail-outs, because a dry run touches nothing and two of them may
+// overlap freely (check_dryrun_flags.ps1 relies on that).
+//=============================================================================
+
+static HANDLE g_probeLock = nullptr;
+
+static bool AcquireProbeLock() {
+    g_probeLock = CreateMutexW(nullptr, TRUE, L"Local\\OneClickRGB_HidProbe");
+    if (!g_probeLock) return false;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(g_probeLock);
+        g_probeLock = nullptr;
+        return false;
+    }
+    return true;
+}
+
+static void ReleaseProbeLock() {
+    if (!g_probeLock) return;
+    ReleaseMutex(g_probeLock);
+    CloseHandle(g_probeLock);
+    g_probeLock = nullptr;
+}
+
+// Writes the standard refusal into a probe's own report file and logs it, so a
+// blocked run leaves the same paper trail as any other refusal instead of an
+// empty or, worse, a stale report from an earlier run.
+static int ProbeLockBusy(const std::wstring& reportPath, const char* tag) {
+    FILE* fp = _wfopen(reportPath.c_str(), L"w");
+    if (fp) {
+        fprintf(fp, "OneClickRGB probe\n"
+                    "ABORTED: another OneClickRGB instance is already talking to the\n"
+                    "device. Nothing was written and nothing was measured.\n\n"
+                    "Two processes on the same HID collection read each other's\n"
+                    "answers, so every read-back stops being evidence. Close the other\n"
+                    "instance (GUI or probe) and run this again.\n");
+        fclose(fp);
+    }
+    char dbg[192];
+    snprintf(dbg, sizeof(dbg),
+             "[%s] refused - another instance holds the probe lock; nothing was written", tag);
+    LogDebug(dbg);
+    return 3;
+}
+
+//=============================================================================
 // DEVICE CONTROL - ASUS AURA
 // Direct HID control with 65-byte buffer (Report ID 0xEC)
 //=============================================================================
@@ -1927,14 +1991,27 @@ static bool ReadEVisionEdgePayload(uint8_t out[10], uint8_t* profileOut, uint16_
     if (profile > 2) profile = 0;
     uint16_t off = (uint16_t)(profile * 0x40 + 0x1E);
 
-    uint8_t buf[10] = {0};
-    int rr = EVisionQuery(dev, 0x05, off, nullptr, 10, buf);
+    // Read twice and require both to agree. This value gets written back into
+    // flash at the end of a probe, so a single bad read does not just spoil a
+    // report - it corrupts the state the probe promised to preserve. That is
+    // not theory: a snapshot taken while a second process used the same
+    // collection came back as all zeros, "successfully", and was then restored.
+    // Two identical reads are cheap; an unnoticed garbage restore is not.
+    uint8_t buf[10] = {0}, buf2[10] = {0};
+    int rr  = EVisionQuery(dev, 0x05, off, nullptr, 10, buf);
+    Sleep(5);
+    int rr2 = EVisionQuery(dev, 0x05, off, nullptr, 10, buf2);
     EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
     hid_close(dev);
 
     if (profileOut) *profileOut = profile;
     if (offsetOut)  *offsetOut  = off;
-    if (rr < 0) return false;
+    if (rr < 0 || rr2 < 0) return false;
+    if (memcmp(buf, buf2, 10) != 0) {
+        LogDebug("[EVision] Edge snapshot unstable - two reads differ, refusing to "
+                 "treat it as a restore point");
+        return false;
+    }
     if (out) memcpy(out, buf, 10);
     return true;
 }
@@ -1999,14 +2076,26 @@ static bool ReadEVisionKeyboardPayload(uint8_t out[18], uint8_t* profileOut, uin
     if (profile > 2) profile = 0;
     uint16_t off = (uint16_t)(profile * 0x40 + 0x01);
 
-    uint8_t buf[18] = {0};
-    int rr = EVisionQuery(dev, 0x05, off, nullptr, 18, buf);
+    // Two agreeing reads before this counts as a restore point - see the same
+    // guard in ReadEVisionEdgePayload. This is the exact block that was read as
+    // 18 zero bytes under process contention and then written back, which put
+    // mode 0, brightness 0 and commit 0 into the active profile and turned the
+    // keyboard off with a report full of "verified".
+    uint8_t buf[18] = {0}, buf2[18] = {0};
+    int rr  = EVisionQuery(dev, 0x05, off, nullptr, 18, buf);
+    Sleep(5);
+    int rr2 = EVisionQuery(dev, 0x05, off, nullptr, 18, buf2);
     EVisionQuery(dev, 0x02, 0, nullptr, 0, nullptr);
     hid_close(dev);
 
     if (profileOut) *profileOut = profile;
     if (offsetOut)  *offsetOut  = off;
-    if (rr < 0) return false;
+    if (rr < 0 || rr2 < 0) return false;
+    if (memcmp(buf, buf2, 18) != 0) {
+        LogDebug("[EVision] Keyboard snapshot unstable - two reads differ, refusing to "
+                 "treat it as a restore point");
+        return false;
+    }
     if (out) memcpy(out, buf, 18);
     return true;
 }
@@ -5002,6 +5091,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     // expected to live (the Win key remapped to a no-op rather than a flag).
     // Pure reads - command 0x05 only, no 0x06 writes anywhere in this path.
     if (strstr(lpCmdLine, "--kbdump")) {
+        // A dump taken while another instance writes is not a reference state -
+        // and this dump is exactly what the collateral checks compare against.
+        if (!AcquireProbeLock())
+            return ProbeLockBusy(GetAppDataPath() + L"\\docs\\kbdump.txt", "kbdump");
         hid_init();
         hid_device* dev = nullptr;
         struct hid_device_info* devs = hid_enumerate(Devices::EVISION_VID, Devices::EVISION_PID);
@@ -5032,6 +5125,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
             hid_close(dev);
         }
         hid_exit();
+        ReleaseProbeLock();
         return 0;
     }
 
@@ -5138,6 +5232,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
                          "would write mode bytes to keyboard flash");
                 return 0;
             }
+
+            if (!AcquireProbeLock())
+                return ProbeLockBusy(GetAppDataPath() + L"\\docs\\kbmode_probe.txt", "kbmode");
 
             LoadSettings();
 
@@ -5328,6 +5425,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
             }
 
             if (fp) fclose(fp);
+            ReleaseProbeLock();
             {
                 char done[256];
                 snprintf(done, sizeof(done),
@@ -5409,6 +5507,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
                          "would write the edge payload to keyboard flash");
                 return 0;
             }
+
+            if (!AcquireProbeLock()) return ProbeLockBusy(reportPath, "edgeprobe");
 
             LoadSettings();
 
@@ -5644,6 +5744,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
             if (fp) fclose(fp);
             hid_exit();
+            ReleaseProbeLock();
             {
                 char done[256];
                 snprintf(done, sizeof(done),
@@ -5695,10 +5796,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         if (rcFlag.present) {
             std::wstring dir = GetAppDataPath() + L"\\docs";
             SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
-            const std::wstring reportPath = dir + L"\\rendercheck.txt";
 
             const bool wantEdge = rcFlag.hasValue && rcFlag.value == "edge";
             const bool wantKb   = rcFlag.hasValue && rcFlag.value == "kb";
+
+            // One report per target, not one shared file. Two runs writing the
+            // same path interleaved their output into a single unreadable
+            // report on 2026-08-17 - a header from one run above rows and a
+            // restore line from the other. Separate names also mean the edge
+            // result survives when the keyboard run follows it.
+            const std::wstring reportPath =
+                dir + (wantEdge ? L"\\rendercheck_edge.txt"
+                     : wantKb   ? L"\\rendercheck_kb.txt"
+                                : L"\\rendercheck.txt");
+
             if (!wantEdge && !wantKb) {
                 FILE* fe = _wfopen(reportPath.c_str(), L"w");
                 if (fe) {
@@ -5725,6 +5836,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
                 LogDebug("[dry-run] --rendercheck skipped - would write the payload and open dialogs");
                 return 0;
             }
+
+            // Exclusivity before the first HID access - without it the
+            // read-backs below are not evidence about our own writes.
+            if (!AcquireProbeLock()) return ProbeLockBusy(reportPath, "rendercheck");
 
             LoadSettings();
             hid_init();
@@ -5876,12 +5991,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
             if (fp) fclose(fp);
             hid_exit();
+            ReleaseProbeLock();
             {
                 char done[256];
                 snprintf(done, sizeof(done),
                          "[rendercheck] target=%s rc=%d - report: "
-                         "%%APPDATA%%\\OneClickRGB\\docs\\rendercheck.txt",
-                         targetName, rc);
+                         "%%APPDATA%%\\OneClickRGB\\docs\\rendercheck_%s.txt",
+                         targetName, rc, wantEdge ? "edge" : "kb");
                 LogDebug(done);
             }
             return rc;
@@ -5920,6 +6036,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
                 LogDebug("[dry-run] --unlock-winkey skipped - would write 00 00 to profile+0x14");
                 return 0;
             }
+
+            if (!AcquireProbeLock()) return ProbeLockBusy(reportPath, "unlock-winkey");
 
             hid_init();
             hid_device* dev = nullptr;

@@ -111,13 +111,13 @@ $cases = @(
     # hier also die eigentliche Pruefung.
     @{ Name = '--rendercheck=edge (dry-run, kein Dialog)'
        Args = @('--dry-run','--rendercheck=edge')
-       Report = 'rendercheck.txt'; Exit = 0; MaxSec = 15
+       Report = 'rendercheck_edge.txt'; Exit = 0; MaxSec = 15
        ReportMatch = 'no question was asked'
        LogMatch = '\[dry-run\].*rendercheck skipped' }
 
     @{ Name = '--rendercheck=kb (dry-run, kein Dialog)'
        Args = @('--dry-run','--rendercheck=kb')
-       Report = 'rendercheck.txt'; Exit = 0; MaxSec = 15
+       Report = 'rendercheck_kb.txt'; Exit = 0; MaxSec = 15
        ReportMatch = 'no question was asked'
        LogMatch = '\[dry-run\].*rendercheck skipped' }
 
@@ -225,6 +225,50 @@ if (Test-Path $probe) {
     $note = if ($stillRunning) { "GUI gestartet und beendet - kein Probe-Report" } else { "kein Probe-Report" }
     Write-Host "  OK   '--kbmode-sweep5' startet keinen Sweep ($note)" -ForegroundColor Green
     $pass++
+}
+
+# --- Instanzsperre ----------------------------------------------------------
+# Zwei Prozesse auf derselben HID-Collection lesen die Antworten des jeweils
+# anderen. Am 17.08.2026 liefen --rendercheck=edge und --rendercheck=kb
+# gleichzeitig: die Reports schrieben sich ineinander, ein Snapshot kam als 18
+# Nullbytes zurueck und wurde als "verified" ins Flash restauriert - die
+# Tastatur ging aus, waehrend jede Zeile "verified" meldete.
+#
+# Hier wird der Mutex von aussen gehalten, damit der Fall deterministisch
+# pruefbar ist, ohne zwei echte Probes zu starten. Erwartet: sofortiger Abbruch
+# mit Exit 3 und ein Report, der sagt, dass nichts gemessen wurde.
+Write-Host ""
+Write-Host "Instanzsperre (zweite Instanz darf die Hardware nicht anfassen):"
+$dump = Join-Path $docsDir 'kbdump.txt'
+if (Test-Path $dump) { Remove-Item $dump -Force }
+
+$held = New-Object System.Threading.Mutex($true, 'Local\OneClickRGB_HidProbe')
+try {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $p2 = Start-Process -FilePath $Exe -ArgumentList @('--kbdump') `
+                        -WorkingDirectory $workDir -PassThru -Wait
+    $sw.Stop()
+    $probs = @()
+    if ($p2.ExitCode -ne 3)  { $probs += "Exitcode $($p2.ExitCode) statt 3" }
+    if ($sw.Elapsed.TotalSeconds -gt 15) { $probs += "hat $([int]$sw.Elapsed.TotalSeconds)s gebraucht" }
+    if (-not (Test-Path $dump)) {
+        $probs += "kein Report geschrieben"
+    } elseif ((Get-Content $dump -Raw) -notmatch 'another OneClickRGB instance') {
+        $probs += "Report nennt den Grund nicht"
+    } elseif ((Get-Content $dump -Raw) -match '^\s*0000:') {
+        $probs += "Report enthaelt Dumpzeilen - es wurde doch gelesen"
+    }
+    if ($probs.Count -eq 0) {
+        Write-Host ("  OK   zweite Instanz bricht ab ({0:N1}s)" -f $sw.Elapsed.TotalSeconds) -ForegroundColor Green
+        $pass++
+    } else {
+        Write-Host "  FAIL zweite Instanz wurde nicht sauber abgewiesen" -ForegroundColor Red
+        $probs | ForEach-Object { Write-Host "         - $_" -ForegroundColor Red }
+        $fail++
+    }
+} finally {
+    $held.ReleaseMutex()
+    $held.Dispose()
 }
 
 Remove-Item $workDir -Recurse -Force -ErrorAction SilentlyContinue

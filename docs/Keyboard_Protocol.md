@@ -125,6 +125,30 @@ values**, and `KB_MODE_TABLE` is an unverified guess outside `0x06`.
   `animated?` column is empty because nobody was watching, so it establishes
   nothing about rendering either. Do not read it as "no mode animates".
 
+* The **first `--rendercheck` run** is void, and it did damage. `--rendercheck=edge`
+  and `--rendercheck=kb` were started at the same time. `deviceIoMutex` only
+  serialises threads inside one process, so the two instances shared the HID
+  collection: they interleaved their output into one report file (a keyboard
+  header above an edge restore line), each read back traffic the other had
+  caused, one of them read the keyboard block as **18 zero bytes** — and
+  restored those zeros into flash. The keyboard block went to mode 0,
+  brightness 0, commit 0, i.e. dark, while every line of the report said
+  `verified`. Repaired with `--kbmode=0x06`; the block reads
+  `06 04 05 00 00 00 13 FF 00 01` again.
+
+  Preliminary observation from that run, **not** yet a measurement: the
+  keyboard lighting reacted to all four states, the side/edge lighting to none.
+  Plausible, and it matches everything else here, but it was made while two
+  processes drove the device — it needs one clean repeat per target before
+  anything is changed on the strength of it.
+
+  Fixed since: a named probe lock (`Local\OneClickRGB_HidProbe`) that every
+  hardware probe takes and a second instance refuses to start against (exit 3);
+  one report file per target; and both snapshot helpers now read twice and
+  refuse to become a restore point unless the two reads agree. A read-back is
+  only evidence under exclusivity — that assumption was implicit everywhere in
+  this document and is now enforced.
+
 One thing that run *did* show: the firmware stored **every** value, including
 `0x06..0x0A`, which can hardly all be valid edge modes. A block that is really
 interpreted would be expected to refuse something. That leans towards "this
@@ -386,7 +410,16 @@ back, and does not write at all under `--dry-run`.
 | `tests\run_tests.cmd` | no | 138 unit checks over `cli_args.h` + `effect_limits.h`: flag tokenising, strict value parsing, clamps, edge-mode table round-trip, `NormalizeEdgeMode` closure over the ComboBox table, the `EDGE_MODE_STATIC != 0x04` invariant |
 | `tests\test_kbdump_diff.ps1` | no | the collateral checker itself, against synthetic dumps containing known rule-2 violations |
 | `tools\check_dryrun_flags.ps1` | reads only | every probe flag under `--dry-run`: exit code, immediate abort instead of sleeping through the hold times, report without measurement rows, skip line in `debug.log`; plus that a mistyped `--kbmode-sweep5` starts no sweep. Also covers the dialog paths (`--rendercheck`, `--confirm`) — under `--dry-run` they must return *before* the first `MessageBox`, since a dialog waiting for a click in an unattended test would hang it to the timeout and disguise the failure |
-| `--rendercheck=edge\|kb` | **writes** | the anchor: four held states (white / off / red / green), one dialog each, verdict line, snapshot + verified restore. Answers whether the block renders at all before any mode sweep is worth running |
+| `--rendercheck=edge\|kb` | **writes** | the anchor: four held states (white / off / red / green), one dialog each, verdict line, snapshot + verified restore. Answers whether the block renders at all before any mode sweep is worth running. Report per target: `rendercheck_edge.txt` / `rendercheck_kb.txt` |
+
+**Run one probe at a time.** Every hardware probe takes the named lock
+`Local\OneClickRGB_HidProbe` and a second one exits 3 without touching the
+device. This is not a convenience: `EVisionQuery` writes a report and reads
+whichever answer arrives next, so with two processes on the collection a
+read-back can belong to the other one's request — and a snapshot read that way
+gets written back into flash at the end of the probe. That is how the keyboard
+was switched off by two diagnostics that both reported success. The lock is
+taken *after* the `--dry-run` bail-outs, so dry runs may still overlap freely.
 | `tools\kbdump_diff.ps1` | no | before/after dump comparison over `0x000..0x3FF`, fails on any change outside a given range |
 | `tools\edge_probe_session.ps1` | **writes** | drives dump → sweep → dump → collateral diff in one go, and refuses to start while the GUI is running. `-What mode` / `-What speed` sweep the edge payload, `-What kbmode` the keyboard block; the allowed-range check for the collateral diff follows the chosen path (`+0x1E..0x27` vs `+0x01..0x12`) |
 | `tools\validate_profiles.ps1` | no | `.rgb` profiles against what `LoadProfile` accepts |
