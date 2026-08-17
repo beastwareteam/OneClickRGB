@@ -67,15 +67,26 @@ enum EdgeModeConfidence {
     EDGE_CONF_STORED_ONLY = 1    // firmware stores it; rendering never confirmed
 };
 
-// Only 0x00 (static colour) and 0x05 (off) have ever been seen on the strip.
-// 0x01/0x02/0x03 come from the payload layout, not from an observation.
+// Measured 2026-08-17 with --rendercheck=edge: NO edge mode renders on this
+// device. The probe held static white, off, static red and static green at
+// profile_base+0x1E, asked about each state while it was showing, and the
+// answer was "nein" four times over - with every payload verified by read-back
+// and the pre-probe state restored (rc=0, rendercheck_edge.txt).
 //
-// They deliberately stay in the table until --edgemode-sweep has run with
-// somebody watching: dropping them first would remove the very entries the
-// sweep has to test. Once the sweep says which bytes animate, the ones that do
-// not come out of EDGE_MODE_TABLE (and out of the ComboBox with them).
-inline EdgeModeConfidence EdgeModeConfidenceOf(uint8_t mode) {
-    if (mode == EDGE_MODE_STATIC || mode == EDGE_MODE_OFF) return EDGE_CONF_RENDER_SEEN;
+// That retires the two entries this table used to call RENDER_SEEN. `0x00`
+// carried [HIGH] "colour changes are visible on the strip" and `0x05` [HIGH]
+// "strip goes dark"; both came from the era when the app wrote a colour to
+// +0x23..0x25 and the same colour was then read back there, which is evidence
+// about the flash and not about a light. The same run showed the firmware
+// accepting *every* byte 0x00..0x0A - no validation, because nothing consumes
+// them.
+//
+// So nothing here is RENDER_SEEN any more. The enum keeps both values because
+// the keyboard block at +0x01 does render (measured the same day,
+// rendercheck_kb.txt) and its mode bytes still have to be classified; promoting
+// anything back to RENDER_SEEN needs a measurement in the same commit
+// (CLAUDE.md rule 1).
+inline EdgeModeConfidence EdgeModeConfidenceOf(uint8_t /*mode*/) {
     return EDGE_CONF_STORED_ONLY;
 }
 

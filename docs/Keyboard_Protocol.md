@@ -56,7 +56,26 @@ Offsets below are **relative to the profile base** (add `0x40`/`0x80` for P1/P2)
 | **`+0x1E..0x27`** | **EDGE payload (10 bytes)** | **[HIGH]** | `00 04 02 00 00 00 13 FF 00 01` = exact `[mode,bright,speed,dir,rand,R,G,B,coloff,save]` |
 | `+0x28..0x3F` | padding | [?] | zeros |
 
-### 3.1 Edge LEDs — solved
+### 3.1 Edge LEDs — offset solved, but nothing there renders
+
+> **Result of 2026-08-17 (`rendercheck_edge.txt`, rc=0, all four states verified
+> and restored):** the payload at `profile_base+0x1E` stores everything and
+> **renders nothing**. Static white, off, static red, static green — four held
+> states, four times "nein". Meanwhile the keyboard block at `+0x01` passed the
+> same four states (`rendercheck_kb.txt`, four times "ja"), so the device, the
+> transport and the probe are all fine; this offset simply does not drive a
+> light on this unit.
+>
+> Read the rest of this section with that in mind: the byte layout below is
+> correct and confirmed, the *conclusion* that it controls an edge strip is not.
+> Most likely the 0x40-byte profile carries two effect payloads — `+0x01` for
+> the main lighting and `+0x1E` for a second zone this model does not populate.
+> That also explains why the firmware accepts every value `0x00..0x0A` there
+> without validating anything: nothing consumes them.
+>
+> Open and **not** a software question: does this keyboard have side/edge
+> lighting at all? Until that is answered, the Edge controls in the UI offer
+> something no measurement supports.
 The edge strip data is written as the 10-byte payload at **`profile_base + 0x1E`**
 (absolute `0x1E` / `0x5E` / `0x9E`). In the live capture P0+0x1E reads
 `00 04 02 00 00 00 13 FF 00 01`:
@@ -83,12 +102,18 @@ the light (rule 1).
 
 | Value | Meaning | Rendering confidence | Basis |
 |---|---|---|---|
-| `0x00` | static / freeze | **[HIGH]** | colour changes are visible on the strip |
-| `0x01` | wave? | **[?]** | payload layout only — never observed animating |
-| `0x02` | spectrum? | **[?]** | payload layout only — never observed animating |
-| `0x03` | breathing? | **[?]** | stored and read back, reported as **not animating** |
-| `0x05` | off | **[HIGH]** | strip goes dark |
-| `0x04` | legacy "static" | **[?]** | mapped to `0x00` by `NormalizeEdgeMode`; produced rainbow-only behaviour |
+| `0x00` | static / freeze | **[HIGH — does NOT render]** | `--rendercheck=edge` held static white, red and green here; nothing reacted |
+| `0x01` | wave? | **[HIGH — does NOT render]** | swept 13:11, no observation; anchor disproves the whole offset |
+| `0x02` | spectrum? | **[HIGH — does NOT render]** | as above |
+| `0x03` | breathing? | **[HIGH — does NOT render]** | as above |
+| `0x05` | off | **[HIGH — does NOT render]** | `--rendercheck=edge` held off (brightness 0, RGB black); nothing went dark |
+| `0x04` | legacy "static" | — | mapped to `0x00` by `NormalizeEdgeMode` |
+
+The two `[HIGH]` entries this table used to carry (`0x00` "colour changes are
+visible on the strip", `0x05` "strip goes dark") were **wrong**, and the way
+they were wrong is worth keeping in view: both came from the app writing a
+colour to `+0x23..0x25` and reading the same colour back. That is evidence about
+flash, not about light. Nobody had ever held one state and looked.
 
 Live state on 2026-08-17, straight from `--kbdump` (P0 `+0x1E..0x27`):
 

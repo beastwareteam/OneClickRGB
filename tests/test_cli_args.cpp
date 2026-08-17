@@ -296,12 +296,18 @@ static void TestEdgeModeConfidence() {
     group("effect_limits - rendering confidence is honest");
 
     // The point of the confidence split: a read-back proves storage, not
-    // rendering. Only 0x00 and 0x05 have been observed on the strip. If somebody
-    // promotes one of the three effect bytes to "seen", these lines must be
-    // updated in the same commit as the measurement that justifies it - and
-    // docs/Keyboard_Protocol.md 3.1 with them (CLAUDE.md rule 1).
-    CHECK_EQ(EdgeModeConfidenceOf(EDGE_MODE_STATIC), EDGE_CONF_RENDER_SEEN);
-    CHECK_EQ(EdgeModeConfidenceOf(EDGE_MODE_OFF), EDGE_CONF_RENDER_SEEN);
+    // rendering.
+    //
+    // 0x00 and 0x05 used to be claimed as RENDER_SEEN. --rendercheck=edge on
+    // 2026-08-17 disproved both: static white, off, static red and static green
+    // were each held at profile_base+0x1E and asked about, and nothing on the
+    // device reacted to any of them - while every payload verified by read-back.
+    // Nothing at this offset renders, so nothing here may claim to.
+    //
+    // Promoting any value back to RENDER_SEEN requires a measurement in the same
+    // commit, plus docs/Keyboard_Protocol.md 3.1 (CLAUDE.md rule 1).
+    CHECK_EQ(EdgeModeConfidenceOf(EDGE_MODE_STATIC), EDGE_CONF_STORED_ONLY);
+    CHECK_EQ(EdgeModeConfidenceOf(EDGE_MODE_OFF), EDGE_CONF_STORED_ONLY);
     CHECK_EQ(EdgeModeConfidenceOf(EDGE_MODE_WAVE), EDGE_CONF_STORED_ONLY);
     CHECK_EQ(EdgeModeConfidenceOf(EDGE_MODE_SPECTRUM), EDGE_CONF_STORED_ONLY);
     CHECK_EQ(EdgeModeConfidenceOf(EDGE_MODE_BREATHING), EDGE_CONF_STORED_ONLY);
