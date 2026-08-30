@@ -2824,19 +2824,27 @@ bool EnableShutdownPrivilege() {
     return (GetLastError() == ERROR_SUCCESS);
 }
 
-// Global flag for resume detection
-std::atomic<bool> g_resumeDetected{false};
-std::atomic<bool> g_watcherRunning{true};
-
 // --- Resume gating -----------------------------------------------------------
 // A post-resume reset is expensive: FullHIDReset() tears down and re-enumerates
 // the whole HID stack and sleeps ~800ms, then every device is written again.
-// Four separate notifications can request it (watchdog time jump, APM resume,
-// display-on, session unlock) and two of them - display-on and unlock - also
-// fire during ordinary AFK idle, when no standby happened at all. Without
-// gating, an idle machine whose monitor keeps cycling off/on re-initialises the
-// devices forever; the re-apply writes to keyboard and mouse, which can itself
-// wake the display and sustain the cycle.
+//
+// Frueher konnten FUENF Quellen ihn anfordern: der Zeitsprung-Wachhund, die
+// beiden APM-Resume-Nachrichten, Display-an und Entsperren. Drei davon feuern
+// auch auf einer wachen Maschine. Jetzt ist es genau EINE - APM-Resume - und
+// die Torsteuerung darunter ist die zweite Sicherung, nicht die erste.
+//
+// Warum der Wachhund weg ist: er verglich, ob ein Sleep(1000) laenger als 5 s
+// gedauert hat, und setzte daraus g_suspendSeen - das eine Flag, dem die ganze
+// Torsteuerung vertraut. Unter Last, beim Auslagern oder an einem Haltepunkt
+// dauert ein Sleep(1000) laenger als 5 s, ohne dass irgendetwas geschlafen
+// haette. Auf diesem Rechner ist automatischer Standby ausgeschaltet
+// (powercfg: STANDBYIDLE = 0) und der Ruhezustand deaktiviert, PBT_APMSUSPEND
+// kann also praktisch nie feuern - und trotzdem kamen Ausloeser. Per Ausschluss
+// blieb nur der Wachhund.
+//
+// Ersetzt durch RegisterSuspendResumeNotification: ereignisgesteuert, im
+// Leerlauf null CPU. Eine Pausenlogik "Wachhund schlaeft bei Benutzereingabe"
+// haette den Sekundentakt nur ausgeduennt, nicht abgeschafft.
 //
 // Rules: only reset when a real suspend was observed, never more than one reset
 // at a time, and at most one per cooldown window.
@@ -2845,6 +2853,37 @@ std::atomic<bool> g_suspendSeen{false};        // genuine standby observed
 std::atomic<bool> g_resetInFlight{false};      // reset currently running
 std::atomic<bool> g_resetArmed{false};         // timer already scheduled
 std::atomic<ULONGLONG> g_lastResetTick{0};     // completion time of last reset
+
+// Ein Suspend kann uns jetzt auf zwei Wegen erreichen: als Standardnachricht an
+// ein Top-Level-Fenster und ueber RegisterSuspendResumeNotification. Beide sind
+// erwuenscht - der zweite traegt auch dort, wo der erste ausbleibt -, aber der
+// Blackout soll deswegen nicht zweimal laufen.
+#define SUSPEND_DEBOUNCE_MS 5000
+std::atomic<ULONGLONG> g_lastSuspendTick{0};
+
+// Rueckgabewerte der Benachrichtigungs-Registrierungen. Sie wurden bisher
+// weggeworfen; damit war weder eine fehlgeschlagene Registrierung erkennbar
+// noch das Abmelden moeglich.
+HPOWERNOTIFY g_hDisplayNotify = NULL;
+HPOWERNOTIFY g_hSuspendNotify = NULL;
+
+// Die beiden Energie-GUIDs, ausgeschrieben mit ACHT gezaehlten Data4-Bytes.
+//
+// winnt.h deklariert sie ueber DEFINE_GUID nur als extern; die Definition kaeme
+// aus einer zusaetzlichen Bibliothek. Hier stehen sie deshalb als eigene
+// Konstanten, gegengelesen an Windows Kits/10/Include/10.0.26100.0/um/winnt.h
+// Zeile 16306 und 16458:
+//
+//   GUID_CONSOLE_DISPLAY_STATE  6fe69556-704a-47a0-8f24-c28d936fda47
+//   GUID_SYSTEM_AWAYMODE        98a7f580-01f7-48aa-9c0f-44352c29e5c0
+//
+// Genau hier stand der Fehler, der den ganzen Display-Zweig zu totem Code
+// gemacht hat: Data4 mit sieben Eintraegen, das 0xc2 fehlte. Wer diese Zeilen
+// aendert, zaehlt die geschweiften Klammern nach.
+static const GUID kGuidConsoleDisplayState =
+    { 0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47 } };
+static const GUID kGuidSystemAwayMode =
+    { 0x98a7f580, 0x01f7, 0x48aa, { 0x9c, 0x0f, 0x44, 0x35, 0x2c, 0x29, 0xe5, 0xc0 } };
 
 // Arm the deferred post-resume reset. Silently ignores triggers that are not
 // backed by an actual suspend, and those inside the cooldown window.
@@ -2859,30 +2898,6 @@ static void ScheduleResumeReset(HWND hWnd) {
     if (last && (GetTickCount64() - last) < RESUME_COOLDOWN_MS) return;
     g_resetArmed = true;
     SetTimer(hWnd, ID_TIMER_RESUME, 3000, NULL);
-}
-
-// Watchdog thread that detects resume by monitoring time jumps
-void ResumeWatcherThread() {
-    ULONGLONG lastTick = GetTickCount64();
-
-    while (g_watcherRunning) {
-        Sleep(1000);  // Check every second
-
-        ULONGLONG currentTick = GetTickCount64();
-        ULONGLONG elapsed = currentTick - lastTick;
-
-        // If more than 5 seconds passed in what should be 1 second,
-        // we likely just resumed from standby
-        if (elapsed > 5000) {
-            g_resumeDetected = true;
-            // Post message to main window
-            if (g_state.hWnd) {
-                PostMessage(g_state.hWnd, WM_USER + 100, 0, 0);  // Custom resume message
-            }
-        }
-
-        lastTick = currentTick;
-    }
 }
 
 void SystemStandby() {
@@ -3323,14 +3338,35 @@ void UpdateAllControls() {
 // (Projektregel 1).
 //=============================================================================
 
-bool ApplyLightsOff() {
+// lockTimeoutMs < 0 wartet auf den Geraetemutex, >= 0 gibt nach dieser Frist auf.
+//
+// Die Frist ist fuer die Nachrichtenzweige da (Standby, Herunterfahren).
+// Windows gibt einem PBT_APMSUSPEND rund zwei Sekunden; haelt gerade ein Apply
+// den Mutex, wuerde blockierendes Warten die Nachrichtenschleife anhalten und
+// der Rechner schliefe mitten in unserem Write ein. Lieber melden, dass es
+// nicht ging, als es zu erzwingen.
+bool ApplyLightsOff(int lockTimeoutMs = -1) {
     if (DryRunSkip(L"Beleuchtung aus")) return false;
 
     bool kbOk = true, edgeOk = true;
     int  unverifiedTried = 0, unverifiedAcked = 0;
 
+    std::unique_lock<std::mutex> ioLock(g_state.deviceIoMutex, std::defer_lock);
+    if (lockTimeoutMs < 0) {
+        ioLock.lock();
+    } else {
+        const ULONGLONG deadline = GetTickCount64() + (ULONGLONG)lockTimeoutMs;
+        while (!ioLock.try_lock()) {
+            if (GetTickCount64() >= deadline) {
+                AppendStatus(L"=== Aus NICHT ausgeführt: Gerät belegt (Frist abgelaufen) ===");
+                LogDebug("[lightsoff] device mutex busy - nothing was written");
+                return false;
+            }
+            Sleep(20);
+        }
+    }
+
     {
-        std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
         hid_init();
 
         if (g_state.enableAura) {
@@ -5736,17 +5772,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         return DefWindowProc(hWnd, msg, wParam, lParam);
 
-    // Custom message from resume watcher thread
-    // Resume detected by watchdog thread (time jump)
-    case WM_USER + 100: {
-        g_resumeDetected = false;
-        // A >5s time jump means the machine really was out, even if we never
-        // saw PBT_APMSUSPEND (it is not delivered for every sleep path).
-        g_suspendSeen = true;
-        ScheduleResumeReset(hWnd);
-        return 0;
-    }
-
     case WM_APP_STATUS_APPEND: {
         std::wstring* msg = (std::wstring*)lParam;
         if (msg) {
@@ -5761,52 +5786,122 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
 
     case WM_POWERBROADCAST: {
-        // Handle SUSPEND - turn off all devices before sleep
+        // Energiesparmodus betreten. Standby und Ruhezustand melden sich beide
+        // hier - unterscheidbar sind sie an dieser Stelle nicht, und sie muessen
+        // es auch nicht sein: dunkelschalten ist fuer beide richtig.
         if (wParam == PBT_APMSUSPEND) {
-            g_suspendSeen = true;
+            const ULONGLONG now  = GetTickCount64();
+            const ULONGLONG last = g_lastSuspendTick.load();
+            if (last && (now - last) < SUSPEND_DEBOUNCE_MS) {
+                LogDebug("[power] PBT_APMSUSPEND doppelt innerhalb der Entprellung - ignoriert");
+                return TRUE;
+            }
+            g_lastSuspendTick = now;
+            g_suspendSeen     = true;
+
             ClearStatus();
-            AppendStatus(L"System entering standby...");
-            // Derselbe Weg wie der Aus-Knopf. Vorher stand hier eine zweite,
-            // eigene Fassung des Ausschaltens - unter anderem mit Modusbyte
-            // 0x00, das in docs/Keyboard_Protocol.md gar nicht belegt ist.
-            ApplyLightsOff();
+            AppendStatus(L"Energiesparmodus - Beleuchtung wird ausgeschaltet");
+            // Derselbe Weg wie der Aus-Knopf. Mit Frist statt blockierend: haelt
+            // gerade ein Apply den Geraetemutex, wuerde ein blockierendes Warten
+            // die Nachrichtenschleife anhalten, und Windows gibt einem
+            // PBT_APMSUSPEND nur rund zwei Sekunden.
+            ApplyLightsOff(1200);
         }
-        // Handle RESUME from sleep/hibernate
+        // Aufwachen. Der EINZIGE verbliebene Ausloeser des HID-Resets.
         else if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
             g_suspendSeen = true;   // authoritative: we really were suspended
             ScheduleResumeReset(hWnd);
         }
-        // Display power state change. Monitor-on is NOT a resume - it fires on
-        // every AFK dim/wake cycle. Only honoured when a suspend preceded it.
+        // Eine registrierte Energieeinstellung hat sich geaendert.
+        //
+        // Nach pbs->PowerSetting verzweigen, nicht nur nach der Nutzlast: es ist
+        // mehr als eine GUID registriert, und die Nutzlast der einen als
+        // Display-Zustand der anderen zu lesen waere ein Messfehler, den nichts
+        // mehr auffangen kann.
         else if (wParam == PBT_POWERSETTINGCHANGE) {
-            POWERBROADCAST_SETTING* pbs = (POWERBROADCAST_SETTING*)lParam;
+            const POWERBROADCAST_SETTING* pbs = (const POWERBROADCAST_SETTING*)lParam;
             if (pbs && pbs->DataLength >= 4) {
-                DWORD displayState = *((DWORD*)pbs->Data);
-                if (displayState == 1) {
-                    ScheduleResumeReset(hWnd);
+                const DWORD value = *((const DWORD*)pbs->Data);
+
+                if (IsEqualGUID(pbs->PowerSetting, kGuidConsoleDisplayState)) {
+                    // Die erste eintreffende Nachricht ist der einzige Beleg
+                    // dafuer, dass die Anmeldung nicht nur angenommen, sondern
+                    // auch bedient wird. Mit der alten, um ein Byte verkuerzten
+                    // GUID kam hier nie etwas an, obwohl die Anmeldung gelang.
+                    static bool s_firstDisplayNotify = true;
+                    if (s_firstDisplayNotify) {
+                        s_firstDisplayNotify = false;
+                        LogDebug("[power] erste Display-Benachrichtigung erhalten "
+                                 "- die GUID stimmt");
+                    }
+                    // Monitor aus/an loest NICHTS mehr aus, es wird nur
+                    // protokolliert. Auf diesem Rechner geht der Monitor alle
+                    // 15 Minuten aus (powercfg: VIDEOIDLE = 900 s), waehrend
+                    // automatischer Standby ganz abgeschaltet ist - Display-an
+                    // war hier also nie ein Aufwachen, sondern der Normalfall.
+                    LogDebug(value == 0 ? "[power] Display aus"
+                           : value == 1 ? "[power] Display an"
+                                        : "[power] Display gedimmt");
+                }
+                else if (IsEqualGUID(pbs->PowerSetting, kGuidSystemAwayMode)) {
+                    LogDebug(value ? "[power] Abwesenheitsmodus betreten"
+                                   : "[power] Abwesenheitsmodus verlassen");
                 }
             }
         }
         return TRUE;
     }
 
-    // Session change (lock/unlock). Unlock alone is not a resume either.
+    // Sperren und Entsperren loesen nichts mehr aus.
+    //
+    // Entsperren war einer von fuenf Wegen zum HID-Reset und der
+    // irrefuehrendste: es feuert Sekunden bis Stunden nach dem eigentlichen
+    // Aufwachen, und genauso nach einer Mittagspause, in der die Maschine
+    // durchgelaufen ist. Was ein Aufwachen ist, sagt PBT_APMRESUME* - und sonst
+    // nichts.
     case WM_WTSSESSION_CHANGE: {
-        // WTS_SESSION_UNLOCK = 0x8
-        if (wParam == 0x8) {
-            ScheduleResumeReset(hWnd);
-        }
+        if (wParam == WTS_SESSION_LOCK)        LogDebug("[power] Sitzung gesperrt");
+        else if (wParam == WTS_SESSION_UNLOCK) LogDebug("[power] Sitzung entsperrt");
         return TRUE;
     }
+
+    // Herunterfahren und Abmelden. Bisher gar nicht behandelt: die Beleuchtung
+    // blieb an, waehrend Standby sie dunkel schaltete - dieselbe Maschine, zwei
+    // Ergebnisse. Viele Boards halten die RGB-Schienen in S5 unter Spannung,
+    // also bleibt es sichtbar stehen.
+    case WM_QUERYENDSESSION:
+        // Nicht widersprechen; nur ankuendigen, dass wir gleich aufraeumen.
+        return TRUE;
+
+    case WM_ENDSESSION:
+        if (wParam) {
+            LogDebug("[power] WM_ENDSESSION - Beleuchtung wird ausgeschaltet");
+            ApplyLightsOff(1200);
+        }
+        return 0;
 
     case WM_TIMER:
         if (wParam == ID_TIMER_RESUME) {
             KillTimer(hWnd, ID_TIMER_RESUME);
             g_resetArmed = false;
-            // Consume the suspend: further display-on/unlock events must not
-            // queue another reset until the next genuine standby.
+
+            // Laeuft schon einer, wird NEU scharfgestellt statt aufzugeben.
+            //
+            // Vorher stand die Ruecknahme von g_suspendSeen VOR diesem Test: der
+            // Suspend war damit verbraucht, der Reset fand aber nicht statt, und
+            // ein neuer war bis zum naechsten echten Standby nicht mehr moeglich.
+            // Die Geraete blieben dunkel oder falsch, bis jemand einen Regler
+            // anfasste.
+            if (g_resetInFlight.load()) {
+                g_resetArmed = true;
+                SetTimer(hWnd, ID_TIMER_RESUME, 3000, NULL);
+                break;
+            }
+
+            // Erst jetzt den Suspend verbrauchen - ab hier laeuft der Reset
+            // wirklich.
             g_suspendSeen = false;
-            if (g_resetInFlight.exchange(true)) break;  // one at a time
+            if (g_resetInFlight.exchange(true)) break;
             ClearStatus();
             AppendStatus(L"System resumed - resetting RGB...");
             // Off the UI thread: FullHIDReset() sleeps ~800ms and re-enumerates
@@ -5829,7 +5924,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_DESTROY:
         // Save window position before exit
         SaveAppSettings();
-        g_watcherRunning = false;  // Stop resume watcher thread
         StopApplyWorker();
         // Unregister hotkeys
         UnregisterHotKey(hWnd, ID_HOTKEY_BLUE);
@@ -5839,6 +5933,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         UnregisterHotKey(hWnd, ID_HOTKEY_OFF);
         UnregisterHotKey(hWnd, ID_HOTKEY_TOGGLE);
         WTSUnRegisterSessionNotification(hWnd);
+        // Die Rueckgabewerte wurden bisher weggeworfen, also konnte sich nichts
+        // abmelden.
+        if (g_hDisplayNotify) { UnregisterPowerSettingNotification(g_hDisplayNotify); g_hDisplayNotify = NULL; }
+        if (g_hSuspendNotify) { UnregisterSuspendResumeNotification(g_hSuspendNotify); g_hSuspendNotify = NULL; }
         RemoveTrayIcon();
         if (g_hBgBrush) DeleteObject(g_hBgBrush);
         if (g_hCtrlBrush) DeleteObject(g_hCtrlBrush);
@@ -8639,17 +8737,51 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         return 1;
     }
 
-    // Register for power setting notifications (resume from sleep)
-    GUID GUID_CONSOLE_DISPLAY_STATE = {0x6fe69556, 0x704a, 0x47a0, {0x8f, 0x24, 0x8d, 0x93, 0x6f, 0xda, 0x47}};
-    RegisterPowerSettingNotification(g_state.hWnd, &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
+    // Energiebenachrichtigungen anmelden.
+    //
+    // Hier stand eine von Hand getippte GUID mit SIEBEN statt acht Data4-Bytes -
+    // das 0xc2 fehlte, der Compiler fuellte den achten mit 0 auf.
+    //
+    // Wichtig fuer jeden, der das nachprueft: die Anmeldung GELINGT damit
+    // trotzdem. RegisterPowerSettingNotification prueft die GUID nicht und gibt
+    // ein gueltiges Handle zurueck. Nur ankommen tut nie etwas. A/B gemessen
+    // auf diesem Rechner, je 2 s Nachrichten gepumpt:
+    //
+    //     alte GUID (0xc2 fehlt) -> Anmeldung gelungen, 0 Benachrichtigungen
+    //     korrekte GUID          -> Anmeldung gelungen, 1 Benachrichtigung
+    //
+    // Der PBT_POWERSETTINGCHANGE-Zweig war also toter Code, aber nicht wegen
+    // einer fehlgeschlagenen Anmeldung - dieser Erklaerungsversuch war falsch.
+    // Deshalb sagt die Statuszeile unten "angemeldet" und nicht "OK": ein
+    // Handle ist keine Zustellung. Belegt ist die Zustellung erst, wenn
+    // tatsaechlich eine Nachricht eintrifft - und genau das protokolliert der
+    // Zweig beim ersten Mal.
+    g_hDisplayNotify = RegisterPowerSettingNotification(
+        g_state.hWnd, &kGuidConsoleDisplayState, DEVICE_NOTIFY_WINDOW_HANDLE);
+    g_hSuspendNotify = RegisterSuspendResumeNotification(
+        g_state.hWnd, DEVICE_NOTIFY_WINDOW_HANDLE);
 
-    // Also register for session notifications (lock/unlock)
-    WTSRegisterSessionNotification(g_state.hWnd, NOTIFY_FOR_THIS_SESSION);
+    const BOOL wtsOk = WTSRegisterSessionNotification(g_state.hWnd, NOTIFY_FOR_THIS_SESSION);
 
-    // Start resume watcher thread (detects time jumps from standby)
-    std::thread(ResumeWatcherThread).detach();
+    {
+        // "angemeldet", nicht "OK": das Handle beweist nur, dass Windows die
+        // Anmeldung entgegengenommen hat, nicht dass je eine Nachricht kommt.
+        wchar_t line[256];
+        swprintf(line, 256,
+                 L"Energie-Benachrichtigungen angemeldet: Display %s, Suspend/Resume %s, Sitzung %s",
+                 g_hDisplayNotify ? L"ja" : L"NEIN",
+                 g_hSuspendNotify ? L"ja" : L"NEIN",
+                 wtsOk            ? L"ja" : L"NEIN");
+        AppendStatus(line);
 
-    AppendStatus(L"Power notifications & resume watchdog started");
+        char dbg[224];
+        snprintf(dbg, sizeof(dbg),
+                 "[power] register display=%s suspend=%s session=%s",
+                 g_hDisplayNotify ? "ok" : "FAILED",
+                 g_hSuspendNotify ? "ok" : "FAILED",
+                 wtsOk            ? "ok" : "FAILED");
+        LogDebug(dbg);
+    }
 
     if (startMinimized) {
         MinimizeToTray();
