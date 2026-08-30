@@ -216,6 +216,40 @@ $cases = @(
        Report = 'kbdump.txt'; Exit = 2; MaxSec = 15
        ReportMatch = 'Nothing was read'
        LogMatch = '\[kbdump\].*invalid range' }
+
+    # --- Audio-Sonde (Phase 6) ----------------------------------------------
+    # Die Sonde schreibt nicht auf HID, aber sie erzeugt hoerbaren Schall und
+    # oeffnet Dialoge - beides ist unter --dry-run genauso verboten. Die
+    # MaxSec-Schranke ist hier die eigentliche Pruefung: die volle Messreihe
+    # laeuft 6 Pegelstufen x 8 Frequenzen x 5s = 240s plus Dialoge. Kommt der
+    # Lauf nicht in Sekunden zurueck, greift die Wache zu spaet.
+    @{ Name = '--audioprobe (dry-run, kein Ton, kein Dialog)'
+       Args = @('--dry-run','--audioprobe')
+       Report = 'audio_probe.txt'; Exit = 0; MaxSec = 15
+       ReportMatch = 'no question was asked'
+       LogMatch = '\[dry-run\].*audioprobe skipped' }
+
+    @{ Name = '--audioprobe-selftest (dry-run, kein Ton)'
+       Args = @('--dry-run','--audioprobe-selftest')
+       Report = 'audio_probe.txt'; Exit = 0; MaxSec = 15
+       ReportMatch = 'no tone was emitted'
+       LogMatch = '\[dry-run\].*audioprobe skipped' }
+
+    @{ Name = 'zwei Audio-Aktionen gleichzeitig -> Abbruch'
+       Args = @('--audioprobe','--audioprobe-list')
+       Report = 'audio_probe.txt'; Exit = 2; MaxSec = 15
+       ReportMatch = 'mutually exclusive'
+       LogMatch = '\[audioprobe\] more than one action flag' }
+
+    # Laeuft ohne --dry-run: die Endpunktpruefung muss greifen, bevor der erste
+    # Ton erzeugt wird. Ein nicht gefundener Endpunkt darf nicht stillschweigend
+    # auf das Standardgeraet ausweichen - dann misst die Reihe ein anderes
+    # Geraet als das, nach dem gefragt wurde.
+    @{ Name = '--audio-endpoint ohne Treffer -> Abbruch'
+       Args = @('--audioprobe','--audio-endpoint=KeinSolcherEndpunkt')
+       Report = 'audio_probe.txt'; Exit = 2; MaxSec = 15
+       ReportMatch = 'kein Endpunkt enthaelt'
+       LogMatch = '\[audioprobe\] endpoint substring did not match' }
 )
 
 $fail = 0

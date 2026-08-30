@@ -64,6 +64,7 @@
 #include "cli_args.h"        // token-exact flag parsing (unit-tested)
 #include "effect_limits.h"   // brightness/speed clamps + edge mode table
 #include "keyboard_layout.h" // key matrix decoded from the device (unit-tested)
+#include "audio_probe.h"     // WASAPI tone + loopback verification (Phase 6)
 
 using json = nlohmann::json;
 
@@ -8016,6 +8017,375 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
         LogDebug("[switch-test] done");
         return 0;  // Exit without showing any window
+    }
+
+    // ========================================================================
+    // AUDIO-SONDE (Phase 6.1-6.3)
+    //
+    // Misst, ob die JVC Bassrolle eine Signal-Sense-Automatik hat. Sie steuert
+    // nichts: sie gibt Toene aus, liest ueber WASAPI-Loopback zurueck, was
+    // tatsaechlich hinausging, und laesst den Menschen eintragen, wann die Rolle
+    // angesprungen ist. Die beiden Aussagen bleiben getrennt - GEMELDET ist,
+    // was die Loopback-Messung belegt, ERKLAERT ist, was der Mensch beobachtet
+    // hat (globale Konvention Paragraph 3).
+    // ========================================================================
+    {
+        const cli::Flag apRun  = cli::Find(lpCmdLine, "--audioprobe");
+        const cli::Flag apSelf = cli::Find(lpCmdLine, "--audioprobe-selftest");
+        const cli::Flag apList = cli::Find(lpCmdLine, "--audioprobe-list");
+        const cli::Flag apEp   = cli::Find(lpCmdLine, "--audio-endpoint");
+
+        if (apRun.present || apSelf.present || apList.present) {
+            std::wstring dir = GetAppDataPath() + L"\\docs";
+            SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+            const std::wstring reportPath = dir + L"\\audio_probe.txt";
+
+            // Genau eine Aktion. Zwei gleichzeitig werden abgelehnt, statt eine
+            // davon still gewinnen zu lassen - derselbe Grund wie bei den
+            // kbmode- und edgemode-Bloecken.
+            if (cli::CountPresent({ &apRun, &apSelf, &apList }) > 1) {
+                FILE* fe = _wfopen(reportPath.c_str(), L"w");
+                if (fe) {
+                    fprintf(fe, "OneClickRGB Audio-Sonde\n"
+                                "ABGEBROCHEN: --audioprobe, --audioprobe-selftest und\n"
+                                "--audioprobe-list are mutually exclusive. Nichts wurde\n"
+                                "ausgegeben und nichts gemessen.\n");
+                    fclose(fe);
+                }
+                LogDebug("[audioprobe] more than one action flag - refused");
+                return 2;
+            }
+
+            // --dry-run: die Sonde erzeugt hoerbaren Schall und oeffnet Dialoge.
+            // Beides ist unter --dry-run verboten, und der Ausstieg liegt VOR
+            // dem ersten Ton und VOR dem ersten Dialog, damit
+            // check_dryrun_flags.ps1 unbeaufsichtigt durchlaufen kann.
+            if (g_state.dryRun) {
+                FILE* fe = _wfopen(reportPath.c_str(), L"w");
+                if (fe) {
+                    // Wortlaut bewusst so umbrochen, dass "no tone was emitted"
+                    // und "no question was asked" jeweils GANZ auf einer Zeile
+                    // stehen: check_dryrun_flags.ps1 sucht diese Saetze als
+                    // Regex im Rohtext, und ein Zeilenumbruch mitten im Satz
+                    // laesst die Pruefung ins Leere laufen, ohne dass sie
+                    // fehlschlaegt - sie wuerde nur nichts mehr belegen.
+                    fprintf(fe, "OneClickRGB Audio-Sonde\n"
+                                "DRY RUN - no tone was emitted.\n"
+                                "Nothing was measured and no question was asked.\n"
+                                "Run without --dry-run to probe the stereo.\n");
+                    fclose(fe);
+                }
+                LogDebug("[dry-run] --audioprobe skipped - would emit audible tones and open dialogs");
+                return 0;
+            }
+
+            std::vector<audioprobe::Endpoint> eps;
+            std::string epErr;
+            const bool haveList = audioprobe::ListRenderEndpoints(eps, epErr);
+
+            if (apList.present) {
+                FILE* fpl = _wfopen(reportPath.c_str(), L"w");
+                if (fpl) {
+                    fprintf(fpl, "OneClickRGB Audio-Sonde - Wiedergabe-Endpunkte\n\n");
+                    if (!haveList) {
+                        fprintf(fpl, "UNBEKANNT: Endpunkte konnten nicht gelesen werden (%s)\n",
+                                epErr.c_str());
+                    } else if (eps.empty()) {
+                        fprintf(fpl, "UNBEKANNT: kein aktiver Wiedergabe-Endpunkt gefunden\n");
+                    } else {
+                        for (size_t i = 0; i < eps.size(); ++i)
+                            fprintf(fpl, "  [%u]%s %ls\n", (unsigned)i,
+                                    eps[i].isDefault ? " (Standard)" : "          ",
+                                    eps[i].name.c_str());
+                    }
+                    fclose(fpl);
+                }
+                LogDebug("[audioprobe] endpoint list written");
+                return haveList ? 0 : 1;
+            }
+
+            // Endpunktwahl: ohne --audio-endpoint das Standard-Wiedergabegeraet,
+            // mit, der erste Endpunkt, dessen Name den Teilstring enthaelt.
+            std::wstring endpointId;
+            std::wstring endpointName = L"(Standard-Wiedergabegeraet)";
+            if (apEp.present && apEp.hasValue && !apEp.value.empty() && haveList) {
+                const int wlen = MultiByteToWideChar(CP_UTF8, 0, apEp.value.c_str(), -1, NULL, 0);
+                std::wstring want;
+                if (wlen > 1) {
+                    want.resize((size_t)(wlen - 1));
+                    MultiByteToWideChar(CP_UTF8, 0, apEp.value.c_str(), -1, &want[0], wlen);
+                }
+                for (size_t i = 0; i < eps.size(); ++i) {
+                    if (!want.empty() && eps[i].name.find(want) != std::wstring::npos) {
+                        endpointId   = eps[i].id;
+                        endpointName = eps[i].name;
+                        break;
+                    }
+                }
+                if (endpointId.empty()) {
+                    FILE* fe = _wfopen(reportPath.c_str(), L"w");
+                    if (fe) {
+                        fprintf(fe, "OneClickRGB Audio-Sonde\n"
+                                    "ABGEBROCHEN: kein Endpunkt enthaelt \"%s\".\n"
+                                    "Nichts wurde ausgegeben. --audioprobe-list zeigt die Namen.\n",
+                                apEp.value.c_str());
+                        fclose(fe);
+                    }
+                    LogDebug("[audioprobe] endpoint substring did not match - refused");
+                    return 2;
+                }
+            } else if (haveList) {
+                for (size_t i = 0; i < eps.size(); ++i)
+                    if (eps[i].isDefault) { endpointName = eps[i].name; break; }
+            }
+
+            FILE* fp = _wfopen(reportPath.c_str(), L"w");
+            if (!fp) { LogDebug("[audioprobe] cannot open report file"); return 1; }
+
+            SYSTEMTIME st; GetLocalTime(&st);
+            fprintf(fp, "OneClickRGB Audio-Sonde (Phase 6)\n");
+            fprintf(fp, "Zeit      : %04d-%02d-%02d %02d:%02d:%02d\n",
+                    st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+            fprintf(fp, "Endpunkt  : %ls\n", endpointName.c_str());
+            fprintf(fp, "Grenzen   : max %.0f dBFS, min %.0f Hz (hart im Code)\n\n",
+                    audioprobe::Limits::kMaxDbfs, audioprobe::Limits::kMinFreqHz);
+
+            // ---------------- Selbstprobe (Phase 6.1) ----------------------
+            // Laeuft ohne Anlage und ohne Dialog. Sie beantwortet die Frage, die
+            // vor jeder Messreihe steht: misst dieses Geraet ueberhaupt?
+            {
+                fprintf(fp, "=== SELBSTPROBE (ohne Anlage) ===\n");
+                int failed = 0;
+
+                audioprobe::ToneRequest q;
+                q.endpointId = endpointId;
+                q.freqHz = 1000.0; q.dbfs = -30.0; q.holdMs = 1500;
+                audioprobe::ToneResult r;
+                audioprobe::RunTone(q, r);
+                fprintf(fp, "  Ton 1000 Hz @ -30 dBFS    -> gemessen %8.1f Hz  %6.1f dBFS  %s\n",
+                        r.measuredFreqHz, r.measuredDbfs,
+                        r.verified ? "verifiziert" : "NICHT verifiziert");
+                if (!r.error.empty()) fprintf(fp, "        Fehler: %s\n", r.error.c_str());
+                if (r.sampleRate)
+                    fprintf(fp, "        Mixer: %u Hz, %u Kanaele, %u Frames ausgewertet\n",
+                            r.sampleRate, r.channels, r.framesAnalyzed);
+                if (!r.verified) failed++;
+
+                audioprobe::ToneRequest qs;
+                qs.endpointId = endpointId; qs.silent = true; qs.holdMs = 1500;
+                audioprobe::ToneResult rs;
+                audioprobe::RunTone(qs, rs);
+                fprintf(fp, "  Stille                    -> gemessen %6.1f dBFS  %s\n",
+                        rs.measuredDbfs,
+                        rs.verified ? "verifiziert (< -80)" : "NICHT verifiziert (Fremdton?)");
+                if (!rs.error.empty()) fprintf(fp, "        Fehler: %s\n", rs.error.c_str());
+                if (!rs.verified) failed++;
+
+                // Die Pegelgrenze wird an einer Anforderung geprueft, die sie
+                // ueberschreitet: 0 dBFS muss auf -12 begrenzt UND gemeldet werden.
+                audioprobe::ToneRequest qc;
+                qc.endpointId = endpointId; qc.freqHz = 1000.0; qc.dbfs = 0.0; qc.holdMs = 800;
+                audioprobe::ToneResult rc2;
+                audioprobe::RunTone(qc, rc2);
+                fprintf(fp, "  Grenze 0 dBFS angefordert -> benutzt  %6.1f dBFS  %s\n",
+                        rc2.usedDbfs, rc2.levelClamped ? "begrenzt und gemeldet" : "NICHT begrenzt");
+                if (!rc2.levelClamped || rc2.usedDbfs > audioprobe::Limits::kMaxDbfs) failed++;
+
+                // Und an der Frequenzuntergrenze: 10 Hz muss auf 40 Hz hoch.
+                audioprobe::ToneRequest qf;
+                qf.endpointId = endpointId; qf.freqHz = 10.0; qf.dbfs = -40.0; qf.holdMs = 800;
+                audioprobe::ToneResult rf;
+                audioprobe::RunTone(qf, rf);
+                fprintf(fp, "  Grenze 10 Hz angefordert  -> benutzt %8.1f Hz    %s\n",
+                        rf.usedFreqHz, rf.freqClamped ? "begrenzt und gemeldet" : "NICHT begrenzt");
+                if (!rf.freqClamped || rf.usedFreqHz < audioprobe::Limits::kMinFreqHz) failed++;
+
+                fprintf(fp, "\n  Ergebnis: %d von 4 Proben fehlgeschlagen\n\n", failed);
+
+                if (apSelf.present) {
+                    fclose(fp);
+                    char dbg[96];
+                    snprintf(dbg, sizeof(dbg), "[audioprobe] selftest done, %d failed", failed);
+                    LogDebug(dbg);
+                    return failed == 0 ? 0 : 1;
+                }
+
+                // Eine Messreihe aus einem durchgefallenen Messgeraet ist keine
+                // Messung, sondern eine Behauptung mit Zahlen. Also nicht fahren.
+                if (failed > 0) {
+                    fprintf(fp, "ABGEBROCHEN: Die Selbstprobe ist durchgefallen. Es wurde KEINE\n"
+                                "Messreihe gefahren - ein Messgeraet, das sich selbst nicht\n"
+                                "zurueckliest, kann ueber die Bassrolle nichts aussagen.\n");
+                    fclose(fp);
+                    LogDebug("[audioprobe] selftest failed - staircase not run");
+                    return 1;
+                }
+            }
+
+            // ---------------- Messreihe (Phase 6.2) ------------------------
+            const double kLevels[] = { -60.0, -50.0, -40.0, -30.0, -20.0, -12.0 };
+            const double kFreqs[]  = { 40.0, 50.0, 63.0, 80.0, 100.0, 125.0, 160.0, 1000.0 };
+            const int    nLevels   = (int)(sizeof(kLevels) / sizeof(kLevels[0]));
+            const int    nFreqs    = (int)(sizeof(kFreqs)  / sizeof(kFreqs[0]));
+            const int    holdMs    = cli::HoldSeconds(apRun, 5, 1, 20) * 1000;
+
+            const int go = MessageBoxW(NULL,
+                L"Audio-Sonde: Messreihe fuer die Signal-Sense-Automatik.\n\n"
+                L"Vorher pruefen:\n"
+                L"  - Ist die Bassrolle AKTIV (eigenes Netzkabel)? Eine passive\n"
+                L"    Rolle hat keine Elektronik, die etwas ausloesen koennte -\n"
+                L"    dann ist die Messung sinnlos.\n"
+                L"  - Lautstaerke an der Anlage herunterdrehen.\n\n"
+                L"Es werden Toene von 40 bis 160 Hz plus ein Kontrollton bei\n"
+                L"1 kHz ausgegeben, hoechstens -12 dBFS. Nach jeder Pegelstufe\n"
+                L"werden Sie gefragt, ob die Rolle angesprungen ist.\n\n"
+                L"Zwischen zwei Toenen bricht ESC ab.",
+                L"OneClickRGB Audio-Sonde", MB_OKCANCEL | MB_ICONINFORMATION);
+            if (go != IDOK) {
+                fprintf(fp, "ABGEBROCHEN vom Benutzer vor dem ersten Ton.\n");
+                fclose(fp);
+                LogDebug("[audioprobe] user cancelled before first tone");
+                return 4;
+            }
+
+            fprintf(fp, "=== MESSREIHE ===\n");
+            fprintf(fp, "GEMELDET = Loopback-Messung. ERKLAERT = Beobachtung des Menschen.\n");
+            fprintf(fp, "Die beiden werden nicht vermengt.\n\n");
+
+            double triggerLevel = 0.0;
+            double triggerFreq  = 0.0;
+            bool   triggered    = false;
+            bool   aborted      = false;
+
+            for (int li = 0; li < nLevels && !triggered && !aborted; ++li) {
+                fprintf(fp, "-- Pegel %.0f dBFS --\n", kLevels[li]);
+                fprintf(fp, "   %-9s %-13s %-15s %s\n",
+                        "Soll-Hz", "GEMELDET Hz", "GEMELDET dBFS", "Status");
+
+                for (int fi = 0; fi < nFreqs && !aborted; ++fi) {
+                    if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) { aborted = true; break; }
+
+                    audioprobe::ToneRequest q;
+                    q.endpointId = endpointId;
+                    q.freqHz = kFreqs[fi];
+                    q.dbfs   = kLevels[li];
+                    q.holdMs = holdMs;
+
+                    audioprobe::ToneResult r;
+                    audioprobe::RunTone(q, r);
+
+                    fprintf(fp, "   %-9.0f %-13.1f %-15.1f %s%s\n",
+                            kFreqs[fi], r.measuredFreqHz, r.measuredDbfs,
+                            r.verified ? "verifiziert" : "NICHT verifiziert",
+                            (kFreqs[fi] > 500.0) ? "  (Kontrollton)" : "");
+                    if (!r.error.empty()) fprintf(fp, "        Fehler: %s\n", r.error.c_str());
+                    fflush(fp);
+                }
+
+                if (aborted) break;
+
+                wchar_t ask[512];
+                swprintf_s(ask, 512,
+                    L"Pegelstufe %.0f dBFS ist komplett durchlaufen\n"
+                    L"(40-160 Hz plus Kontrollton 1 kHz).\n\n"
+                    L"Ist die Bassrolle angesprungen?\n\n"
+                    L"Ja      = ja, bei dieser Stufe\n"
+                    L"Nein    = nein, naechste (lautere) Stufe\n"
+                    L"Abbruch = Messreihe beenden",
+                    kLevels[li]);
+                const int ans = MessageBoxW(NULL, ask, L"OneClickRGB Audio-Sonde",
+                                            MB_YESNOCANCEL | MB_ICONQUESTION);
+                if (ans == IDCANCEL) { aborted = true; break; }
+                if (ans == IDYES) { triggered = true; triggerLevel = kLevels[li]; }
+            }
+
+            // Feinsuche: welche Frequenz war es? Erst jetzt sinnvoll, weil erst
+            // jetzt eine Stufe bekannt ist, bei der ueberhaupt etwas passiert.
+            if (triggered && !aborted) {
+                fprintf(fp, "\n-- Feinsuche bei %.0f dBFS --\n", triggerLevel);
+                MessageBoxW(NULL,
+                    L"Jetzt wird dieselbe Pegelstufe Frequenz fuer Frequenz\n"
+                    L"wiederholt, um die ausloesende Frequenz einzugrenzen.\n\n"
+                    L"Bitte die Rolle vorher wieder ausschalten bzw. in den\n"
+                    L"Standby laufen lassen.",
+                    L"OneClickRGB Audio-Sonde", MB_OK | MB_ICONINFORMATION);
+
+                for (int fi = 0; fi < nFreqs && !aborted; ++fi) {
+                    if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) { aborted = true; break; }
+
+                    audioprobe::ToneRequest q;
+                    q.endpointId = endpointId;
+                    q.freqHz = kFreqs[fi];
+                    q.dbfs   = triggerLevel;
+                    q.holdMs = holdMs;
+
+                    audioprobe::ToneResult r;
+                    audioprobe::RunTone(q, r);
+
+                    wchar_t ask[320];
+                    swprintf_s(ask, 320,
+                        L"%.0f Hz @ %.0f dBFS wurde ausgegeben.\n"
+                        L"Gemeldet: %.1f Hz, %.1f dBFS (%s)\n\n"
+                        L"Ist die Rolle bei DIESEM Ton angesprungen?",
+                        kFreqs[fi], triggerLevel, r.measuredFreqHz, r.measuredDbfs,
+                        r.verified ? L"verifiziert" : L"NICHT verifiziert");
+                    const int ans = MessageBoxW(NULL, ask, L"OneClickRGB Audio-Sonde",
+                                                MB_YESNOCANCEL | MB_ICONQUESTION);
+
+                    fprintf(fp, "   %-9.0f %-13.1f %-15.1f %-18s ERKLAERT: %s\n",
+                            kFreqs[fi], r.measuredFreqHz, r.measuredDbfs,
+                            r.verified ? "verifiziert" : "NICHT verifiziert",
+                            ans == IDYES ? "ausgeloest" : (ans == IDNO ? "nein" : "abgebrochen"));
+                    fflush(fp);
+
+                    if (ans == IDCANCEL) { aborted = true; break; }
+                    if (ans == IDYES) { triggerFreq = kFreqs[fi]; break; }
+                }
+            }
+
+            // ---------------- Ergebnis -------------------------------------
+            fprintf(fp, "\n=== ERGEBNIS ===\n");
+            if (aborted) {
+                fprintf(fp, "ABGEBROCHEN. Kein Ergebnis - UNBEKANNT, ob die Rolle eine\n"
+                            "Signal-Sense-Automatik hat.\n");
+                fclose(fp);
+                LogDebug("[audioprobe] aborted");
+                return 4;
+            }
+            if (!triggered) {
+                fprintf(fp, "Bis -12 dBFS hat die Bassrolle NICHT reagiert.\n\n"
+                            "Deutung (Confidence: mittel - eine Messung, ein Geraet):\n"
+                            "Diese Rolle hat keine Signal-Sense-Automatik, oder ihre\n"
+                            "Schwelle liegt oberhalb dessen, was hier zugelassen ist.\n"
+                            "Ueber Cinch/Klinke ist damit nichts zu erreichen. Der\n"
+                            "naechste Schritt waere ein schaltbarer Zwischenstecker,\n"
+                            "kein lauterer Ton.\n\n"
+                            "Phase 6.4 (Anbindung an den Energiemanager) entfaellt:\n"
+                            "ohne belegte Schwelle gibt es nichts zu schalten.\n");
+                fclose(fp);
+                LogDebug("[audioprobe] no trigger up to -12 dBFS");
+                return 1;
+            }
+
+            fprintf(fp, "ERKLAERT: Die Rolle ist bei %.0f dBFS angesprungen.\n", triggerLevel);
+            if (triggerFreq > 0.0)
+                fprintf(fp, "ERKLAERT: ausloesende Frequenz %.0f Hz.\n", triggerFreq);
+            else
+                fprintf(fp, "ERKLAERT: einzelne Frequenz nicht eingegrenzt (Feinsuche ohne Treffer).\n");
+            fprintf(fp, "GEMELDET: alle Toene dieser Stufe wurden per Loopback auf\n"
+                        "          Frequenz und Pegel geprueft (siehe oben).\n\n"
+                        "Confidence: mittel. Eine Messung an einem Geraet, an einem Tag.\n"
+                        "Vor der Nutzung in Phase 6.4 mindestens einmal wiederholen -\n"
+                        "eine Schwelle, die nur einmal gesehen wurde, ist eine Beobachtung,\n"
+                        "keine Kennlinie.\n");
+            fclose(fp);
+
+            char dbg[160];
+            snprintf(dbg, sizeof(dbg),
+                     "[audioprobe] trigger at %.0f dBFS, freq %.0f Hz", triggerLevel, triggerFreq);
+            LogDebug(dbg);
+            return 0;
+        }
     }
 
     // Initialize GDI+ for PNG loading

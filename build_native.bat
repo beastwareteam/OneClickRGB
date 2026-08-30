@@ -118,7 +118,10 @@ REM Include paths
 set INCLUDES=/I"%SRC_DIR%" /I"%DEP_DIR%\hidapi" /I"%DEP_DIR%"
 
 REM Libraries
-set LIBS=shell32.lib advapi32.lib setupapi.lib comctl32.lib comdlg32.lib user32.lib gdi32.lib
+REM ole32.lib: COM fuer die Audio-Sonde (CoCreateInstance/CoTaskMemFree/
+REM PropVariantClear in src/audio_probe.h). Die KS-Subformat-GUIDs werden dort
+REM aus dem dokumentierten Bildungsgesetz gebaut, damit ksuser.lib nicht noetig ist.
+set LIBS=shell32.lib advapi32.lib setupapi.lib comctl32.lib comdlg32.lib user32.lib gdi32.lib ole32.lib
 set LIBS=%LIBS% "%DEP_DIR%\hidapi\hidapi.lib"
 
 REM Resource file (icon)

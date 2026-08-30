@@ -1042,6 +1042,68 @@ static void TestKeyIdentifyArgs() {
 }
 
 //-----------------------------------------------------------------------------
+static void TestAudioProbeArgs() {
+    group("cli::Find - Audio-Sonde (Phase 6)");
+
+    // Die Audio-Sonde hat drei Aktionsflags, von denen zwei mit dem dritten
+    // anfangen: --audioprobe, --audioprobe-selftest, --audioprobe-list. Mit
+    // strstr waere jedes "--audioprobe-*" auch ein --audioprobe gewesen, und
+    // --audioprobe faehrt die volle Messreihe: 6 Pegelstufen x 8 Frequenzen mit
+    // Dialogen dazwischen. Ein Tippfehler im Namen haette also statt einer
+    // 5-Sekunden-Selbstprobe eine vierminuetige Tonfolge gestartet.
+    CHECK(strstr("--audioprobe-selftest", "--audioprobe") != nullptr);
+    CHECK(!cli::Find("--audioprobe-selftest", "--audioprobe").present);
+
+    CHECK(strstr("--audioprobe-list", "--audioprobe") != nullptr);
+    CHECK(!cli::Find("--audioprobe-list", "--audioprobe").present);
+
+    // Umgekehrt darf das kurze Flag die langen nicht ausloesen.
+    CHECK(!cli::Find("--audioprobe", "--audioprobe-selftest").present);
+    CHECK(!cli::Find("--audioprobe", "--audioprobe-list").present);
+    CHECK(!cli::Find("--audioprobe-list", "--audioprobe-selftest").present);
+
+    // Und jedes fuer sich muss gefunden werden.
+    CHECK(cli::Find("--audioprobe", "--audioprobe").present);
+    CHECK(cli::Find("--audioprobe-selftest", "--audioprobe-selftest").present);
+    CHECK(cli::Find("--audioprobe-list", "--audioprobe-list").present);
+    CHECK(cli::Find("--dry-run --audioprobe", "--audioprobe").present);
+
+    // CountPresent traegt die Ablehnung mehrerer Aktionen. Ohne sie wuerde eine
+    // davon still gewinnen, und der Bediener bekaeme eine andere Messung als die
+    // angeforderte.
+    {
+        const cli::Flag run  = cli::Find("--audioprobe --audioprobe-list", "--audioprobe");
+        const cli::Flag self = cli::Find("--audioprobe --audioprobe-list", "--audioprobe-selftest");
+        const cli::Flag list = cli::Find("--audioprobe --audioprobe-list", "--audioprobe-list");
+        CHECK_EQ(cli::CountPresent({ &run, &self, &list }), 2);
+    }
+    {
+        const cli::Flag run  = cli::Find("--audioprobe-selftest", "--audioprobe");
+        const cli::Flag self = cli::Find("--audioprobe-selftest", "--audioprobe-selftest");
+        const cli::Flag list = cli::Find("--audioprobe-selftest", "--audioprobe-list");
+        CHECK_EQ(cli::CountPresent({ &run, &self, &list }), 1);
+    }
+
+    // Haltezeit je Ton: --audioprobe=<sek>, geklammert auf [1,20].
+    CHECK_EQ(cli::HoldSeconds(cli::Find("--audioprobe", "--audioprobe"), 5, 1, 20), 5);
+    CHECK_EQ(cli::HoldSeconds(cli::Find("--audioprobe=3", "--audioprobe"), 5, 1, 20), 3);
+    CHECK_EQ(cli::HoldSeconds(cli::Find("--audioprobe=0", "--audioprobe"), 5, 1, 20), 1);
+    CHECK_EQ(cli::HoldSeconds(cli::Find("--audioprobe=999", "--audioprobe"), 5, 1, 20), 20);
+    // Muell faellt auf die Vorgabe zurueck, nicht auf 0: ein Ton von 0 s
+    // Haltezeit zeigt weder der Rolle noch dem Menschen etwas.
+    CHECK_EQ(cli::HoldSeconds(cli::Find("--audioprobe=laut", "--audioprobe"), 5, 1, 20), 5);
+
+    // Der Endpunkt-Teilstring wird als Wert durchgereicht, auch mit Leerzeichen
+    // in Anfuehrungszeichen - Endpunktnamen wie "Lautsprecher (Q18)" haben welche.
+    {
+        const cli::Flag ep = cli::Find("--audioprobe \"--audio-endpoint=Lautsprecher (Q18)\"",
+                                       "--audio-endpoint");
+        CHECK(ep.present);
+        CHECK(ep.hasValue);
+        CHECK_STR(ep.value, "Lautsprecher (Q18)");
+    }
+}
+
 int main() {
     printf("OneClickRGB unit tests (cli_args.h, effect_limits.h, channel_config.h,\n");
     printf("keyboard_layout.h)\n");
@@ -1068,6 +1130,7 @@ int main() {
     TestBuildLayout();
     TestBoardGeometry();
     TestKeyIdentifyArgs();
+    TestAudioProbeArgs();
 
     printf("\n------------------------------------------------\n");
     if (g_failures == 0) {
