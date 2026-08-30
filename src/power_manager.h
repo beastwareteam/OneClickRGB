@@ -58,13 +58,17 @@
 #include <setupapi.h>
 #include <cfgmgr32.h>
 #include <powerbase.h>
+#include <shlobj.h>
 #include <iphlpapi.h>
 #include <netioapi.h>
 
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
+#include <iomanip>
 #include <string>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "cfgmgr32.lib")
@@ -72,6 +76,24 @@
 #pragma comment(lib, "iphlpapi.lib")
 
 namespace powermgr {
+
+// Wide -> UTF-8.
+//
+// Der Bericht wird als Bytestrom geschrieben. Gibt man wchar_t direkt ueber
+// %ls aus, landet alles ausserhalb von ASCII als Fragezeichen in der Datei -
+// gemessen am ersten Lauf, der "Standardmaessiger NVM Express-Controller" als
+// "Standardm??iger" ausgab. Ein Bericht, dessen Geraetenamen nicht lesbar
+// sind, ist als Entscheidungsgrundlage wertlos.
+inline std::string W2U8(const std::wstring& w) {
+    if (w.empty()) return std::string();
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(),
+                                      NULL, 0, NULL, NULL);
+    if (n <= 0) return std::string();
+    std::string out((size_t)n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &out[0], n, NULL, NULL);
+    return out;
+}
+
 
 //-----------------------------------------------------------------------------
 // Systemlage
@@ -388,25 +410,230 @@ inline bool Inventory(std::vector<DeviceEntry>& out, std::string& err) {
 }
 
 //-----------------------------------------------------------------------------
-// Bericht
+// Schalten (Phase 5) - immer mit Rueckweg
 //-----------------------------------------------------------------------------
 
-// Wide -> UTF-8.
+enum SwitchResult {
+    SW_OK = 0,            // geschaltet UND zurueckgelesen
+    SW_NEEDS_REBOOT,      // geschaltet, wird erst nach einem Neustart wirksam
+    SW_NOT_VERIFIED,      // Aufruf gelang, der Zustand stimmt aber nicht
+    SW_ACCESS_DENIED,     // ohne Adminrechte
+    SW_NOT_FOUND,
+    SW_FAILED
+};
+
+inline const char* SwitchResultName(SwitchResult r) {
+    switch (r) {
+        case SW_OK:            return "geschaltet und verifiziert";
+        case SW_NEEDS_REBOOT:  return "geschaltet, Neustart noetig";
+        case SW_NOT_VERIFIED:  return "NICHT VERIFIZIERT";
+        case SW_ACCESS_DENIED: return "Adminrechte fehlen";
+        case SW_NOT_FOUND:     return "Geraet nicht gefunden";
+        default:               return "fehlgeschlagen";
+    }
+}
+
+// Aktiviert oder deaktiviert ein Geraet und LIEST DAS ERGEBNIS ZURUECK.
 //
-// Der Bericht wird als Bytestrom geschrieben. Gibt man wchar_t direkt ueber
-// %ls aus, landet alles ausserhalb von ASCII als Fragezeichen in der Datei -
-// gemessen am ersten Lauf, der "Standardmaessiger NVM Express-Controller" als
-// "Standardm??iger" ausgab. Ein Bericht, dessen Geraetenamen nicht lesbar
-// sind, ist als Entscheidungsgrundlage wertlos.
-inline std::string W2U8(const std::wstring& w) {
-    if (w.empty()) return std::string();
-    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(),
-                                      NULL, 0, NULL, NULL);
-    if (n <= 0) return std::string();
-    std::string out((size_t)n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &out[0], n, NULL, NULL);
+// Ein SetupDiCallClassInstaller, der TRUE zurueckgibt, ist kein deaktiviertes
+// Geraet - das ist dieselbe Falle wie ein quittierter HID-Write, den die
+// Firmware still verwirft (Projektregel 1). Deshalb wird danach erneut
+// CM_Get_DevNode_Status gelesen und geprueft, ob CM_PROB_DISABLED steht bzw.
+// verschwunden ist. Erst dann heisst es "verifiziert".
+inline SwitchResult SetDeviceEnabled(const std::wstring& instanceId, bool enable,
+                                     std::wstring& detail) {
+    detail.clear();
+
+    HDEVINFO set = SetupDiCreateDeviceInfoList(NULL, NULL);
+    if (set == INVALID_HANDLE_VALUE) { detail = L"SetupDiCreateDeviceInfoList"; return SW_FAILED; }
+
+    SP_DEVINFO_DATA dev = {};
+    dev.cbSize = sizeof(dev);
+    if (!SetupDiOpenDeviceInfoW(set, instanceId.c_str(), NULL, 0, &dev)) {
+        SetupDiDestroyDeviceInfoList(set);
+        detail = L"Instanz-ID nicht gefunden";
+        return SW_NOT_FOUND;
+    }
+
+    SP_PROPCHANGE_PARAMS pc = {};
+    pc.ClassInstallHeader.cbSize          = sizeof(SP_CLASSINSTALL_HEADER);
+    pc.ClassInstallHeader.InstallFunction = DIF_PROPERTYCHANGE;
+    pc.StateChange = enable ? DICS_ENABLE : DICS_DISABLE;
+    pc.Scope       = DICS_FLAG_CONFIGSPECIFIC;
+    pc.HwProfile   = 0;
+
+    SwitchResult res = SW_FAILED;
+
+    if (!SetupDiSetClassInstallParamsW(set, &dev,
+                                       (SP_CLASSINSTALL_HEADER*)&pc, sizeof(pc))) {
+        detail = L"SetClassInstallParams fehlgeschlagen";
+    } else if (!SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, set, &dev)) {
+        const DWORD e = GetLastError();
+        res = (e == ERROR_ACCESS_DENIED) ? SW_ACCESS_DENIED : SW_FAILED;
+        wchar_t buf[96];
+        swprintf(buf, 96, L"CallClassInstaller fehlgeschlagen (Fehler %lu)", (unsigned long)e);
+        detail = buf;
+    } else {
+        // Verlangt das Geraet einen Neustart, ist der Zustand JETZT noch nicht
+        // der gewuenschte. Das zu verschweigen waere die schlimmere Variante:
+        // der Bediener haelt es fuer erledigt und sucht die Ursache spaeter
+        // woanders.
+        SP_DEVINSTALL_PARAMS_W dp = {};
+        dp.cbSize = sizeof(dp);
+        bool needsReboot = false;
+        if (SetupDiGetDeviceInstallParamsW(set, &dev, &dp))
+            needsReboot = (dp.Flags & (DI_NEEDRESTART | DI_NEEDREBOOT)) != 0;
+
+        ULONG status = 0, problem = 0;
+        const bool statusOk =
+            (CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0) == CR_SUCCESS);
+
+        const bool isDisabled = statusOk && (status & DN_HAS_PROBLEM) &&
+                                (problem == CM_PROB_DISABLED);
+
+        if (needsReboot) {
+            res    = SW_NEEDS_REBOOT;
+            detail = L"wirksam erst nach einem Neustart";
+        } else if (!statusOk) {
+            res    = SW_NOT_VERIFIED;
+            detail = L"Zustand nicht lesbar - UNBEKANNT, ob es gewirkt hat";
+        } else if (enable == !isDisabled) {
+            res    = SW_OK;
+            detail = enable ? L"aktiv" : L"deaktiviert";
+        } else {
+            res    = SW_NOT_VERIFIED;
+            detail = L"Aufruf gelang, der Zustand stimmt aber nicht";
+        }
+    }
+
+    SetupDiDestroyDeviceInfoList(set);
+    return res;
+}
+
+//-----------------------------------------------------------------------------
+// Das Journal - ohne es gibt es keinen Rueckweg
+//-----------------------------------------------------------------------------
+
+// Jede Aenderung wird mit Instanz-ID und Vorzustand festgehalten. Ohne dieses
+// Journal waere ein deaktiviertes Geraet nach dem naechsten Programmstart
+// herrenlos: die App wuesste nicht mehr, dass sie es war, und der Bediener
+// suchte den Grund in der Hardware.
+struct JournalEntry {
+    std::wstring instanceId;
+    std::wstring description;
+    bool         wasEnabledBefore = true;
+};
+
+inline std::wstring JournalPath() {
+    wchar_t* ap = NULL;
+    if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, &ap) != S_OK)
+        return L"oneclickrgb_power_state.json";
+    std::wstring p = std::wstring(ap) + L"\\OneClickRGB\\power_state.json";
+    CoTaskMemFree(ap);
+    return p;
+}
+
+inline std::wstring U82W(const std::string& u) {
+    if (u.empty()) return std::wstring();
+    const int n = MultiByteToWideChar(CP_UTF8, 0, u.c_str(), (int)u.size(), NULL, 0);
+    if (n <= 0) return std::wstring();
+    std::wstring out((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, u.c_str(), (int)u.size(), &out[0], n);
     return out;
 }
+
+inline void JournalLoad(std::vector<JournalEntry>& out) {
+    out.clear();
+    std::ifstream f(JournalPath());
+    if (!f) return;
+    try {
+        nlohmann::json j;
+        f >> j;
+        if (!j.contains("disabled") || !j["disabled"].is_array()) return;
+        for (const auto& e : j["disabled"]) {
+            JournalEntry je;
+            je.instanceId       = U82W(e.value("instanceId", std::string()));
+            je.description      = U82W(e.value("description", std::string()));
+            je.wasEnabledBefore = e.value("wasEnabledBefore", true);
+            if (!je.instanceId.empty()) out.push_back(je);
+        }
+    } catch (...) {
+        // Ein kaputtes Journal wird nicht repariert und nicht ueberschrieben:
+        // es ist der einzige Rueckweg, und ein halb geratener Rueckweg ist
+        // schlimmer als ein sichtbar fehlender.
+        out.clear();
+    }
+}
+
+inline void JournalSave(const std::vector<JournalEntry>& list) {
+    const std::wstring path = JournalPath();
+    const size_t sl = path.find_last_of(L"\\/");
+    if (sl != std::wstring::npos)
+        SHCreateDirectoryExW(NULL, path.substr(0, sl).c_str(), NULL);
+
+    nlohmann::json j;
+    j["disabled"] = nlohmann::json::array();
+    for (size_t i = 0; i < list.size(); ++i) {
+        nlohmann::json e;
+        e["instanceId"]       = W2U8(list[i].instanceId);
+        e["description"]      = W2U8(list[i].description);
+        e["wasEnabledBefore"] = list[i].wasEnabledBefore;
+        j["disabled"].push_back(e);
+    }
+    std::ofstream f(path);
+    if (f) f << std::setw(4) << j;
+}
+
+// Schaltet ein Geraet ab und traegt es ein - in dieser Reihenfolge nur dann,
+// wenn das Abschalten auch belegt ist. Ein Eintrag fuer etwas, das gar nicht
+// geschaltet wurde, waere ein Rueckweg ins Nichts.
+inline SwitchResult DisableAndRecord(const std::wstring& instanceId,
+                                     const std::wstring& description,
+                                     std::wstring& detail) {
+    const SwitchResult r = SetDeviceEnabled(instanceId, false, detail);
+    if (r != SW_OK && r != SW_NEEDS_REBOOT) return r;
+
+    std::vector<JournalEntry> list;
+    JournalLoad(list);
+    for (size_t i = 0; i < list.size(); ++i)
+        if (list[i].instanceId == instanceId) return r;   // schon eingetragen
+
+    JournalEntry e;
+    e.instanceId       = instanceId;
+    e.description      = description;
+    e.wasEnabledBefore = true;
+    list.push_back(e);
+    JournalSave(list);
+    return r;
+}
+
+// Nimmt ALLES zurueck, was im Journal steht. Eintraege, deren Geraet nicht mehr
+// da ist, werden entfernt statt ewig mitgeschleppt - aber erst, nachdem der
+// Versuch stattgefunden hat.
+inline int RestoreAll(std::vector<std::wstring>& failed) {
+    failed.clear();
+    std::vector<JournalEntry> list;
+    JournalLoad(list);
+
+    std::vector<JournalEntry> rest;
+    int restored = 0;
+    for (size_t i = 0; i < list.size(); ++i) {
+        std::wstring detail;
+        const SwitchResult r = SetDeviceEnabled(list[i].instanceId, true, detail);
+        if (r == SW_OK || r == SW_NEEDS_REBOOT || r == SW_NOT_FOUND) {
+            restored++;
+        } else {
+            failed.push_back(list[i].description + L" (" + detail + L")");
+            rest.push_back(list[i]);
+        }
+    }
+    JournalSave(rest);
+    return restored;
+}
+
+//-----------------------------------------------------------------------------
+// Bericht
+//-----------------------------------------------------------------------------
 
 // char und nicht wchar_t: der Bericht wird mit fprintf geschrieben, und ein
 // wchar_t* an ein %s ist genau die Sorte Fehler, die der Compiler zwar

@@ -282,6 +282,23 @@ static inline void FillCtrlBackground(HDC hdcMem, HWND hCtrl, const RECT& rc) {
 #define ID_BTN_ASUS_TEST 1111
 #define ID_BTN_HID_RESET 1112
 #define ID_BTN_KEY_LAYOUT 1113
+#define ID_BTN_POWER_MGR 1114
+
+// Energiemanager-Dialog. Eigener Bereich ab 6500, damit er mit den
+// ASUS-Bereichen (6000-6409) nicht kollidiert - dort sitzt ID_ASUS_CH_PICK_BASE
+// bereits INNERHALB des Schieberegler-Bereichs, und einen zweiten solchen Fall
+// wollen wir nicht.
+#define ID_PWR_PROFILE_BASE   6500   // 6500..6502
+#define ID_PWR_SW_MANUAL      6510
+#define ID_PWR_SW_STANDBY     6511
+#define ID_PWR_SW_ACDC        6512
+#define ID_PWR_SW_IDLE        6513
+#define ID_PWR_LIGHTS_OFF     6514
+#define ID_PWR_LIST           6520
+#define ID_PWR_APPLY          6521
+#define ID_PWR_RESTORE_ALL    6522
+#define ID_PWR_REPORT         6523
+#define ID_PWR_CLOSE          6524
 
 // Removed struct Theme, g_darkTheme, g_lightTheme, and g_theme as part of theme consolidation
 HBRUSH g_hBgBrush = NULL;
@@ -4264,6 +4281,350 @@ INT_PTR CALLBACK AsusTestDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
     return FALSE;
 }
 
+//=============================================================================
+// ENERGIEMANAGER-DIALOG (Phase 5)
+//
+// Alle Optionen an EINER Stelle - so lautete der Auftrag. Die Umschaltarten
+// sind deshalb Kaestchen und keine Alternativen; angehakt ist zu Beginn nur
+// "manuell", damit sich ohne Zutun nichts am System aendert.
+//
+// Was dieser Dialog NICHT tut: von sich aus etwas abschalten. Die Liste zeigt
+// Vorschlaege mit Ampel; angehakt wird von Hand, geschaltet erst auf
+// "Anwenden", und jede Aenderung steht danach im Journal, aus dem
+// "Alles zuruecknehmen" sie wieder holt.
+//=============================================================================
+
+struct PowerMgrDialog {
+    HWND hDlg          = NULL;
+    HWND hList         = NULL;
+    HWND hStatus       = NULL;
+    HWND hProfile[3]   = {NULL, NULL, NULL};
+    HWND hSwitch[4]    = {NULL, NULL, NULL, NULL};
+    HWND hLightsOff    = NULL;
+    std::vector<powermgr::DeviceEntry> devs;
+    std::vector<int> shown;      // Indizes in devs, in Reihenfolge der Liste
+};
+static PowerMgrDialog* g_pwrDlg = nullptr;
+
+// EcoQoS fuer den eigenen Prozess - an das Profil gebunden, nicht dauerhaft an.
+//
+// PROCESS_POWER_THROTTLING_EXECUTION_SPEED laesst Windows den Prozess auf
+// effizienten Kernen und niedrigerer Taktrate fahren. Das ist genau richtig fuer
+// eine Anwendung, die im Tray sitzt und alle paar Minuten ein paar HID-Pakete
+// schickt - aber es ist eben auch spuerbar, wenn jemand gerade einen Regler
+// zieht. Die Zusage lautete "die Bedienung bleibt unveraendert", deshalb wird
+// hier NICHT dauerhaft gedrosselt, sondern nur im Profil "Energiesparen", und
+// die uebrigen Profile heben es ausdruecklich wieder auf.
+//
+// Der eigentliche Gewinn liegt ohnehin woanders: mit dem Wegfall des
+// Sekundentakts aus Phase 3 laeuft im Leerlauf gar kein Zeitgeber und kein
+// Thread mehr. EcoQoS ist die Zugabe, nicht die Hauptsache.
+// SetProcessInformation wird zur Laufzeit geholt statt gelinkt: die Funktion
+// gibt es erst ab Windows 8, die Drosselklasse ProcessPowerThrottling erst ab
+// Windows 10 1809. Statisch gebunden liefe die App auf aelteren Systemen gar
+// nicht mehr an - fuer eine Zugabe ein schlechter Tausch. Fehlt sie, wird das
+// protokolliert und sonst nichts getan.
+static void ApplyProcessQoS(int profile) {
+    typedef BOOL (WINAPI *SetProcInfoFn)(HANDLE, PROCESS_INFORMATION_CLASS, LPVOID, DWORD);
+
+    static SetProcInfoFn s_fn     = nullptr;
+    static bool          s_looked = false;
+    if (!s_looked) {
+        s_looked = true;
+        HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+        if (k32) s_fn = (SetProcInfoFn)GetProcAddress(k32, "SetProcessInformation");
+        if (!s_fn) LogDebug("[power] SetProcessInformation nicht vorhanden - EcoQoS entfaellt");
+    }
+    if (!s_fn) return;
+
+    PROCESS_POWER_THROTTLING_STATE pt = {};
+    pt.Version     = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    pt.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    pt.StateMask   = (profile == 2) ? PROCESS_POWER_THROTTLING_EXECUTION_SPEED : 0;
+
+    const BOOL ok = s_fn(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
+    char dbg[128];
+    snprintf(dbg, sizeof(dbg), "[power] EcoQoS %s: %s",
+             (profile == 2) ? "an" : "aus", ok ? "gesetzt" : "abgelehnt");
+    LogDebug(dbg);
+}
+
+static bool PwrIsOptedIn(const std::wstring& instanceId) {
+    const std::string id = powermgr::W2U8(instanceId);
+    for (size_t i = 0; i < g_config.powerDeviceOptIn.size(); ++i)
+        if (g_config.powerDeviceOptIn[i] == id) return true;
+    return false;
+}
+
+static void PwrSetOptIn(const std::wstring& instanceId, bool on) {
+    const std::string id = powermgr::W2U8(instanceId);
+    for (size_t i = 0; i < g_config.powerDeviceOptIn.size(); ++i) {
+        if (g_config.powerDeviceOptIn[i] == id) {
+            if (!on) g_config.powerDeviceOptIn.erase(g_config.powerDeviceOptIn.begin() + i);
+            return;
+        }
+    }
+    if (on) g_config.powerDeviceOptIn.push_back(id);
+}
+
+static void PwrFillList(PowerMgrDialog* d) {
+    SendMessage(d->hList, LB_RESETCONTENT, 0, 0);
+    d->shown.clear();
+
+    for (size_t i = 0; i < d->devs.size(); ++i) {
+        const powermgr::DeviceEntry& e = d->devs[i];
+        // Gesperrte Geraete werden gar nicht erst angeboten. Sie in der Liste
+        // zu zeigen und den Haken zu verweigern waere eine Einladung, es doch
+        // zu versuchen.
+        if (e.safety == powermgr::SAFE_BLOCKED) continue;
+
+        wchar_t line[320];
+        swprintf(line, 320, L"%s %-9s [%s] %s",
+                 PwrIsOptedIn(e.instanceId) ? L"[x]" : L"[ ]",
+                 powermgr::SafetyName(e.safety),
+                 (e.powerState == 1) ? L"D0" : L"D3",
+                 e.description.c_str());
+        SendMessageW(d->hList, LB_ADDSTRING, 0, (LPARAM)line);
+        d->shown.push_back((int)i);
+    }
+
+    if (d->shown.empty())
+        SendMessageW(d->hList, LB_ADDSTRING, 0,
+                     (LPARAM)L"(kein Geraet ist zum Abschalten freigegeben)");
+}
+
+INT_PTR CALLBACK PowerMgrDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_INITDIALOG: {
+        g_pwrDlg = new PowerMgrDialog();
+        g_pwrDlg->hDlg = hWnd;
+        SetWindowTextW(hWnd, L"Energiemanager");
+
+        powermgr::SystemInfo sys;
+        const bool sysOk = powermgr::QuerySystemInfo(sys);
+
+        wchar_t lage[256];
+        if (sysOk) {
+            swprintf(lage, 256,
+                     L"Systemlage:  Standby S3 %s  |  Ruhezustand %s  |  Modern Standby %s",
+                     sys.s3 ? L"ja" : L"nein",
+                     sys.hiberFilePresent ? L"eingerichtet" : L"nicht eingerichtet",
+                     sys.aoac ? L"ja" : L"nein");
+        } else {
+            // Keine Quelle -> UNBEKANNT, nicht "kann nichts".
+            wcscpy_s(lage, 256, L"Systemlage: UNBEKANNT (CallNtPowerInformation lieferte nichts)");
+        }
+        CreateWindowW(L"STATIC", lage, WS_CHILD | WS_VISIBLE, 12, 10, 620, 18, hWnd, NULL, NULL, NULL);
+
+        CreateWindowW(L"STATIC", L"Profil:", WS_CHILD | WS_VISIBLE, 12, 38, 50, 18, hWnd, NULL, NULL, NULL);
+        const wchar_t* profNames[3] = { L"Leistung", L"Ausgeglichen", L"Energiesparen" };
+        for (int i = 0; i < 3; i++) {
+            g_pwrDlg->hProfile[i] = CreateWindowW(L"BUTTON", profNames[i],
+                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | (i == 0 ? WS_GROUP : 0),
+                65 + i * 110, 37, 105, 20, hWnd,
+                (HMENU)(INT_PTR)(ID_PWR_PROFILE_BASE + i), NULL, NULL);
+            SendMessage(g_pwrDlg->hProfile[i], BM_SETCHECK,
+                        (g_config.powerProfile == i) ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+
+        CreateWindowW(L"STATIC", L"Umschalten:", WS_CHILD | WS_VISIBLE, 12, 66, 75, 18, hWnd, NULL, NULL, NULL);
+        struct { int id; const wchar_t* text; bool on; } sw[4] = {
+            { ID_PWR_SW_MANUAL,  L"manuell",                    g_config.switchManual    },
+            { ID_PWR_SW_STANDBY, L"automatisch beim Standby",   g_config.switchOnStandby },
+            { ID_PWR_SW_ACDC,    L"automatisch nach Netz/Akku", g_config.switchOnAcDc    },
+            { ID_PWR_SW_IDLE,    L"automatisch nach Leerlauf",  g_config.switchOnIdle    }
+        };
+        for (int i = 0; i < 4; i++) {
+            g_pwrDlg->hSwitch[i] = CreateWindowW(L"BUTTON", sw[i].text,
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                90, 64 + i * 20, 220, 18, hWnd, (HMENU)(INT_PTR)sw[i].id, NULL, NULL);
+            SendMessage(g_pwrDlg->hSwitch[i], BM_SETCHECK,
+                        sw[i].on ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+
+        g_pwrDlg->hLightsOff = CreateWindowW(L"BUTTON", L"Beleuchtung im Energiesparmodus ausschalten",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            330, 64, 300, 18, hWnd, (HMENU)ID_PWR_LIGHTS_OFF, NULL, NULL);
+        SendMessage(g_pwrDlg->hLightsOff, BM_SETCHECK,
+                    g_config.lightsOffInPowerSave ? BST_CHECKED : BST_UNCHECKED, 0);
+
+        CreateWindowW(L"STATIC",
+            L"Geraete (Klick schaltet den Haken um). Gesperrte werden nicht angeboten.",
+            WS_CHILD | WS_VISIBLE, 12, 150, 620, 18, hWnd, NULL, NULL, NULL);
+
+        g_pwrDlg->hList = CreateWindowW(L"LISTBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOTIFY,
+            12, 170, 620, 160, hWnd, (HMENU)ID_PWR_LIST, NULL, NULL);
+
+        std::string invErr;
+        if (!powermgr::Inventory(g_pwrDlg->devs, invErr))
+            g_pwrDlg->devs.clear();
+        PwrFillList(g_pwrDlg);
+
+        CreateWindowW(L"BUTTON", L"Anwenden", WS_CHILD | WS_VISIBLE,
+            12, 340, 100, 26, hWnd, (HMENU)ID_PWR_APPLY, NULL, NULL);
+        CreateWindowW(L"BUTTON", L"Alles zuruecknehmen", WS_CHILD | WS_VISIBLE,
+            122, 340, 160, 26, hWnd, (HMENU)ID_PWR_RESTORE_ALL, NULL, NULL);
+        CreateWindowW(L"BUTTON", L"Bericht speichern", WS_CHILD | WS_VISIBLE,
+            292, 340, 140, 26, hWnd, (HMENU)ID_PWR_REPORT, NULL, NULL);
+        CreateWindowW(L"BUTTON", L"Schliessen", WS_CHILD | WS_VISIBLE,
+            552, 340, 80, 26, hWnd, (HMENU)ID_PWR_CLOSE, NULL, NULL);
+
+        g_pwrDlg->hStatus = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+            12, 372, 620, 36, hWnd, NULL, NULL, NULL);
+
+        // Steht noch etwas aus einer frueheren Sitzung offen, wird das SOFORT
+        // gesagt. Ein deaktiviertes Geraet, von dem niemand mehr weiss, wer es
+        // abgeschaltet hat, ist der schlimmste Zustand dieses Werkzeugs.
+        {
+            std::vector<powermgr::JournalEntry> jr;
+            powermgr::JournalLoad(jr);
+            if (!jr.empty()) {
+                wchar_t buf[256];
+                swprintf(buf, 256,
+                         L"%u Geraet(e) sind noch aus einer frueheren Sitzung deaktiviert. "
+                         L"\"Alles zuruecknehmen\" stellt sie wieder her.",
+                         (unsigned)jr.size());
+                SetWindowTextW(g_pwrDlg->hStatus, buf);
+            } else if (!IsUserAnAdmin()) {
+                SetWindowTextW(g_pwrDlg->hStatus,
+                    L"Ohne Adminrechte laesst sich kein Geraet schalten - "
+                    L"die Liste zeigt trotzdem den gemessenen Stand.");
+            }
+        }
+        return TRUE;
+    }
+
+    case WM_COMMAND: {
+        if (!g_pwrDlg) break;
+        const int id   = LOWORD(wParam);
+        const int code = HIWORD(wParam);
+
+        if (id >= ID_PWR_PROFILE_BASE && id <= ID_PWR_PROFILE_BASE + 2) {
+            g_config.powerProfile = id - ID_PWR_PROFILE_BASE;
+            ApplyProcessQoS(g_config.powerProfile);
+            SaveSettings();
+            SetWindowTextW(g_pwrDlg->hStatus,
+                (g_config.powerProfile == 2)
+                  ? L"Profil Energiesparen: die App selbst laeuft jetzt gedrosselt (EcoQoS)."
+                  : L"Profil gewechselt. Die App selbst laeuft ungedrosselt.");
+            return TRUE;
+        }
+        if (id == ID_PWR_SW_MANUAL || id == ID_PWR_SW_STANDBY ||
+            id == ID_PWR_SW_ACDC   || id == ID_PWR_SW_IDLE    ||
+            id == ID_PWR_LIGHTS_OFF) {
+            g_config.switchManual        = SendMessage(g_pwrDlg->hSwitch[0], BM_GETCHECK, 0, 0) == BST_CHECKED;
+            g_config.switchOnStandby     = SendMessage(g_pwrDlg->hSwitch[1], BM_GETCHECK, 0, 0) == BST_CHECKED;
+            g_config.switchOnAcDc        = SendMessage(g_pwrDlg->hSwitch[2], BM_GETCHECK, 0, 0) == BST_CHECKED;
+            g_config.switchOnIdle        = SendMessage(g_pwrDlg->hSwitch[3], BM_GETCHECK, 0, 0) == BST_CHECKED;
+            g_config.lightsOffInPowerSave= SendMessage(g_pwrDlg->hLightsOff, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            SaveSettings();
+            return TRUE;
+        }
+
+        if (id == ID_PWR_LIST && code == LBN_DBLCLK) {
+            const int sel = (int)SendMessage(g_pwrDlg->hList, LB_GETCURSEL, 0, 0);
+            if (sel >= 0 && sel < (int)g_pwrDlg->shown.size()) {
+                const powermgr::DeviceEntry& e = g_pwrDlg->devs[g_pwrDlg->shown[sel]];
+                PwrSetOptIn(e.instanceId, !PwrIsOptedIn(e.instanceId));
+                SaveSettings();
+                PwrFillList(g_pwrDlg);
+                SendMessage(g_pwrDlg->hList, LB_SETCURSEL, sel, 0);
+            }
+            return TRUE;
+        }
+
+        if (id == ID_PWR_APPLY) {
+            if (!IsUserAnAdmin()) {
+                SetWindowTextW(g_pwrDlg->hStatus,
+                    L"Abgebrochen: Geraete schalten braucht Adminrechte. Es wurde nichts geaendert.");
+                return TRUE;
+            }
+            int ok = 0, reboot = 0, bad = 0;
+            std::wstring lastDetail;
+            for (size_t k = 0; k < g_pwrDlg->shown.size(); ++k) {
+                const powermgr::DeviceEntry& e = g_pwrDlg->devs[g_pwrDlg->shown[k]];
+                if (!PwrIsOptedIn(e.instanceId)) continue;
+                std::wstring detail;
+                const powermgr::SwitchResult r =
+                    powermgr::DisableAndRecord(e.instanceId, e.description, detail);
+                if (r == powermgr::SW_OK)                 ok++;
+                else if (r == powermgr::SW_NEEDS_REBOOT)  reboot++;
+                else { bad++; lastDetail = detail; }
+            }
+            wchar_t buf[320];
+            swprintf(buf, 320,
+                     L"%d verifiziert deaktiviert, %d erst nach Neustart, %d fehlgeschlagen%s%s",
+                     ok, reboot, bad,
+                     bad ? L" - " : L"", bad ? lastDetail.c_str() : L"");
+            SetWindowTextW(g_pwrDlg->hStatus, buf);
+
+            std::string ie;
+            powermgr::Inventory(g_pwrDlg->devs, ie);
+            PwrFillList(g_pwrDlg);
+            return TRUE;
+        }
+
+        if (id == ID_PWR_RESTORE_ALL) {
+            std::vector<std::wstring> failed;
+            const int n = powermgr::RestoreAll(failed);
+            wchar_t buf[320];
+            if (failed.empty())
+                swprintf(buf, 320, L"%d Geraet(e) wiederhergestellt. Das Journal ist leer.", n);
+            else
+                swprintf(buf, 320, L"%d wiederhergestellt, %u NICHT: %s",
+                         n, (unsigned)failed.size(), failed[0].c_str());
+            SetWindowTextW(g_pwrDlg->hStatus, buf);
+
+            std::string ie;
+            powermgr::Inventory(g_pwrDlg->devs, ie);
+            PwrFillList(g_pwrDlg);
+            return TRUE;
+        }
+
+        if (id == ID_PWR_REPORT) {
+            std::wstring dir = GetAppDataPath() + L"\\docs";
+            SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+            const std::wstring path = dir + L"\\power_inventory.txt";
+            FILE* fp = _wfopen(path.c_str(), L"w");
+            if (fp) {
+                powermgr::SystemInfo sys;
+                powermgr::QuerySystemInfo(sys);
+                powermgr::WriteReport(fp, sys, g_pwrDlg->devs,
+                                      (unsigned)(GetTickCount64() / 1000ULL));
+                fclose(fp);
+                SetWindowTextW(g_pwrDlg->hStatus, path.c_str());
+            }
+            return TRUE;
+        }
+
+        if (id == ID_PWR_CLOSE || id == IDCANCEL) {
+            EndDialog(hWnd, 0);
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_DESTROY:
+        if (g_pwrDlg) { delete g_pwrDlg; g_pwrDlg = nullptr; }
+        break;
+
+    case WM_CLOSE:
+        EndDialog(hWnd, 0);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+void ShowPowerMgrDialog(HWND hWnd) {
+    BYTE dlgTemplate[512] = {0};
+    DLGTEMPLATE* pDlg = (DLGTEMPLATE*)dlgTemplate;
+    pDlg->style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
+    pDlg->cx = 430;
+    pDlg->cy = 270;
+    DialogBoxIndirectW(GetModuleHandle(NULL), pDlg, hWnd, PowerMgrDlgProc);
+}
+
 void ShowAsusTestDialog(HWND hWnd) {
     // Calculate dialog size based on number of channels
     int numCh = g_asusHwConfig.valid ? g_asusHwConfig.numChannels : 3;
@@ -5241,6 +5602,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             gx+192, btnY2, 80, BTN_H, hWnd, (HMENU)ID_BTN_HID_RESET, hInst, NULL);
         CreateWindowW(L"BUTTON", L"Tastenfarben", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             gx+278, btnY2, 110, BTN_H, hWnd, (HMENU)ID_BTN_KEY_LAYOUT, hInst, NULL);
+        CreateWindowW(L"BUTTON", L"Energie", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            gx+394, btnY2, 90, BTN_H, hWnd, (HMENU)ID_BTN_POWER_MGR, hInst, NULL);
         curY = g_cards[2].rect.bottom + GROUP_MARGIN;
 
         // ============= PROFILES & SETTINGS GROUP =============
@@ -5394,6 +5757,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Wer beim Beenden ausgeschaltet hatte, will beim Start nicht
         // geblendet werden.
         AppendOverrideNotice();
+
+        // Das eigene Profil auf den Prozess anwenden.
+        ApplyProcessQoS(g_config.powerProfile);
+
+        // Steht noch ein deaktiviertes Geraet aus einer frueheren Sitzung
+        // offen, wird das gesagt - und zwar hier, nicht erst wenn jemand
+        // zufaellig den Energiemanager oeffnet. Ein Geraet, das die App
+        // abgeschaltet hat und niemand mehr zuordnet, ist der schlimmste
+        // Zustand dieses Werkzeugs.
+        {
+            std::vector<powermgr::JournalEntry> jr;
+            powermgr::JournalLoad(jr);
+            if (!jr.empty()) {
+                wchar_t buf[256];
+                swprintf(buf, 256,
+                         L"Energiemanager: %u Geraet(e) sind noch deaktiviert "
+                         L"(\"Energie\" \u2192 \"Alles zuruecknehmen\").",
+                         (unsigned)jr.size());
+                AppendStatus(buf);
+            }
+        }
         if (!g_skipApplyOnStart) {
             if (g_config.lightsOff) {
                 AppendStatus(L"Beleuchtung war ausgeschaltet - bleibt aus");
@@ -5629,6 +6013,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // there is no read-back for Aura, so no success is claimed here.
             ShowAsusTestDialog(hWnd);
             AppendStatus(L"ASUS-Kanaleinstellungen gespeichert (Hardware nicht r\u00FCcklesbar)");
+        }
+        else if (id == ID_BTN_POWER_MGR) {
+            ShowPowerMgrDialog(hWnd);
         }
         else if (id == ID_BTN_KEY_LAYOUT) {
             // Per-key lighting. The dialog reads the layout from the device and

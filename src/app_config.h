@@ -62,6 +62,23 @@ public:
     uint8_t savedBrightness = 4;
     uint8_t savedR = 0, savedG = 34, savedB = 255;
 
+    //--- Energiemanager (Phase 5) ---
+    //
+    // Die Umschaltarten sind KAESTCHEN und keine Alternativen: der Auftrag
+    // lautete, alle Optionen an einer Stelle anzubieten, nicht eine
+    // auszuwaehlen. Vorgabe ist nur "manuell" - ohne Zutun aendert sich am
+    // System nichts.
+    int  powerProfile     = 0;      // 0=Leistung, 1=Ausgeglichen, 2=Energiesparen
+    bool switchManual     = true;
+    bool switchOnStandby  = false;
+    bool switchOnAcDc     = false;
+    bool switchOnIdle     = false;
+    bool lightsOffInPowerSave = true;
+
+    // Instanz-IDs der Geraete, die der Mensch zum Abschalten freigegeben hat.
+    // Leer ist die Vorgabe und bleibt es, bis jemand ausdruecklich anhakt.
+    std::vector<std::string> powerDeviceOptIn;
+
     //--- Device enables ---
     bool enableAura     = true;
     bool enableMouse    = true;
@@ -139,6 +156,14 @@ public:
         j["edgeMode"]   = edgeMode;
         j["kbCustomMode"] = kbCustomMode;
 
+        j["powerProfile"]         = powerProfile;
+        j["switchManual"]         = switchManual;
+        j["switchOnStandby"]      = switchOnStandby;
+        j["switchOnAcDc"]         = switchOnAcDc;
+        j["switchOnIdle"]         = switchOnIdle;
+        j["lightsOffInPowerSave"] = lightsOffInPowerSave;
+        j["powerDeviceOptIn"]     = powerDeviceOptIn;
+
         j["lightsOff"]       = lightsOff;
         j["savedKbMode"]     = savedKbMode;
         j["savedEdgeMode"]   = savedEdgeMode;
@@ -212,6 +237,15 @@ public:
             // Fehlen die Felder (Konfig einer aelteren Fassung), bleibt es bei
             // "an" mit den Vorgaben - ein Upgrade darf niemandem das Licht
             // ausschalten.
+            powerProfile         = j.value("powerProfile",         powerProfile);
+            switchManual         = j.value("switchManual",         switchManual);
+            switchOnStandby      = j.value("switchOnStandby",      switchOnStandby);
+            switchOnAcDc         = j.value("switchOnAcDc",         switchOnAcDc);
+            switchOnIdle         = j.value("switchOnIdle",         switchOnIdle);
+            lightsOffInPowerSave = j.value("lightsOffInPowerSave", lightsOffInPowerSave);
+            if (j.contains("powerDeviceOptIn") && j["powerDeviceOptIn"].is_array())
+                powerDeviceOptIn = j["powerDeviceOptIn"].get<std::vector<std::string>>();
+
             lightsOff       = j.value("lightsOff", lightsOff);
             savedKbMode     = (uint8_t)j.value("savedKbMode",     (int)savedKbMode);
             savedEdgeMode   = (uint8_t)j.value("savedEdgeMode",   (int)savedEdgeMode);
