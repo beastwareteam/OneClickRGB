@@ -48,6 +48,20 @@ public:
     // fills it in.
     uint8_t kbCustomMode = 0xFF;
 
+    //--- Echter Aus-Zustand (Aus-Knopf, Tray, Hotkey) ---
+    //
+    // "Aus" war bisher nur die Farbe 0,0,0. Das laesst Modus und Helligkeit
+    // stehen, also lief jeder Nicht-Statik-Effekt weiter, und es liess sich
+    // nicht zurueckdrehen: die vorherige Farbe war ueberschrieben. Der Zustand
+    // wird deshalb festgehalten, samt dem Stand, auf den der zweite Druck
+    // zurueckstellt. Persistent, damit ein Neustart nicht heimlich wieder
+    // einschaltet.
+    bool    lightsOff       = false;
+    uint8_t savedKbMode     = 0x06;
+    uint8_t savedEdgeMode   = 0x00;
+    uint8_t savedBrightness = 4;
+    uint8_t savedR = 0, savedG = 34, savedB = 255;
+
     //--- Device enables ---
     bool enableAura     = true;
     bool enableMouse    = true;
@@ -125,6 +139,14 @@ public:
         j["edgeMode"]   = edgeMode;
         j["kbCustomMode"] = kbCustomMode;
 
+        j["lightsOff"]       = lightsOff;
+        j["savedKbMode"]     = savedKbMode;
+        j["savedEdgeMode"]   = savedEdgeMode;
+        j["savedBrightness"] = savedBrightness;
+        j["savedR"]          = savedR;
+        j["savedG"]          = savedG;
+        j["savedB"]          = savedB;
+
         j["enableAura"]     = enableAura;
         j["enableMouse"]    = enableMouse;
         j["enableKeyboard"] = enableKeyboard;
@@ -186,6 +208,17 @@ public:
             kbMode     = (uint8_t)j.value("kbMode",     (int)kbMode);
             edgeMode   = (uint8_t)j.value("edgeMode",   (int)edgeMode);
             kbCustomMode = (uint8_t)j.value("kbCustomMode", (int)kbCustomMode);
+
+            // Fehlen die Felder (Konfig einer aelteren Fassung), bleibt es bei
+            // "an" mit den Vorgaben - ein Upgrade darf niemandem das Licht
+            // ausschalten.
+            lightsOff       = j.value("lightsOff", lightsOff);
+            savedKbMode     = (uint8_t)j.value("savedKbMode",     (int)savedKbMode);
+            savedEdgeMode   = (uint8_t)j.value("savedEdgeMode",   (int)savedEdgeMode);
+            savedBrightness = (uint8_t)j.value("savedBrightness", (int)savedBrightness);
+            savedR          = (uint8_t)j.value("savedR", (int)savedR);
+            savedG          = (uint8_t)j.value("savedG", (int)savedG);
+            savedB          = (uint8_t)j.value("savedB", (int)savedB);
 
             enableAura     = j.value("enableAura",     enableAura);
             enableMouse    = j.value("enableMouse",    enableMouse);

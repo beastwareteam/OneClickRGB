@@ -490,6 +490,45 @@ static void TestResolveChannelColor() {
     // override keys must not start overriding anything.
     ChannelConfig fresh;
     CHECK(fresh.override_active == false);
+
+    // --- ignoreOverride: der Ausschaltweg ---------------------------------
+    //
+    // Der Anlass ist gemessen, nicht ausgedacht: in der echten config.json
+    // dieses Rechners standen aura[1] und aura[2] auf override_active mit
+    // (0,3,255). Beide ignorierten damit jedes Ausschalten - auch den Blackout
+    // vor dem Standby - und blieben an. Fuer den Bediener sah der Aus-Knopf
+    // kaputt aus, obwohl er tat, was er sollte.
+    ResolveChannelColor(ovr, 0, 0, 0, r, g, b, /*ignoreOverride*/ true);
+    CHECK_EQ(r, 0); CHECK_EQ(g, 0); CHECK_EQ(b, 0);
+
+    // Dieselbe Kanalkonfiguration wie im gemessenen Fall.
+    ChannelConfig pinned;
+    pinned.override_active = true;
+    pinned.override_r = 0; pinned.override_g = 3; pinned.override_b = 255;
+    ResolveChannelColor(pinned, 0, 0, 0, r, g, b);                       // alter Weg
+    CHECK_EQ(r, 0); CHECK_EQ(g, 3); CHECK_EQ(b, 255);                    // blieb an
+    ResolveChannelColor(pinned, 0, 0, 0, r, g, b, true);                 // Ausschaltweg
+    CHECK_EQ(r, 0); CHECK_EQ(g, 0); CHECK_EQ(b, 0);                      // ist aus
+
+    // Der Bypass gilt NUR fuers Ausschalten. Eine Farbwahl darf gepinnte
+    // Kanaele weiterhin nicht anfassen - sonst waere die eigene Kanalfarbe
+    // beim ersten Preset-Klick weg, und das war ausdruecklich nicht gewollt.
+    ResolveChannelColor(pinned, 255, 0, 0, r, g, b);
+    CHECK_EQ(r, 0); CHECK_EQ(g, 3); CHECK_EQ(b, 255);
+
+    // ignoreOverride reicht die globale Farbe durch, es erzwingt kein Schwarz.
+    // Der Aufrufer entscheidet, was ankommt; hier steht nur, wessen Farbe gilt.
+    ResolveChannelColor(pinned, 12, 34, 56, r, g, b, true);
+    CHECK_EQ(r, 12); CHECK_EQ(g, 34); CHECK_EQ(b, 56);
+
+    // Ein Kanal ohne Override verhaelt sich mit und ohne Bypass gleich.
+    ResolveChannelColor(plain, 10, 20, 30, r, g, b, true);
+    CHECK_EQ(r, 10); CHECK_EQ(g, 20); CHECK_EQ(b, 30);
+
+    // "Aktiv" abgewaehlt bleibt aus, auch auf dem Ausschaltweg - der Bypass
+    // hebt den Override auf, nicht die Kanalabschaltung.
+    ResolveChannelColor(off, 255, 255, 255, r, g, b, true);
+    CHECK_EQ(r, 0); CHECK_EQ(g, 0); CHECK_EQ(b, 0);
 }
 
 //-----------------------------------------------------------------------------

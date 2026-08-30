@@ -48,11 +48,26 @@ struct ChannelConfig {
 // The channel correction stays in effect for overridden channels too: the
 // dialog's sliders and the apply path must compute the same bytes, otherwise
 // closing and reopening the dialog would shift the colour.
+//
+// ignoreOverride ist der Ausschaltweg, und er hat genau einen Grund:
+// "aus" ist keine Farbe, sondern ein Zustand. Ein Kanal mit eigener Farbe
+// ignoriert jede globale Farbe - richtig fuer Blau, Rot und Weiss, falsch fuer
+// Schwarz. Gemessen an einer echten config.json dieses Rechners: aura[1] und
+// aura[2] standen auf override_active mit (0,3,255) und blieben deshalb bei
+// JEDEM Ausschalten an, auch beim Blackout vor dem Standby. Der Bediener sah
+// zwei leuchtende Kanaele und schloss daraus, der Aus-Knopf sei kaputt.
+//
+// Der Bypass sitzt hier und nirgendwo sonst, damit diese Funktion die einzige
+// Stelle bleibt, an der die Rangfolge entschieden wird.
 inline void ResolveChannelColor(const ChannelConfig& c,
                                 uint8_t gr, uint8_t gg, uint8_t gb,
-                                uint8_t& r, uint8_t& g, uint8_t& b) {
-    if (c.override_active) { r = c.override_r; g = c.override_g; b = c.override_b; }
-    else                   { r = gr; g = gg; b = gb; }
+                                uint8_t& r, uint8_t& g, uint8_t& b,
+                                bool ignoreOverride = false) {
+    if (c.override_active && !ignoreOverride) {
+        r = c.override_r; g = c.override_g; b = c.override_b;
+    } else {
+        r = gr; g = gg; b = gb;
+    }
     c.ApplyCorrection(r, g, b);   // handles !enabled -> 0,0,0
 }
 

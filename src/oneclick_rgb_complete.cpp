@@ -1514,7 +1514,8 @@ bool SetAsusChannel(hid_device* dev, int channel, int numLEDs, uint8_t r, uint8_
 static void ApplyAsusChannelColor(hid_device* dev, int auraIndex, int directChannel, int ledCount,
                                   uint8_t baseR, uint8_t baseG, uint8_t baseB, bool applyCorrection,
                                   bool respectGlobalEnable,
-                                  int& setCount, int* attemptCount = nullptr) {
+                                  int& setCount, int* attemptCount = nullptr,
+                                  bool ignoreOverride = false) {
     if (!dev) return;
     if (auraIndex < 0 || auraIndex >= AURA_CONFIG_CHANNELS) return;
     if (respectGlobalEnable && !g_config.aura[auraIndex].enabled) return;
@@ -1523,8 +1524,9 @@ static void ApplyAsusChannelColor(hid_device* dev, int auraIndex, int directChan
 
     uint8_t cr = baseR, cg = baseG, cb = baseB;
     if (applyCorrection) {
-        ResolveChannelColor(g_config.aura[auraIndex], baseR, baseG, baseB, cr, cg, cb);
-    } else if (g_config.aura[auraIndex].override_active) {
+        ResolveChannelColor(g_config.aura[auraIndex], baseR, baseG, baseB, cr, cg, cb,
+                            ignoreOverride);
+    } else if (g_config.aura[auraIndex].override_active && !ignoreOverride) {
         // No correction requested, but the override still decides the source
         // colour - otherwise an overridden channel would jump to the global
         // colour on this path.
@@ -1536,7 +1538,9 @@ static void ApplyAsusChannelColor(hid_device* dev, int auraIndex, int directChan
     if (SetAsusChannel(dev, directChannel, ledCount, cr, cg, cb)) setCount++;
 }
 
-bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
+// ignoreOverride ist der Ausschaltweg (siehe ResolveChannelColor). Vorgabe
+// false, damit jede bestehende Aufrufstelle sich exakt wie bisher verhaelt.
+bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b, bool ignoreOverride = false) {
     if (DryRunSkip(L"ASUS Aura")) return false;
 
     hid_device* dev = OpenAsusAura();
@@ -1559,13 +1563,13 @@ bool SetAsusAura(uint8_t r, uint8_t g, uint8_t b) {
                 r, g, b,
                 true,
                 true,
-                setCount, &attempted);
+                setCount, &attempted, ignoreOverride);
         }
     } else {
         for (int i = 0; i < AURA_FALLBACK_COUNT; i++) {
             ApplyAsusChannelColor(dev, i, AURA_FALLBACK_CHANNELS[i].channel,
                                   AURA_FALLBACK_CHANNELS[i].leds,
-                                  r, g, b, true, true, setCount, &attempted);
+                                  r, g, b, true, true, setCount, &attempted, ignoreOverride);
         }
     }
 
@@ -3242,6 +3246,10 @@ void UpdateSliders() {
 //=============================================================================
 
 void SetPresetColor(int r, int g, int b) {
+    // Wer eine Farbe waehlt, will Licht. Bliebe lightsOff stehen, wuerde die
+    // Konfiguration "aus" behaupten, waehrend die Geraete leuchten - und der
+    // naechste Start haette sie wieder ausgeschaltet.
+    g_config.lightsOff = false;
     g_state.red = (uint8_t)r;
     g_state.green = (uint8_t)g;
     g_state.blue = (uint8_t)b;
@@ -3290,6 +3298,149 @@ void UpdateAllControls() {
             SetWindowTextW(g_state.hComboProfiles, g_state.currentProfile.c_str());
         }
     }
+}
+
+//=============================================================================
+// ECHTES AUSSCHALTEN
+//
+// Es gab zwei verschiedene Vorstellungen von "aus", und die schwaechere sass am
+// Knopf:
+//
+//   * Der Aus-Knopf setzte die Farbe auf 0,0,0 und liess Modus und Helligkeit
+//     stehen. Bei jedem Nicht-Statik-Effekt (Spektrum, Regenbogen, Welle) ist
+//     die Farbe aber gar nicht das, was die Firmware zeichnet - die Animation
+//     lief weiter, und der Knopf sah kaputt aus.
+//   * Der Suspend-Zweig kannte das echte Aus: EDGE_MODE_OFF und Helligkeit 0.
+//
+// ApplyLightsOff ist jetzt der eine Weg, den beide gehen. Zwei Fassungen
+// derselben Sache laufen auseinander, sobald jemand nur eine pflegt.
+//
+// ignoreOverride=true bei Aura: "aus" ist kein Farbwunsch, sondern ein Zustand
+// (siehe ResolveChannelColor in channel_config.h).
+//
+// Gemeldet wird nur, was zurueckgelesen wurde. Tastatur und Edge koennen das,
+// Aura, Maus und RAM nicht - deren Zeilen sagen "geschrieben", nie "verifiziert"
+// (Projektregel 1).
+//=============================================================================
+
+bool ApplyLightsOff() {
+    if (DryRunSkip(L"Beleuchtung aus")) return false;
+
+    bool kbOk = true, edgeOk = true;
+    int  unverifiedTried = 0, unverifiedAcked = 0;
+
+    {
+        std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
+        hid_init();
+
+        if (g_state.enableAura) {
+            unverifiedTried++;
+            if (SetAsusAura(0, 0, 0, /*ignoreOverride*/ true)) unverifiedAcked++;
+        }
+        if (g_state.enableMouse) {
+            unverifiedTried++;
+            if (SetSteelSeries(0, 0, 0)) unverifiedAcked++;
+        }
+        if (g_state.enableKeyboard) {
+            // KB_MODE_STATIC statt eines undokumentierten "Aus"-Modusbytes:
+            // ausserhalb belegter Werte wird nicht geschrieben (Projektregel 2).
+            // Ob Helligkeit 0 die Tastatur wirklich dunkel schaltet, sagt der
+            // Read-back im Setter - nicht diese Zeile.
+            kbOk = SetEVisionKeyboard(0, 0, 0, KB_MODE_STATIC, 0, g_state.speed);
+        }
+        if (g_state.enableEdge) {
+            edgeOk = SetEVisionEdge(0, 0, 0, EDGE_MODE_OFF, 0, 0);
+        }
+        if (g_state.enableRAM) {
+            unverifiedTried++;
+            if (SetGSkillRAM(0, 0, 0)) unverifiedAcked++;
+        }
+
+        hid_exit();
+    }
+
+    const bool verified = kbOk && edgeOk;
+
+    if (verified) {
+        AppendStatus(L"=== Aus verifiziert (Tastatur und Edge zur\u00FCckgelesen) ===");
+    } else {
+        std::wstring names;
+        if (!kbOk)   names = L"Tastatur";
+        if (!edgeOk) names += (names.empty() ? L"Edge" : L", Edge");
+        wchar_t line[192];
+        swprintf(line, 192, L"=== Aus NICHT verifiziert: %s ===", names.c_str());
+        AppendStatus(line);
+    }
+
+    if (unverifiedTried > 0) {
+        wchar_t line[192];
+        swprintf(line, 192,
+                 L"Aura/Maus/RAM: %d/%d geschrieben (ohne Read-back - nicht verifiziert)",
+                 unverifiedAcked, unverifiedTried);
+        AppendStatus(line);
+    }
+
+    return verified;
+}
+
+// Der Aus-Knopf als Schalter. Erster Druck sichert den Stand und schaltet aus,
+// zweiter stellt Farbe, Modi und Helligkeit exakt wieder her.
+void ToggleLightsOff() {
+    if (!g_config.lightsOff) {
+        g_config.savedR          = g_state.red;
+        g_config.savedG          = g_state.green;
+        g_config.savedB          = g_state.blue;
+        g_config.savedKbMode     = (uint8_t)g_state.kbMode;
+        g_config.savedEdgeMode   = (uint8_t)g_state.edgeMode;
+        g_config.savedBrightness = (uint8_t)g_state.brightness;
+        g_config.lightsOff       = true;
+        SaveSettings();
+
+        ClearStatus();
+        AppendStatus(L"=== Beleuchtung ausschalten ===");
+        // Nicht im Nachrichtenzweig: die Setter schlafen zwischen den Writes,
+        // und eine blockierte Pumpe laesst das Fenster einfrieren.
+        std::thread([] { ApplyLightsOff(); }).detach();
+    } else {
+        g_state.red        = g_config.savedR;
+        g_state.green      = g_config.savedG;
+        g_state.blue       = g_config.savedB;
+        g_state.kbMode     = g_config.savedKbMode;
+        g_state.edgeMode   = NormalizeEdgeMode(g_config.savedEdgeMode);
+        g_state.brightness = g_config.savedBrightness;
+        g_config.lightsOff = false;
+
+        UpdateAllControls();
+        ClearStatus();
+        AppendStatus(L"=== Beleuchtung wieder an ===");
+        CommitStateAndApply(true);
+    }
+}
+
+// Sagt einmal beim Start, welche Aura-Kanaele nicht der Globalfarbe folgen.
+//
+// Der Anlass ist gemessen: auf diesem Rechner standen aura[1] und aura[2] auf
+// override_active, ohne dass es dafuer irgendwo einen Hinweis gab. Gesetzt
+// werden sie beilaeufig - eine Reglerbewegung im ASUS-Testdialog genuegt - und
+// danach ignoriert der Kanal jede Farbwahl. Wer das nicht weiss, haelt die
+// Farbknoepfe fuer kaputt.
+static void AppendOverrideNotice() {
+    wchar_t list[128] = L"";
+    int n = 0;
+    for (int i = 0; i < AURA_CONFIG_CHANNELS; i++) {
+        if (!g_config.aura[i].override_active) continue;
+        wchar_t one[16];
+        swprintf(one, 16, n ? L", %d" : L"%d", i);
+        wcscat_s(list, 128, one);
+        n++;
+    }
+    if (n == 0) return;
+
+    wchar_t buf[256];
+    swprintf(buf, 256,
+             L"Hinweis: Aura-Kanal %s folgt nicht der Globalfarbe (eigene Farbe). "
+             L"\"ASUS Test\" \u2192 \"Alle folgen Global\" hebt das auf.", list);
+    AppendStatus(buf);
 }
 
 //=============================================================================
@@ -5203,9 +5354,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Start centralized apply worker queue
         StartApplyWorker();
 
-        // Apply colors on startup (unless --no-apply)
+        // Wer beim Beenden ausgeschaltet hatte, will beim Start nicht
+        // geblendet werden.
+        AppendOverrideNotice();
         if (!g_skipApplyOnStart) {
-            RequestApplyColors(true);
+            if (g_config.lightsOff) {
+                AppendStatus(L"Beleuchtung war ausgeschaltet - bleibt aus");
+                std::thread([] { ApplyLightsOff(); }).detach();
+            } else {
+                RequestApplyColors(true);
+            }
         }
         LogDebug("WM_CREATE finished");
         AppendStatus(L"OneClickRGB started");
@@ -5354,7 +5512,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case ID_HOTKEY_RED: SetPresetColor(255, 0, 0); RequestApplyColors(true); break;
         case ID_HOTKEY_GREEN: SetPresetColor(0, 255, 0); RequestApplyColors(true); break;
         case ID_HOTKEY_WHITE: SetPresetColor(255, 255, 255); RequestApplyColors(true); break;
-        case ID_HOTKEY_OFF: SetPresetColor(0, 0, 0); RequestApplyColors(true); break;
+        case ID_HOTKEY_OFF: ToggleLightsOff(); break;
         }
         break;
 
@@ -5476,7 +5634,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         else if (id == ID_BTN_PRESET_CYAN) SetPresetColor(0, 255, 255);
         else if (id == ID_BTN_PRESET_PURPLE) SetPresetColor(128, 0, 255);
         else if (id == ID_BTN_PRESET_WHITE) SetPresetColor(255, 255, 255);
-        else if (id == ID_BTN_PRESET_OFF) SetPresetColor(0, 0, 0);
+        else if (id == ID_BTN_PRESET_OFF) ToggleLightsOff();
         else if (id == ID_BTN_THEME) {
             // Cycle through themes: Dark -> Light -> Colorblind -> Dark
             int nextTheme = (GetThemeId() + 1) % 3;
@@ -5533,7 +5691,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         else if (id == ID_TRAY_RED) { SetPresetColor(255, 0, 0); RequestApplyColors(true); }
         else if (id == ID_TRAY_GREEN) { SetPresetColor(0, 255, 0); RequestApplyColors(true); }
         else if (id == ID_TRAY_WHITE) { SetPresetColor(255, 255, 255); RequestApplyColors(true); }
-        else if (id == ID_TRAY_OFF) { SetPresetColor(0, 0, 0); RequestApplyColors(true); }
+        else if (id == ID_TRAY_OFF) { ToggleLightsOff(); }
         else if (id == ID_TRAY_STANDBY) { SystemStandby(); }
         else if (id == ID_TRAY_SHUTDOWN) {
             if (MessageBoxW(hWnd, L"Are you sure you want to shutdown?", L"Confirm Shutdown", MB_YESNO | MB_ICONQUESTION) == IDYES) {
@@ -5608,18 +5766,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_suspendSeen = true;
             ClearStatus();
             AppendStatus(L"System entering standby...");
-            // Turn off all RGB devices for clean state
-            {
-                std::lock_guard<std::mutex> ioLock(g_state.deviceIoMutex);
-                hid_init();
-                if (g_state.enableAura) SetAsusAura(0, 0, 0);
-                if (g_state.enableMouse) SetSteelSeries(0, 0, 0);
-                if (g_state.enableKeyboard) SetEVisionKeyboard(0, 0, 0, 0, 0, 0);
-                if (g_state.enableEdge) SetEVisionEdge(0, 0, 0, EDGE_MODE_OFF, 0, 0);
-                if (g_state.enableRAM) SetGSkillRAM(0, 0, 0);
-                hid_exit();
-            }
-            AppendStatus(L"Devices off - ready for standby");
+            // Derselbe Weg wie der Aus-Knopf. Vorher stand hier eine zweite,
+            // eigene Fassung des Ausschaltens - unter anderem mit Modusbyte
+            // 0x00, das in docs/Keyboard_Protocol.md gar nicht belegt ist.
+            ApplyLightsOff();
         }
         // Handle RESUME from sleep/hibernate
         else if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
