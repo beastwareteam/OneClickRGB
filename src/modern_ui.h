@@ -12,7 +12,9 @@
 #include "themes.h"
 
 // Forward declarations for functions implemented in oneclick_rgb_complete.cpp
-void PickColor();
+// PickColor meldet, ob der Benutzer wirklich eine Farbe gewaehlt hat - nur dann
+// darf der Aufrufer speichern und anwenden.
+bool PickColor();
 void ParseHexColor(const wchar_t* hex);
 void UpdatePreview();
 void UpdateSliders();

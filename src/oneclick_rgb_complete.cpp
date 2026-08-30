@@ -241,7 +241,10 @@ static inline void FillCtrlBackground(HDC hdcMem, HWND hCtrl, const RECT& rc) {
 
 // Control IDs
 #define ID_BTN_APPLY 1001
-#define ID_BTN_PICK_COLOR 1002
+// ID_BTN_PICK_COLOR (1002) ist entfallen. Der Knopf wurde bei der
+// UI-Umgestaltung geloescht und durch den klickbaren Vorschau-Swatch
+// ersetzt; sein Handler blieb als unerreichbarer Code stehen und liess die
+// Datei behaupten, es gaebe diesen Knopf noch.
 #define ID_EDIT_HEX 1003
 #define ID_SLIDER_R 1004
 #define ID_SLIDER_G 1005
@@ -3155,7 +3158,13 @@ void CommitStateAndApply(bool forceApply) {
 //=============================================================================
 
 // Oeffnet einen Farbauswahldialog und uebernimmt die gewaehlte Farbe in die UI
-void PickColor() {
+// Gibt zurueck, ob der Benutzer wirklich eine Farbe gewaehlt hat.
+//
+// Frueher void: der Aufrufer konnte "abgebrochen" nicht von "uebernommen"
+// unterscheiden und musste daher entweder immer oder nie speichern. Der einzige
+// verbliebene Aufrufer (der Vorschau-Swatch) hat sich fuer "nie" entschieden -
+// siehe ColorPreviewSubclassProc.
+bool PickColor() {
     CHOOSECOLORW cc = {0};
     static COLORREF customColors[16] = {0};
     cc.lStructSize = sizeof(cc);
@@ -3175,7 +3184,9 @@ void PickColor() {
             swprintf(hex, 10, L"#%02X%02X%02X", g_state.red, g_state.green, g_state.blue);
             SetWindowTextW(g_state.hEditHex, hex);
         }
+        return true;
     }
+    return false;
 }
 
 // Parst einen Hex-String wie #RRGGBB und setzt die Farbe
@@ -5352,11 +5363,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int code = HIWORD(wParam);
 
         if (id == ID_BTN_APPLY) {
+            // Das Hex-Feld einlesen, wenn es noch den Fokus hat.
+            //
+            // Die Nachrichtenschleife ruft IsDialogMessage; Enter aktiviert
+            // damit den BS_DEFPUSHBUTTON APPLY, OHNE dass das Edit-Feld den
+            // Fokus verliert. EN_KILLFOCUS - der einzige Ort, an dem der
+            // Hex-Text bisher gelesen wurde - feuert dann nie, und APPLY schickt
+            // die vorherige Farbe an die Hardware, waehrend im Feld die neue
+            // steht. Ein Klick auf APPLY nimmt dem Feld den Fokus und lief
+            // deshalb richtig; nur Enter war betroffen.
+            if (g_state.hEditHex && GetFocus() == g_state.hEditHex) {
+                wchar_t hex[16];
+                GetWindowTextW(g_state.hEditHex, hex, 16);
+                ParseHexColor(hex);
+                UpdatePreview();
+                UpdateSliders();
+            }
             CommitStateAndApply(true);
-        }
-        else if (id == ID_BTN_PICK_COLOR) {
-            PickColor();
-            CommitStateAndApply(false);
         }
         else if (id == ID_EDIT_HEX && code == EN_KILLFOCUS) {
             wchar_t hex[16];
@@ -6043,7 +6066,16 @@ LRESULT CALLBACK ColorPreviewSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
         SetCursor(LoadCursor(NULL, IDC_HAND));
         return TRUE;
     case WM_LBUTTONDOWN:
-        PickColor();
+        // Der Swatch hat den geloeschten Knopf ID_BTN_PICK_COLOR ersetzt, aber
+        // dessen zweite Zeile nicht mitgenommen: der Knopf rief PickColor() UND
+        // CommitStateAndApply(). Ohne das schreibt PickColor() nur g_state und
+        // die Oberflaeche - die gewaehlte Farbe erreichte weder die Hardware
+        // noch config.json, und der Bediener sah eine Farbe, die es nirgends
+        // sonst gab.
+        //
+        // Nur bei tatsaechlicher Auswahl committen: ein abgebrochener Dialog
+        // darf keinen Schreibvorgang und keinen Apply ausloesen.
+        if (PickColor()) CommitStateAndApply(false);
         return 0;
     }
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
