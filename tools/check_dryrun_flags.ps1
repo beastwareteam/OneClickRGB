@@ -250,6 +250,25 @@ $cases = @(
        Report = 'audio_probe.txt'; Exit = 2; MaxSec = 15
        ReportMatch = 'kein Endpunkt enthaelt'
        LogMatch = '\[audioprobe\] endpoint substring did not match' }
+
+    # --- Energiemanager-Inventar (Phase 4) ----------------------------------
+    # Rein lesend, deswegen laeuft der erste Fall ohne --dry-run: es gibt nichts
+    # zu unterdruecken. Geprueft wird, dass der Zweig ueberhaupt zu einem
+    # Bericht kommt und dabei keinen Dialog oeffnet.
+    @{ Name = '--powerinfo (nur lesend, kein Dialog)'
+       Args = @('--powerinfo')
+       Report = 'power_inventory.txt'; Exit = 0; MaxSec = 30
+       ReportMatch = 'SYSTEMLAGE'
+       LogMatch = '\[powerinfo\].*inventarisiert' }
+
+    # Und mit --dry-run: derselbe Bericht, aber ausdruecklich gekennzeichnet.
+    # Ein Bericht, dem man nicht ansieht, unter welchen Bedingungen er entstand,
+    # wird spaeter falsch zitiert.
+    @{ Name = '--powerinfo (dry-run kennzeichnet den Bericht)'
+       Args = @('--dry-run','--powerinfo')
+       Report = 'power_inventory.txt'; Exit = 0; MaxSec = 30
+       ReportMatch = 'dry-run war gesetzt'
+       LogMatch = '\[powerinfo\].*inventarisiert' }
 )
 
 $fail = 0

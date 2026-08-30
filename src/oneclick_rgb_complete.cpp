@@ -65,6 +65,7 @@
 #include "effect_limits.h"   // brightness/speed clamps + edge mode table
 #include "keyboard_layout.h" // key matrix decoded from the device (unit-tested)
 #include "audio_probe.h"     // WASAPI tone + loopback verification (Phase 6)
+#include "power_manager.h"   // Systemlage und Geraeteinventar (Phase 4)
 
 using json = nlohmann::json;
 
@@ -8297,6 +8298,58 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
         LogDebug("[switch-test] done");
         return 0;  // Exit without showing any window
+    }
+
+    // ========================================================================
+    // ENERGIEMANAGER - INVENTAR (Phase 4)
+    //
+    // Rein lesend. Kein Geraet wird geschaltet, keine Einstellung veraendert.
+    // Deshalb braucht dieser Zweig weder die Probe-Instanzsperre (er fasst kein
+    // HID an) noch eine --dry-run-Wache im ueblichen Sinn - trotzdem meldet er
+    // unter --dry-run ausdruecklich, dass er nichts geschrieben hat, damit der
+    // Bericht nicht mehrdeutig ist.
+    // ========================================================================
+    {
+        const cli::Flag piFlag = cli::Find(lpCmdLine, "--powerinfo");
+        if (piFlag.present) {
+            std::wstring dir = GetAppDataPath() + L"\\docs";
+            SHCreateDirectoryExW(NULL, dir.c_str(), NULL);
+            const std::wstring reportPath = dir + L"\\power_inventory.txt";
+
+            powermgr::SystemInfo sys;
+            const bool sysOk = powermgr::QuerySystemInfo(sys);
+
+            std::vector<powermgr::DeviceEntry> devs;
+            std::string invErr;
+            const bool invOk = powermgr::Inventory(devs, invErr);
+
+            FILE* fp = _wfopen(reportPath.c_str(), L"w");
+            if (!fp) { LogDebug("[powerinfo] cannot open report file"); return 1; }
+
+            if (!invOk) {
+                fprintf(fp, "OneClickRGB Energiemanager - Inventar\n\n"
+                            "UNBEKANNT: das Geraeteinventar konnte nicht gelesen werden (%s).\n"
+                            "Die Achse ist damit blind, nicht leer - es folgen keine Zahlen.\n",
+                        invErr.c_str());
+                fclose(fp);
+                LogDebug("[powerinfo] inventory failed - UNBEKANNT reported");
+                return 1;
+            }
+
+            powermgr::WriteReport(fp, sys, devs,
+                                  (unsigned)(GetTickCount64() / 1000ULL));
+            if (g_state.dryRun)
+                fprintf(fp, "\n(--dry-run war gesetzt. Dieser Zweig schreibt ohnehin nichts;\n"
+                            " der Hinweis steht hier, damit der Bericht nicht mehrdeutig ist.)\n");
+            fclose(fp);
+
+            char dbg[160];
+            snprintf(dbg, sizeof(dbg),
+                     "[powerinfo] %u Geraete inventarisiert, Systemlage %s",
+                     (unsigned)devs.size(), sysOk ? "gelesen" : "UNBEKANNT");
+            LogDebug(dbg);
+            return sysOk ? 0 : 1;
+        }
     }
 
     // ========================================================================
