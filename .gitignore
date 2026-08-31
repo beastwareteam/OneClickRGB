@@ -39,6 +39,8 @@
 
 # Build output
 build/
+build - Kopie/
+dist/
 !build/.gitkeep
 production/build/
 
@@ -55,7 +57,10 @@ production/build/
 *.res
 
 # Backup / recovery snapshots (auto-generated, never commit)
+# Die Rundensicherungen heissen .b2bak .. .b10bak - *.bak trifft sie NICHT.
 *.bak
+*.b[0-9]bak
+*.b[0-9][0-9]bak
 *.recovery-*
 OFF(*)
 

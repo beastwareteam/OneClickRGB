@@ -6,8 +6,6 @@
 
 Download the latest release from [GitHub Releases](https://github.com/beastwareteam/OneClickRGB/releases).
 
-![Download Release](screenshots/01_download.png)
-
 ### Step 2: Extract
 
 Extract the ZIP file to any folder. You need these files:
@@ -96,15 +94,11 @@ Check the devices you want to control:
 
 ## System Tray
 
-![Tray Icon](screenshots/07_tray_icon.png)
-
 OneClickRGB minimizes to the system tray (bottom-right corner).
 
 ### Tray Menu
 
 Right-click the tray icon:
-
-![Tray Menu](screenshots/08_tray_menu.png)
 
 | Option | Action |
 |--------|--------|
@@ -123,12 +117,11 @@ Control RGB without opening the window:
 
 | Hotkey | Action |
 |--------|--------|
-| `Ctrl+Alt+1` | Set Blue |
-| `Ctrl+Alt+2` | Set Red |
-| `Ctrl+Alt+3` | Set Green |
-| `Ctrl+Alt+4` | Set White |
-| `Ctrl+Alt+0` | Turn Off |
-| `Ctrl+Alt+Space` | Toggle On/Off |
+| `Ctrl+Alt+B` | Set Blue |
+| `Ctrl+Alt+R` | Set Red |
+| `Ctrl+Alt+G` | Set Green |
+| `Ctrl+Alt+W` | Set White |
+| `Ctrl+Alt+0` | Toggle Off / restore |
 
 ![Hotkey Demo](screenshots/09_hotkeys.png)
 
@@ -146,8 +139,6 @@ Control RGB without opening the window:
 4. Click **OK**
 
 ### Loading a Profile
-
-![Load Profile](screenshots/11_load_profile.png)
 
 1. Click the profile dropdown
 2. Select a saved profile
@@ -175,8 +166,6 @@ For EVision keyboards, select an effect mode:
 
 ### Device Not Found
 
-![Device Not Found](screenshots/13_error_device.png)
-
 **Solutions:**
 1. Run as Administrator
 2. Check USB connection
@@ -185,8 +174,6 @@ For EVision keyboards, select an effect mode:
 
 ### RAM Not Working
 
-![RAM Error](screenshots/14_error_ram.png)
-
 **Solutions:**
 1. Ensure `PawnIOLib.dll` is present
 2. Ensure `SmbusI801.bin` is present
@@ -194,8 +181,6 @@ For EVision keyboards, select an effect mode:
 4. Check if PawnIO driver is installed
 
 ### Colors Don't Persist After Sleep
-
-![Sleep Issue](screenshots/15_sleep_fix.png)
 
 **Solution:** Keep OneClickRGB running in the system tray. It automatically restores colors after Windows wakes up.
 

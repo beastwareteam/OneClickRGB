@@ -8,6 +8,26 @@
 
 ---
 
+## Screenshots
+
+![Main Window](docs/screenshots/02_main_window.png)
+
+| | |
+|---|---|
+| ![RGB Sliders](docs/screenshots/03_sliders.png) | ![Presets](docs/screenshots/05_presets.png) |
+| RGB sliders with live values | One-click colour presets |
+| ![Devices](docs/screenshots/06_devices.png) | ![Effects](docs/screenshots/12_keyboard_effects.png) |
+| Per-device selection | Keyboard and edge effects |
+
+Every write is read back and reported as verified or rejected - the status log
+says what the hardware actually confirmed, not what was sent:
+
+![Status log](docs/screenshots/status_log.png)
+
+More pictures in the [visual guide](docs/GUIDE.md).
+
+---
+
 ## Features
 
 - **Multi-Device Support** - ASUS Aura, SteelSeries, EVision Keyboard, G.Skill RAM
@@ -26,20 +46,38 @@
 
 ## Supported Devices
 
-| Device | Status | Protocol |
-|--------|--------|----------|
-| **ASUS Aura Mainboard** | Working | USB HID (0x0B05:0x19AF) |
-| **ASUS Aura Addressable** | Working | 8 channels, 60 LEDs each |
-| **SteelSeries Rival 600** | Working | USB HID |
-| **EVision Keyboard** | Working | Effects: Static, Breathing, Wave, Rainbow |
-| **G.Skill Trident Z5 RGB** | Working | SMBus via PawnIO |
-| **G.Skill Trident Z5 Neo** | Working | SMBus via PawnIO |
+Two columns, deliberately kept apart: **written** means the app sent the
+command and the device acknowledged it. **Verified** means the app read the
+value back off the device and compared it against what it asked for. A write
+that is only acknowledged is not proof - firmware acknowledges writes it
+silently discards, which is how several bugs in this project were born.
+
+| Device | Protocol | Write | Read-back verified |
+|--------|----------|-------|--------------------|
+| **EVision Keyboard** | USB HID - Static, Breathing, Wave, Spectrum, Rainbow, Reactive, Ripple, Starlight | yes | **yes** - mode, brightness and speed are read back |
+| **EVision Edge LEDs** | USB HID, profile block `P0+0x1E` | yes | **yes** - mode and RGB are read back |
+| **ASUS Aura Mainboard** | USB HID (`0x0B05:0x19AF`) | yes, 4/4 channels | no - written without read-back |
+| **ASUS Aura Addressable** | 8 channels, 60 LEDs each | yes | no - written without read-back |
+| **SteelSeries Rival 600** | USB HID | yes | no |
+| **G.Skill Trident Z5 RGB** | SMBus via PawnIO | yes, per module | no |
+| **G.Skill Trident Z5 Neo** | SMBus via PawnIO | yes, per module | no |
+
+The status log reports exactly this per run - see the picture above: the
+keyboard line ends in `verified`, the Aura line says
+`written (no read-back - not verified)`. Nothing in the app claims success it
+did not check.
 
 ### Compatibility
 
 - **OS**: Windows 10 (1809+), Windows 11
 - **Architecture**: x64 only
-- **Privileges**: Administrator recommended
+- **Privileges**: Administrator **required** - the manifest requests elevation.
+  HID access and the SMBus driver do not work without it.
+- **G.Skill RAM**: needs the PawnIO driver (`PawnIO_setup.exe`, once) plus
+  `SmbusI801.bin`. Intel I801 chipsets are covered by the shipped module;
+  other chipsets need the matching module from `dependencies/PawnIO/modules/`.
+- **Untested hardware**: devices not in the table above are not addressed at
+  all - the app does not probe unknown vendors.
 
 ---
 
@@ -47,11 +85,15 @@
 
 ### Option 1: Portable Package
 
-1. Download `OneClickRGB_v1.0_Portable.zip` from [Releases](https://github.com/beastwareteam/OneClickRGB/releases)
+1. Download `OneClickRGB_v3.6.0_Portable.zip` from [Releases](https://github.com/beastwareteam/OneClickRGB/releases)
 2. Extract to any folder
 3. Run `install.bat` as Administrator (or just run `OneClickRGB.exe` directly)
 
-### Option 2: Build from Source
+### Option 2: Installer
+
+Download `OneClickRGB_Setup_3.6.0.exe` from [Releases](https://github.com/beastwareteam/OneClickRGB/releases) and run it. Installs to Program Files, optional desktop icon and autostart.
+
+### Option 3: Build from Source
 
 ```batch
 git clone https://github.com/beastwareteam/OneClickRGB.git
@@ -69,7 +111,7 @@ See [BUILD.md](BUILD.md) for detailed instructions.
 
 ```
 OneClickRGB/
-├── OneClickRGB.exe     165 KB   Main application
+├── OneClickRGB.exe     790 KB   Main application
 ├── hidapi.dll          159 KB   USB HID library
 ├── PawnIOLib.dll         4 KB   SMBus interface (G.Skill RAM)
 ├── SmbusI801.bin        40 KB   Intel SMBus module
@@ -89,12 +131,11 @@ OneClickRGB/
 
 | Hotkey | Action |
 |--------|--------|
-| `Ctrl+Alt+1` | Blue |
-| `Ctrl+Alt+2` | Red |
-| `Ctrl+Alt+3` | Green |
-| `Ctrl+Alt+4` | White |
-| `Ctrl+Alt+0` | Off (Black) |
-| `Ctrl+Alt+Space` | Toggle On/Off |
+| `Ctrl+Alt+B` | Blue |
+| `Ctrl+Alt+R` | Red |
+| `Ctrl+Alt+G` | Green |
+| `Ctrl+Alt+W` | White |
+| `Ctrl+Alt+0` | Toggle off / restore |
 
 ### Keyboard Navigation
 
@@ -139,7 +180,14 @@ Settings are stored in `%APPDATA%\OneClickRGB\`:
 
 ## Version History
 
-### v3.5 (Current)
+### v3.6 (Current)
+- Fixed the three colour rows: value labels no longer pile digits on top of each other
+- Fixed the sliders: the filled track follows a programmatic position change
+- Preset button glow halved
+- Version aligned across binary, resource and installer (3.6.0)
+- Screenshots refreshed, hotkey tables corrected against the code
+
+### v3.5
 - Info tooltips on all controls
 - Theme system (Dark/Light/Colorblind)
 - Keyboard accessibility

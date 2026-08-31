@@ -50,6 +50,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <objidl.h>
+#include <objbase.h>   // CreateStreamOnHGlobal fuer das Wasserzeichen-PNG
 #include <nlohmann/json.hpp>
 #include <gdiplus.h>
 #include <wtsapi32.h>
@@ -140,6 +141,7 @@ LRESULT CALLBACK StaticSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 LRESULT CALLBACK ColorPreviewSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
+LRESULT CALLBACK LogWheelSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 
 // Shared helper: paint control background.
 // For popup dialogs (ChanSettingsDlg, AsusTestDlg) use solid dark fill.
@@ -164,21 +166,83 @@ static inline void FillCtrlBackground(HDC hdcMem, HWND hCtrl, const RECT& rc) {
     }
 }
 
+// Hover state for the custom-drawn controls.
+//
+// It used to be set only from WM_MOUSEMOVE and cleared only from
+// WM_MOUSELEAVE. A click breaks exactly that pair: the control takes the mouse
+// capture on WM_LBUTTONDOWN, and releasing it makes the system deliver a
+// WM_MOUSELEAVE although the cursor never left. The flag was gone, and nothing
+// put it back - a cursor that stays still sends no further WM_MOUSEMOVE - so
+// the control kept its plain look until the mouse was jiggled. Measured on the
+// preset row: glow before the click, no glow after, pointer unmoved.
+//
+// Both directions are therefore decided by where the cursor actually is, and
+// the leave-tracking is re-armed every time, because the capture cancelled the
+// previous request.
+static bool HoverFromCursor(HWND hWnd) {
+    POINT pt;
+    RECT rc;
+    if (!GetCursorPos(&pt) || !GetWindowRect(hWnd, &rc)) return false;
+    if (!PtInRect(&rc, pt)) return false;
+    if (!IsWindowEnabled(hWnd) || !IsWindowVisible(hWnd)) return false;
+    // A control covered by a popup or another window is not hovered, whatever
+    // the coordinates alone say.
+    return WindowFromPoint(pt) == hWnd;
+}
+
+static void ArmMouseLeave(HWND hWnd) {
+    TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hWnd, 0 };
+    TrackMouseEvent(&tme);
+}
+
+// Prop-backed variant (buttons, checkboxes, comboboxes).
+static void UpdateHoverState(HWND hWnd) {
+    bool inside = HoverFromCursor(hWnd);
+    bool had = (GetPropW(hWnd, L"hover") != NULL);
+    if (inside) {
+        if (!had) SetPropW(hWnd, L"hover", (HANDLE)1);
+        ArmMouseLeave(hWnd);
+    } else if (had) {
+        RemovePropW(hWnd, L"hover");
+    }
+    // Sofort zeichnen, nicht nur fuer ungueltig erklaeren: zwischen dem
+    // Ungueltigmachen und dem naechsten WM_PAINT kann die Standardprozedur den
+    // Systemknopf auf den Fenster-DC malen - genau das sieht man als kurzes
+    // Aufblitzen der Standardgestaltung beim Ueberfahren.
+    if (inside != had) {
+        InvalidateRect(hWnd, NULL, FALSE);
+        UpdateWindow(hWnd);
+    }
+}
+
+// Flag-backed variant (the sliders keep their state in their own struct).
+static void UpdateHoverFlag(HWND hWnd, bool& flag) {
+    bool inside = HoverFromCursor(hWnd);
+    if (inside) ArmMouseLeave(hWnd);
+    if (flag != inside) {
+        flag = inside;
+        InvalidateRect(hWnd, NULL, FALSE);
+        UpdateWindow(hWnd);
+    }
+}
+
 //=============================================================================
 // CONSTANTS & LAYOUT
 //=============================================================================
 
 #define APP_NAME L"OneClickRGB"
-#define APP_VERSION L"3.5.1"
-#define APP_VERSION_A "3.5.1"  // ANSI version for resources
+#define APP_VERSION L"3.6.0"
+#define APP_VERSION_A "3.6.0"  // ANSI version for resources
 
 // Layout constants (responsive)
 #define WINDOW_WIDTH 640
 // Tall enough for every group plus the full status log and a bottom margin.
 // Client height = WINDOW_HEIGHT - TITLEBAR_H; the layout runs to
-// 663 (end of the action buttons) + STATUS_H + MARGIN, so anything less clips
-// the bottom of the log.
-#define WINDOW_HEIGHT 870
+// 663 (end of the action buttons) + the log card + MARGIN, so anything less
+// clips the bottom of the log. The log card is GROUP_TITLE_H + STATUS_H +
+// GROUP_PADDING tall (the same chrome the groups above it get), which is 44px
+// more than the bare EDIT control it replaced - hence 870 + 44.
+#define WINDOW_HEIGHT 914
 #define TITLEBAR_H 32       // Custom titlebar height
 #define MARGIN 12           // Window margin
 #define GROUP_MARGIN 8      // Space between groups
@@ -208,6 +272,13 @@ static inline void FillCtrlBackground(HDC hdcMem, HWND hCtrl, const RECT& rc) {
 // the bottom. 28 leaves room for knob + shadow + border and matches BTN_H.
 #define SLIDER_H 28
 #define STATUS_H 160        // Status log height - must fit the apply output
+
+// Watermark in the window background. The artwork ships as a PNG in RCDATA
+// (see OneClickRGB.rc), is drawn after the cards so it also shows on their
+// bodies, and is kept faint - it is a background mark, not a picture.
+#define ID_RES_WATERMARK 200
+#define WATERMARK_W      150    // width in pixels; height follows the aspect
+#define WATERMARK_ALPHA  0.12f  // 0..1 - anything higher competes with the text
 
 // Tray icon
 #define WM_TRAYICON (WM_USER + 1)
@@ -302,6 +373,9 @@ static inline void FillCtrlBackground(HDC hdcMem, HWND hCtrl, const RECT& rc) {
 
 // Removed struct Theme, g_darkTheme, g_lightTheme, and g_theme as part of theme consolidation
 HBRUSH g_hBgBrush = NULL;
+// Status log sits inside a ModernCard, so it is painted in the card body
+// colour, not in bgControl - otherwise a lighter rectangle floats on the card.
+HBRUSH g_hLogBrush = NULL;
 HBRUSH g_hCtrlBrush = NULL;
 HBRUSH g_hBtnBrush = NULL;
 HBRUSH g_hWndBgBrush = NULL; // Window-class background brush (dunkles Theme, verhindert weißen Blitz)
@@ -309,6 +383,16 @@ HBRUSH g_hWndBgBrush = NULL; // Window-class background brush (dunkles Theme, ve
 // Trackbar background brush matching the dark theme
 HBRUSH g_hTrackbarBrush = NULL;
 ULONG_PTR g_gdiplusToken = 0;
+
+// Watermark image plus the stream it was decoded from. GDI+ reads from the
+// stream lazily, so the stream has to outlive the image - releasing it right
+// after Image::FromStream leaves the bitmap pointing at freed memory.
+// Tray icon handle - LoadImage hands out an owned icon, so it is destroyed
+// again when the tray icon goes away.
+HICON g_hTrayIcon = NULL;
+
+static Gdiplus::Image* g_watermark = nullptr;
+static IStream* g_watermarkStream = nullptr;
 
 void InitTrackbarBrush() {
     if (!g_hTrackbarBrush) {
@@ -338,8 +422,8 @@ CustomSliderData g_sliderB = {{}, false};
 CustomSliderData g_sliderBrightness = {{}, false};
 CustomSliderData g_sliderSpeed = {{}, false};
 
-// Modern cards (group boxes)
-ModernCard g_cards[4];
+// Modern cards (group boxes) - the status log is the fifth card
+ModernCard g_cards[5];
 int g_numCards = 0;
 
 // Modern color preview
@@ -3498,6 +3582,200 @@ static void AppendOverrideNotice() {
 }
 
 //=============================================================================
+// STATUS LOG SCROLLBAR
+//=============================================================================
+// The log had the EDIT control's own scrollbar, painted over in the card's
+// colours. That was a race, and it was lost: the control's non-client area
+// belongs to the system, which repaints it whenever it likes - on hover, on a
+// theme change, after a caption attribute is set - without a WM_NCPAINT ever
+// reaching the subclass. Measured: with the pointer resting on the bar, our
+// version and the system's grey one alternated; at 40 px the strip read 240,
+// 240, 240 where the card is 28, 32, 42.
+//
+// So the control no longer has a scrollbar at all (no WS_VSCROLL). The bar
+// below is drawn by the parent window as part of the card, and the parent also
+// handles the mouse for it. Nothing else draws there, so nothing can overwrite
+// it.
+#define LOG_SB_W    10   // width of the bar
+#define LOG_SB_GAP  4    // gap between the text area and the bar
+
+static bool g_logSbDragging = false;
+static int  g_logSbGrabOffset = 0;   // pointer offset inside the thumb, in px
+
+// Where the bar sits, in the parent's client coordinates.
+static RECT LogScrollbarRect() {
+    RECT rc = { 0, 0, 0, 0 };
+    if (!g_state.hStatus || !IsWindow(g_state.hStatus)) return rc;
+    RECT r;
+    GetWindowRect(g_state.hStatus, &r);
+    MapWindowPoints(NULL, GetParent(g_state.hStatus), (POINT*)&r, 2);
+    rc.left   = r.right + LOG_SB_GAP;
+    rc.right  = rc.left + LOG_SB_W;
+    rc.top    = r.top;
+    rc.bottom = r.bottom;
+    return rc;
+}
+
+// Line counts straight from the control. EM_GETLINECOUNT counts wrapped lines,
+// which is what a multiline EDIT actually scrolls by.
+static bool LogScrollMetrics(int& first, int& visible, int& total) {
+    HWND h = g_state.hStatus;
+    first = visible = total = 0;
+    if (!h || !IsWindow(h)) return false;
+
+    total = (int)SendMessage(h, EM_GETLINECOUNT, 0, 0);
+    first = (int)SendMessage(h, EM_GETFIRSTVISIBLELINE, 0, 0);
+
+    RECT rc;
+    GetClientRect(h, &rc);
+    HDC hdc = GetDC(h);
+    HFONT hf = (HFONT)SendMessage(h, WM_GETFONT, 0, 0);
+    HFONT hOld = hf ? (HFONT)SelectObject(hdc, hf) : NULL;
+    TEXTMETRICW tm = {};
+    GetTextMetricsW(hdc, &tm);
+    if (hOld) SelectObject(hdc, hOld);
+    ReleaseDC(h, hdc);
+
+    int lineH = (tm.tmHeight > 0) ? tm.tmHeight : 16;
+    visible = (rc.bottom - rc.top) / lineH;
+    if (visible < 1) visible = 1;
+    return total > visible;
+}
+
+// Thumb geometry inside the bar; false when there is nothing to scroll.
+static bool LogThumbRect(RECT& thumb) {
+    RECT bar = LogScrollbarRect();
+    int first = 0, visible = 0, total = 0;
+    if (bar.bottom <= bar.top || !LogScrollMetrics(first, visible, total)) return false;
+
+    int trackH = bar.bottom - bar.top;
+    int thumbH = MulDiv(trackH, visible, total);
+    if (thumbH < 24) thumbH = 24;
+    if (thumbH > trackH) thumbH = trackH;
+
+    int span = total - visible;
+    if (first > span) first = span;
+    if (first < 0) first = 0;
+    int y = bar.top + (span > 0 ? MulDiv(trackH - thumbH, first, span) : 0);
+
+    thumb.left = bar.left;
+    thumb.right = bar.right;
+    thumb.top = y;
+    thumb.bottom = y + thumbH;
+    return true;
+}
+
+// Drawn into the parent's double buffer, right after the cards - the bar lives
+// on the log card, so the card body is its track and only the thumb is needed.
+static void DrawLogScrollbar(HDC hdc) {
+    RECT thumb;
+    if (!LogThumbRect(thumb)) return;   // nothing to scroll: no bar at all
+
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+
+    Gdiplus::RectF t((float)thumb.left, (float)thumb.top,
+                     (float)(thumb.right - thumb.left),
+                     (float)(thumb.bottom - thumb.top));
+    float radius = t.Width / 2.0f;
+
+    Gdiplus::Color shade = g_mTheme->isDark ? Gdiplus::Color(255, 255, 255, 255)
+                                            : Gdiplus::Color(255, 0, 0, 0);
+    Gdiplus::Color base = BlendColors(g_mTheme->bgCard, shade,
+                                      g_logSbDragging ? 0.26f : 0.18f);
+    Gdiplus::Color top  = BlendColors(base, shade, 0.10f);
+
+    // A little shading: soft shadow one pixel below, then a gradient thumb.
+    Gdiplus::RectF sh(t.X, t.Y + 1.0f, t.Width, t.Height);
+    DrawRoundedRect(g, sh, radius, Gdiplus::Color(g_mTheme->isDark ? 70 : 40, 0, 0, 0));
+    DrawGradientRoundedRect(g, t, radius, top, base,
+                            BlendColors(base, shade, 0.06f), 1.0f);
+}
+
+static void InvalidateLogScrollbar(HWND hParent) {
+    RECT bar = LogScrollbarRect();
+    if (bar.bottom > bar.top) {
+        InflateRect(&bar, 2, 2);
+        InvalidateRect(hParent, &bar, FALSE);
+    }
+}
+
+// Scrolls so that the given line is the first visible one.
+static void LogScrollToLine(int line) {
+    int first = 0, visible = 0, total = 0;
+    if (!LogScrollMetrics(first, visible, total)) return;
+    int span = total - visible;
+    if (line < 0) line = 0;
+    if (line > span) line = span;
+    if (line != first) SendMessage(g_state.hStatus, EM_LINESCROLL, 0, (LPARAM)(line - first));
+}
+
+//=============================================================================
+// TITLE BAR + TRAY MENU COLOURING
+//=============================================================================
+// The caption is drawn by the desktop window manager, not by the app, so it
+// cannot be painted like the rest of the surface - it can only be told which
+// colours to use. Three attributes do that on Windows 11 (build 22000 and up);
+// on older systems they fail harmlessly and only the dark-mode flag applies,
+// which at least turns the caption dark instead of white.
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
+#ifndef DWMWA_TEXT_COLOR
+#define DWMWA_TEXT_COLOR 36
+#endif
+
+static void ApplyThemedTitleBar(HWND hWnd) {
+    if (!hWnd || !g_currentTheme) return;
+
+    // Dark mode first: on builds without the colour attributes this is the
+    // whole effect, and on newer ones it keeps the system's own hover
+    // highlights on the caption buttons in the right shade.
+    BOOL dark = (g_currentTheme->id != 1) ? TRUE : FALSE;   // 1 = light theme
+    DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+
+    COLORREF caption = g_currentTheme->bgWindowTop;
+    COLORREF text    = g_currentTheme->textPrimary;
+    COLORREF border  = g_currentTheme->border;
+    DwmSetWindowAttribute(hWnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+    DwmSetWindowAttribute(hWnd, DWMWA_TEXT_COLOR,    &text,    sizeof(text));
+    DwmSetWindowAttribute(hWnd, DWMWA_BORDER_COLOR,  &border,  sizeof(border));
+}
+
+// The tray menu is owner-drawn. A plain popup menu is painted by the system in
+// its own colours; MIM_BACKGROUND alone would only repaint the ground and leave
+// black system text standing on it. So every entry is drawn here - separators
+// included, otherwise the system draws an etched grey line across the dark
+// ground.
+struct TrayMenuEntry {
+    UINT id;
+    const wchar_t* text;   // nullptr = separator
+};
+
+static HBRUSH g_hTrayMenuBrush = NULL;
+static HFONT  g_hTrayMenuFont = NULL;
+
+static HFONT TrayMenuFont() {
+    if (!g_hTrayMenuFont) {
+        g_hTrayMenuFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    }
+    return g_hTrayMenuFont;
+}
+
+static void FreeTrayMenuResources() {
+    if (g_hTrayMenuBrush) { DeleteObject(g_hTrayMenuBrush); g_hTrayMenuBrush = NULL; }
+    if (g_hTrayMenuFont)  { DeleteObject(g_hTrayMenuFont);  g_hTrayMenuFont = NULL; }
+}
+
+//=============================================================================
 // TRAY ICON FUNCTIONS
 //=============================================================================
 
@@ -3509,7 +3787,19 @@ void MinimizeToTray() {
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(101));
+    // LoadIcon always hands back the SM_CXICON size (32px) and leaves the
+    // shrinking to the shell. LoadImage with the small-icon metrics picks the
+    // 16/20/24px image out of the icon instead, which is the one drawn at that
+    // size - on a 224x256 source the difference is the whole silhouette.
+    if (g_hTrayIcon) { DestroyIcon(g_hTrayIcon); g_hTrayIcon = NULL; }
+    g_hTrayIcon = (HICON)LoadImageW(GetModuleHandle(NULL), MAKEINTRESOURCEW(101),
+        IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+        LR_DEFAULTCOLOR);
+    if (!g_hTrayIcon) {
+        LogDebug("Tray: LoadImage(101) fehlgeschlagen - Icon-Ressource pruefen");
+        g_hTrayIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(101));
+    }
+    nid.hIcon = g_hTrayIcon;
     wcscpy_s(nid.szTip, APP_NAME);
     Shell_NotifyIconW(NIM_ADD, &nid);
     ShowWindow(g_state.hWnd, SW_HIDE);
@@ -3524,25 +3814,47 @@ void RestoreFromTray() {
 
 void RemoveTrayIcon() {
     Shell_NotifyIconW(NIM_DELETE, &g_state.nid);
+    if (g_hTrayIcon) { DestroyIcon(g_hTrayIcon); g_hTrayIcon = NULL; }
+    g_state.nid.hIcon = NULL;
 }
 
 void ShowTrayMenu(HWND hWnd) {
+    // Static, because the entries are handed to the menu as item data and have
+    // to stay valid for as long as the menu is on screen.
+    static const TrayMenuEntry entries[] = {
+        { ID_TRAY_SHOW,     L"Show" },
+        { 0,                nullptr },
+        { ID_TRAY_BLUE,     L"Blue" },
+        { ID_TRAY_RED,      L"Red" },
+        { ID_TRAY_GREEN,    L"Green" },
+        { ID_TRAY_WHITE,    L"White" },
+        { ID_TRAY_OFF,      L"Off" },
+        { 0,                nullptr },
+        { ID_TRAY_STANDBY,  L"Standby" },
+        { ID_TRAY_SHUTDOWN, L"Shutdown" },
+        { ID_TRAY_RESTART,  L"Restart" },
+        { 0,                nullptr },
+        { ID_TRAY_EXIT,     L"Exit" },
+    };
+
     POINT pt;
     GetCursorPos(&pt);
     HMENU hMenu = CreatePopupMenu();
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"Show");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_BLUE, L"Blue");
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_RED, L"Red");
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_GREEN, L"Green");
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_WHITE, L"White");
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_OFF, L"Off");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_STANDBY, L"Standby");
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHUTDOWN, L"Shutdown");
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_RESTART, L"Restart");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Exit");
+
+    // The ground behind and between the items - without it a light frame is
+    // left standing around the owner-drawn entries.
+    if (!g_hTrayMenuBrush) g_hTrayMenuBrush = CreateSolidBrush(g_currentTheme->groupBodyBg);
+    MENUINFO mi = { sizeof(mi) };
+    mi.fMask = MIM_BACKGROUND | MIM_APPLYTOSUBMENUS;
+    mi.hbrBack = g_hTrayMenuBrush;
+    SetMenuInfo(hMenu, &mi);
+
+    for (size_t i = 0; i < ARRAYSIZE(entries); i++) {
+        // Separators stay unselectable; everything is drawn in WM_DRAWITEM.
+        UINT flags = MF_OWNERDRAW | (entries[i].text ? 0 : (MF_DISABLED | MF_GRAYED));
+        AppendMenuW(hMenu, flags, entries[i].id, (LPCWSTR)&entries[i]);
+    }
+
     SetForegroundWindow(hWnd);
     TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
     DestroyMenu(hMenu);
@@ -5365,11 +5677,108 @@ void AddTooltip(HWND hTip, HWND hCtrl, const wchar_t* text) {
     SendMessage(hTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
 }
 
+//=============================================================================
+// BACKGROUND WATERMARK
+//=============================================================================
+// The artwork sits in the EXE as an RCDATA PNG. It is decoded once through an
+// IStream over a copy of the resource bytes - GDI+ needs a stream it may keep
+// reading from, and the resource block itself is read-only and unmovable.
+static void LoadWatermarkImage() {
+    if (g_watermark) return;
+
+    HMODULE hMod = GetModuleHandle(NULL);
+    HRSRC hRes = FindResourceW(hMod, MAKEINTRESOURCEW(ID_RES_WATERMARK), RT_RCDATA);
+    if (!hRes) { LogDebug("Wasserzeichen: Ressource 200 nicht gefunden"); return; }
+    DWORD size = SizeofResource(hMod, hRes);
+    HGLOBAL hData = LoadResource(hMod, hRes);
+    if (!hData || size == 0) { LogDebug("Wasserzeichen: Ressource leer"); return; }
+    const void* pRes = LockResource(hData);
+    if (!pRes) return;
+
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!hMem) return;
+    void* pMem = GlobalLock(hMem);
+    if (!pMem) { GlobalFree(hMem); return; }
+    memcpy(pMem, pRes, size);
+    GlobalUnlock(hMem);
+
+    // TRUE: the stream owns hMem and frees it when released.
+    if (CreateStreamOnHGlobal(hMem, TRUE, &g_watermarkStream) != S_OK) {
+        GlobalFree(hMem);
+        return;
+    }
+    g_watermark = Gdiplus::Image::FromStream(g_watermarkStream);
+    if (!g_watermark || g_watermark->GetLastStatus() != Gdiplus::Ok) {
+        LogDebug("Wasserzeichen: PNG konnte nicht dekodiert werden");
+        if (g_watermark) { delete g_watermark; g_watermark = nullptr; }
+        g_watermarkStream->Release();
+        g_watermarkStream = nullptr;
+    }
+}
+
+static void FreeWatermarkImage() {
+    if (g_watermark) { delete g_watermark; g_watermark = nullptr; }
+    if (g_watermarkStream) { g_watermarkStream->Release(); g_watermarkStream = nullptr; }
+}
+
+// Drawn after the cards, so it lies on a card body rather than only in the gaps
+// between them - at WATERMARK_ALPHA the card's own surface still reads through
+// it. The host is the empty column between the colour preview and the slider
+// labels in the first card: the one block of the layout that is free of
+// controls in both directions, so the mark is never cut by a control edge or by
+// a card border. Two places it must NOT go: across a card boundary (the border
+// line runs straight through the artwork) and anywhere on the status card,
+// whose body is covered by the log's EDIT - a child window that paints over
+// everything the parent drew.
+static void DrawWatermark(HDC hdc, const RECT& client) {
+    if (!g_watermark || g_numCards < 1) return;
+    float iw = (float)g_watermark->GetWidth();
+    float ih = (float)g_watermark->GetHeight();
+    if (iw <= 0.0f || ih <= 0.0f) return;
+
+    RECT host = { g_colorPreview.rect.right + 12,
+                  g_cards[0].rect.top + GROUP_TITLE_H + 4,
+                  g_colorPreview.rect.right + 12 + 180,
+                  g_cards[0].rect.bottom - 58 };
+    if (host.right > client.right - MARGIN) host.right = client.right - MARGIN;
+    float hostW = (float)(host.right - host.left);
+    float hostH = (float)(host.bottom - host.top);
+    if (hostW < 24.0f || hostH < 24.0f) return;
+
+    // Fit inside the host, never wider than WATERMARK_W, aspect kept.
+    float w = (float)WATERMARK_W;
+    if (w > hostW) w = hostW;
+    float h = w * ih / iw;
+    if (h > hostH) { h = hostH; w = h * iw / ih; }
+
+    float x = host.left + (hostW - w) / 2.0f;
+    float y = host.top  + (hostH - h) / 2.0f;
+
+    Gdiplus::ColorMatrix cm = {
+        1.0f, 0.0f, 0.0f, 0.0f,            0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,            0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,            0.0f,
+        0.0f, 0.0f, 0.0f, WATERMARK_ALPHA, 0.0f,
+        0.0f, 0.0f, 0.0f, 0.0f,            1.0f
+    };
+    Gdiplus::ImageAttributes attr;
+    attr.SetColorMatrix(&cm, Gdiplus::ColorMatrixFlagsDefault,
+                        Gdiplus::ColorAdjustTypeBitmap);
+
+    Gdiplus::Graphics g(hdc);
+    g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+    g.DrawImage(g_watermark, Gdiplus::RectF(x, y, w, h),
+                0.0f, 0.0f, iw, ih, Gdiplus::UnitPixel, &attr);
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+
     switch (msg) {
 
     case WM_CREATE: {
         LogDebug("WM_CREATE started");
+        LoadWatermarkImage();
         HINSTANCE hInst = ((LPCREATESTRUCT)lParam)->hInstance;
         HFONT hFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
@@ -5666,13 +6075,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             MARGIN + MAX_BUTTON_W + 100, curY, 55, BTN_H, hWnd, (HMENU)ID_BTN_LANG, hInst, NULL);
         curY += BTN_H + 8;
 
-        // ============= STATUS LOG =============
+        // ============= STATUS LOG GROUP =============
+        // Same chrome as the four groups above: title bar, accent line, rounded
+        // card body. The EDIT itself carries no border any more - the card is
+        // the frame - and is painted in the card body colour so it blends in
+        // exactly like the controls in the other groups.
+        g_cards[4].rect = {MARGIN, curY, MARGIN + groupW,
+                           curY + GROUP_TITLE_H + STATUS_H + GROUP_PADDING};
+        wcscpy_s(g_cards[4].title, g_str->statusTitle);
+        g_numCards = 5;
+        gx = MARGIN + GROUP_PADDING;
+        gy = curY + GROUP_TITLE_H;
+        // No WS_VSCROLL: the bar is drawn and driven by the parent (see STATUS
+        // LOG SCROLLBAR above). ES_AUTOVSCROLL keeps the text scrolling; only
+        // the system's own bar is gone, and with it the repaint race.
         g_state.hStatus = CreateWindowExW(0, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-            MARGIN, curY, groupW, STATUS_H, hWnd, (HMENU)ID_STATIC_STATUS, hInst, NULL);
-        SetWindowSubclass(g_state.hStatus, EditBorderSubclassProc, 1, 0);
-        // Apply Explorer theme for better scrollbars
-        SetWindowTheme(g_state.hStatus, L"Explorer", NULL);
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+            gx, gy, innerW - LOG_SB_W - LOG_SB_GAP, STATUS_H,
+            hWnd, (HMENU)ID_STATIC_STATUS, hInst, NULL);
+        SetWindowSubclass(g_state.hStatus, LogWheelSubclassProc, 3, 0);
+        curY = g_cards[4].rect.bottom + GROUP_MARGIN;
 
         // Apply font to all child windows
         EnumChildWindows(hWnd, [](HWND hChild, LPARAM lParam) -> BOOL {
@@ -5708,8 +6130,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     SetWindowPos(hEdit, NULL, 10, 4, rc.right - 40, rc.bottom - 8, SWP_NOZORDER | SWP_FRAMECHANGED);
                 }
             } else if (wcscmp(className, L"Static") == 0 || wcscmp(className, L"STATIC") == 0) {
-                LONG style = GetWindowLong(hChild, GWL_STYLE);
-                if (!(style & SS_OWNERDRAW)) { // Don't override the Color Preview box
+                // SS_OWNERDRAW is the value 13 inside SS_TYPEMASK, not a single
+                // bit - so the old test "!(style & SS_OWNERDRAW)" also excluded
+                // every SS_CENTER static, because 1 & 13 is 1. The three RGB
+                // value labels are exactly those, and they were therefore the
+                // only controls in the window left with the default STATIC
+                // painting: text set through WM_SETTEXT, background erased with
+                // the HOLLOW_BRUSH from WM_CTLCOLORSTATIC, nothing erased at
+                // all. Measured (Ctrl+Alt+W then Ctrl+Alt+B on the 3.5.1 build):
+                // "255" and "0" stood on top of each other, unreadable. The same
+                // labels inside the channel dialog were fine - that enum
+                // subclasses statics without this test.
+                //
+                // Compare against the type, and take only the text styles: an
+                // icon, bitmap or frame static would lose its content in
+                // drawStatic, which only draws text.
+                LONG ssType = GetWindowLong(hChild, GWL_STYLE) & SS_TYPEMASK;
+                if (ssType == SS_LEFT || ssType == SS_CENTER ||
+                    ssType == SS_RIGHT || ssType == SS_LEFTNOWORDWRAP) {
                     SetWindowSubclass(hChild, StaticSubclassProc, 1, 0);
                 }
             } else if (wcscmp(className, L"msctls_trackbar32") == 0 || wcscmp(className, L"Trackbar") == 0) {
@@ -5815,6 +6253,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_cards[i].Draw(hdcMem);
         }
 
+        // The log's scrollbar belongs to this window now, so it is drawn with
+        // the cards rather than fought over with the system.
+        DrawLogScrollbar(hdcMem);
+
+        // Watermark last: on top of the card bodies, but faint enough that the
+        // cards keep reading as the surface. Controls that take their
+        // background from the parent (FillCtrlBackground -> WM_PRINTCLIENT)
+        // pick it up here too, so it does not break at their edges.
+        DrawWatermark(hdcMem, rcClient);
+
         // Blit and cleanup
         BitBlt(hdc, 0, 0, rcClient.right, rcClient.bottom, hdcMem, 0, 0, SRCCOPY);
         SelectObject(hdcMem, hOldBm);
@@ -5824,6 +6272,79 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (msg == WM_PAINT) EndPaint(hWnd, &ps);
         return 0;
     }
+
+    case WM_MOUSEWHEEL: {
+        // Ohne WS_VSCROLL rollt das EDIT nicht mehr von selbst - der Rad-Weg
+        // hing am Systembalken, der jetzt weg ist. lParam steht hier in
+        // Bildschirm-, nicht in Fensterkoordinaten.
+        if (!g_state.hStatus) break;
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        RECT rEdit;
+        GetWindowRect(g_state.hStatus, &rEdit);
+        RECT rBar = LogScrollbarRect();
+        MapWindowPoints(hWnd, NULL, (POINT*)&rBar, 2);
+        if (PtInRect(&rEdit, pt) || PtInRect(&rBar, pt)) {
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            int lines = -(delta / WHEEL_DELTA) * 3;
+            if (lines != 0) {
+                SendMessage(g_state.hStatus, EM_LINESCROLL, 0, (LPARAM)lines);
+                InvalidateLogScrollbar(hWnd);
+            }
+            return 0;
+        }
+        break;
+    }
+
+    case WM_LBUTTONDOWN: {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        RECT bar = LogScrollbarRect();
+        if (bar.bottom > bar.top && PtInRect(&bar, pt)) {
+            RECT thumb;
+            if (LogThumbRect(thumb)) {
+                if (PtInRect(&thumb, pt)) {
+                    g_logSbDragging = true;
+                    g_logSbGrabOffset = pt.y - thumb.top;
+                    SetCapture(hWnd);
+                } else {
+                    // Click beside the thumb pages, like a system scrollbar.
+                    int first = 0, visible = 0, total = 0;
+                    if (LogScrollMetrics(first, visible, total)) {
+                        LogScrollToLine(pt.y < thumb.top ? first - visible
+                                                         : first + visible);
+                    }
+                }
+                InvalidateLogScrollbar(hWnd);
+            }
+            return 0;
+        }
+        break;
+    }
+
+    case WM_MOUSEMOVE: {
+        if (!g_logSbDragging) break;
+        RECT bar = LogScrollbarRect();
+        RECT thumb;
+        int first = 0, visible = 0, total = 0;
+        if (!LogThumbRect(thumb) || !LogScrollMetrics(first, visible, total)) break;
+        int thumbH = thumb.bottom - thumb.top;
+        int trackH = (bar.bottom - bar.top) - thumbH;
+        int y = GET_Y_LPARAM(lParam) - g_logSbGrabOffset - bar.top;
+        if (y < 0) y = 0;
+        if (y > trackH) y = trackH;
+        int span = total - visible;
+        LogScrollToLine(trackH > 0 ? MulDiv(span, y, trackH) : 0);
+        InvalidateLogScrollbar(hWnd);
+        return 0;
+    }
+
+    case WM_LBUTTONUP:
+        if (g_logSbDragging) {
+            g_logSbDragging = false;
+            if (GetCapture() == hWnd) ReleaseCapture();
+            InvalidateLogScrollbar(hWnd);
+            return 0;
+        }
+        break;
 
     case WM_HSCROLL: {
         HWND hSlider = (HWND)lParam;
@@ -5872,6 +6393,50 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lParam;
+        if (!dis) break;
+
+        // Owner-drawn tray menu. It shares this message with the colour
+        // preview below, which is an ODT_STATIC control - hence the type test
+        // first, before anything looks at CtlID.
+        if (dis->CtlType == ODT_MENU) {
+            const TrayMenuEntry* e = (const TrayMenuEntry*)dis->itemData;
+
+            HBRUSH bg = CreateSolidBrush(g_currentTheme->groupBodyBg);
+            FillRect(dis->hDC, &dis->rcItem, bg);
+            DeleteObject(bg);
+
+            if (!e || !e->text) {           // separator: one hairline, no etching
+                RECT r = dis->rcItem;
+                int y = (r.top + r.bottom) / 2;
+                HPEN pen = CreatePen(PS_SOLID, 1, g_currentTheme->border);
+                HPEN oldPen = (HPEN)SelectObject(dis->hDC, pen);
+                MoveToEx(dis->hDC, r.left + 8, y, NULL);
+                LineTo(dis->hDC, r.right - 8, y);
+                SelectObject(dis->hDC, oldPen);
+                DeleteObject(pen);
+                return TRUE;
+            }
+
+            bool selected = (dis->itemState & ODS_SELECTED) != 0;
+            if (selected) {
+                RECT r = dis->rcItem;
+                InflateRect(&r, -2, -1);
+                HBRUSH sel = CreateSolidBrush(g_currentTheme->bgAccent);
+                FillRect(dis->hDC, &r, sel);
+                DeleteObject(sel);
+            }
+
+            HFONT hOldFont = (HFONT)SelectObject(dis->hDC, TrayMenuFont());
+            SetBkMode(dis->hDC, TRANSPARENT);
+            SetTextColor(dis->hDC, selected ? g_currentTheme->textOnAccent
+                                            : g_currentTheme->textPrimary);
+            RECT tr = dis->rcItem;
+            tr.left += 12;
+            DrawTextW(dis->hDC, e->text, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            SelectObject(dis->hDC, hOldFont);
+            return TRUE;
+        }
+
         if (dis->CtlID == ID_STATIC_PREVIEW) {
             Gdiplus::Graphics g(dis->hDC);
             g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
@@ -5898,6 +6463,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
     }
 
+    case WM_MEASUREITEM: {
+        MEASUREITEMSTRUCT* mis = (MEASUREITEMSTRUCT*)lParam;
+        if (!mis || mis->CtlType != ODT_MENU) break;
+        const TrayMenuEntry* e = (const TrayMenuEntry*)mis->itemData;
+        if (!e || !e->text) {           // separator
+            mis->itemWidth = 0;
+            mis->itemHeight = 7;
+            return TRUE;
+        }
+        HDC hdc = GetDC(hWnd);
+        HFONT hOld = (HFONT)SelectObject(hdc, TrayMenuFont());
+        SIZE sz = {};
+        GetTextExtentPoint32W(hdc, e->text, (int)wcslen(e->text), &sz);
+        SelectObject(hdc, hOld);
+        ReleaseDC(hWnd, hdc);
+        mis->itemWidth = sz.cx + 24;    // room for the left inset
+        mis->itemHeight = sz.cy + 12;
+        return TRUE;
+    }
+
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN: {
         HDC hdcCtrl = (HDC)wParam;
@@ -5911,9 +6496,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // transparent treatment so the gradient shows through.
         if ((HWND)lParam == g_state.hStatus) {
             SetBkMode(hdcCtrl, OPAQUE);
-            SetBkColor(hdcCtrl, g_currentTheme->bgControl);
-            if (!g_hBgBrush) g_hBgBrush = CreateSolidBrush(g_currentTheme->bgControl);
-            return (LRESULT)g_hBgBrush;
+            SetBkColor(hdcCtrl, g_currentTheme->groupBodyBg);
+            if (!g_hLogBrush) g_hLogBrush = CreateSolidBrush(g_currentTheme->groupBodyBg);
+            return (LRESULT)g_hLogBrush;
         }
         SetBkMode(hdcCtrl, TRANSPARENT);
         return (LRESULT)GetStockObject(HOLLOW_BRUSH);
@@ -6161,6 +6746,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return DefWindowProc(hWnd, msg, wParam, lParam);
 
     case WM_APP_STATUS_APPEND: {
+        InvalidateLogScrollbar(hWnd);
         std::wstring* msg = (std::wstring*)lParam;
         if (msg) {
             AppendStatus(msg->c_str());
@@ -6170,6 +6756,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_APP_STATUS_CLEAR:
+        InvalidateLogScrollbar(hWnd);
         ClearStatus();
         return 0;
 
@@ -6326,7 +6913,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (g_hDisplayNotify) { UnregisterPowerSettingNotification(g_hDisplayNotify); g_hDisplayNotify = NULL; }
         if (g_hSuspendNotify) { UnregisterSuspendResumeNotification(g_hSuspendNotify); g_hSuspendNotify = NULL; }
         RemoveTrayIcon();
+        FreeWatermarkImage();
+        FreeTrayMenuResources();
         if (g_hBgBrush) DeleteObject(g_hBgBrush);
+        if (g_hLogBrush) DeleteObject(g_hLogBrush);
         if (g_hCtrlBrush) DeleteObject(g_hCtrlBrush);
         if (g_hBtnBrush) DeleteObject(g_hBtnBrush);
         if (g_hLogoBitmap) DeleteObject(g_hLogoBitmap);
@@ -6359,8 +6949,16 @@ LRESULT CALLBACK StaticSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
         HFONT hFont = (HFONT)SendMessage(hWnd, WM_GETFONT, 0, 0);
         HFONT hOldFont = (HFONT)SelectObject(hdcMem, hFont);
 
+        // Alignment comes from the control's own style. Drawing every static
+        // DT_LEFT ignored the SS_CENTER of the RGB value labels and the
+        // SS_RIGHT of the "Rot"/"Gruen"/"Blau" captions, so a one-digit and a
+        // three-digit value started at the same x instead of ending there.
+        LONG ssAlign = GetWindowLong(hWnd, GWL_STYLE) & SS_TYPEMASK;
+        UINT dtAlign = (ssAlign == SS_CENTER) ? DT_CENTER
+                     : (ssAlign == SS_RIGHT)  ? DT_RIGHT
+                                              : DT_LEFT;
         RECT rcText = rc;
-        DrawTextW(hdcMem, text, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdcMem, text, -1, &rcText, dtAlign | DT_VCENTER | DT_SINGLELINE);
 
         SelectObject(hdcMem, hOldFont);
         BitBlt(hdc, 0, 0, rc.right - rc.left, rc.bottom - rc.top, hdcMem, 0, 0, SRCCOPY);
@@ -6370,6 +6968,25 @@ LRESULT CALLBACK StaticSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
     };
 
     if (uMsg == WM_ERASEBKGND) return 1;
+    // A STATIC does not route a text change through WM_PAINT: its own
+    // WM_SETTEXT handler takes a DC and draws the new text right away, erasing
+    // the background with the brush WM_CTLCOLORSTATIC hands out. The main
+    // window hands out HOLLOW_BRUSH there so the gradient shows through - which
+    // means nothing erases the old text and every value is drawn on top of its
+    // predecessor. Measured on the colour rows (screenshot, 2026-08-31): red
+    // stood at 0 and green at 34, both labels showed an unreadable pile of the
+    // digits they had gone through.
+    //
+    // The default handler still runs - it stores the text - and the repaint
+    // right behind it goes through drawStatic, which fills the background from
+    // the parent before it draws. The pile is therefore gone inside the same
+    // call, not at the next WM_PAINT.
+    if (uMsg == WM_SETTEXT) {
+        LRESULT res = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+        InvalidateRect(hWnd, NULL, FALSE);
+        UpdateWindow(hWnd);
+        return res;
+    }
     if (uMsg == WM_PRINTCLIENT) {
         HDC hdc = (HDC)wParam;
         if (!hdc) return 0;
@@ -6408,8 +7025,26 @@ LRESULT CALLBACK SliderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
         DeleteObject(hbmMem);
         DeleteDC(hdcMem);
     };
-    
+
     switch (uMsg) {
+        // The trackbar answers TBM_SETPOS by invalidating only the two thumb
+        // rectangles - the old position and the new one. drawSlider paints the
+        // whole control, but BeginPaint clips it to exactly that update region,
+        // so everything between the thumbs keeps its old pixels and the filled
+        // part of the track never follows. Measured on the 3.6.0 build via
+        // Ctrl+Alt+W: red stood at 255, the label read 255, and the track was
+        // empty with the old thumb still sitting at the left end.
+        //
+        // Dragging never showed this, because the mouse path below invalidates
+        // the whole control. This does the same: let the trackbar store the
+        // position, then declare the entire client invalid and paint it in one
+        // piece.
+        case TBM_SETPOS: {
+            LRESULT posRes = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+            InvalidateRect(hWnd, NULL, FALSE);
+            UpdateWindow(hWnd);
+            return posRes;
+        }
         case WM_ERASEBKGND:
             return 1;
         case WM_PRINTCLIENT: {
@@ -6431,23 +7066,20 @@ LRESULT CALLBACK SliderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
             return 0;
         }
         case WM_MOUSEMOVE:
-            if (!mslider.isHovered) {
-                mslider.isHovered = true;
-                TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hWnd, 0};
-                TrackMouseEvent(&tme);
-                InvalidateRect(hWnd, NULL, FALSE);
-            }
-            break;
         case WM_MOUSELEAVE:
-            mslider.isHovered = false;
-            InvalidateRect(hWnd, NULL, FALSE);
+            UpdateHoverFlag(hWnd, mslider.isHovered);
             break;
         case WM_LBUTTONDOWN:
             mslider.isDragging = true;
             InvalidateRect(hWnd, NULL, FALSE);
             break;
         case WM_LBUTTONUP:
+        case WM_CAPTURECHANGED:
+            // After a drag the cursor is usually still on the knob, so the
+            // hover state is recomputed instead of being left where the
+            // capture's WM_MOUSELEAVE put it.
             mslider.isDragging = false;
+            UpdateHoverFlag(hWnd, mslider.isHovered);
             InvalidateRect(hWnd, NULL, FALSE);
             break;
     }
@@ -6457,6 +7089,7 @@ LRESULT CALLBACK SliderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 LRESULT CALLBACK BtnCheckboxSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     LONG style = GetWindowLong(hWnd, GWL_STYLE) & BS_TYPEMASK;
     bool isCheckbox = (style == BS_AUTOCHECKBOX || style == BS_CHECKBOX);
+
 
     auto drawCustom = [&](HDC hdcTarget, const RECT& rc) {
         HDC hdcMem = CreateCompatibleDC(hdcTarget);
@@ -6487,14 +7120,20 @@ LRESULT CALLBACK BtnCheckboxSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
             int btnId = GetWindowLong(hWnd, GWLP_ID);
             btn.hasCustomGlow = false;
             if (btnId >= ID_BTN_PRESET_BLUE && btnId <= ID_BTN_PRESET_CYAN) {
+                // Glow strength of the seven preset buttons, halved on request.
+                // DrawGlow scales every ring by this alpha, so 128 instead of
+                // 255 is exactly half the opacity at unchanged reach (the
+                // radius stays 8 in ModernButton::Draw, so the halo keeps its
+                // size and only stops shouting).
+                const BYTE GLOW_A = 128;
                 btn.hasCustomGlow = true;
-                if (btnId == ID_BTN_PRESET_BLUE) btn.customGlowColor = Gdiplus::Color(255, 0, 34, 255);
-                else if (btnId == ID_BTN_PRESET_RED) btn.customGlowColor = Gdiplus::Color(255, 255, 0, 0);
-                else if (btnId == ID_BTN_PRESET_GREEN) btn.customGlowColor = Gdiplus::Color(255, 0, 255, 0);
-                else if (btnId == ID_BTN_PRESET_CYAN) btn.customGlowColor = Gdiplus::Color(255, 0, 255, 255);
-                else if (btnId == ID_BTN_PRESET_PURPLE) btn.customGlowColor = Gdiplus::Color(255, 128, 0, 255);
-                else if (btnId == ID_BTN_PRESET_WHITE) btn.customGlowColor = Gdiplus::Color(255, 255, 255, 255);
-                else if (btnId == ID_BTN_PRESET_OFF) btn.customGlowColor = Gdiplus::Color(255, 100, 100, 100);
+                if (btnId == ID_BTN_PRESET_BLUE) btn.customGlowColor = Gdiplus::Color(GLOW_A, 0, 34, 255);
+                else if (btnId == ID_BTN_PRESET_RED) btn.customGlowColor = Gdiplus::Color(GLOW_A, 255, 0, 0);
+                else if (btnId == ID_BTN_PRESET_GREEN) btn.customGlowColor = Gdiplus::Color(GLOW_A, 0, 255, 0);
+                else if (btnId == ID_BTN_PRESET_CYAN) btn.customGlowColor = Gdiplus::Color(GLOW_A, 0, 255, 255);
+                else if (btnId == ID_BTN_PRESET_PURPLE) btn.customGlowColor = Gdiplus::Color(GLOW_A, 128, 0, 255);
+                else if (btnId == ID_BTN_PRESET_WHITE) btn.customGlowColor = Gdiplus::Color(GLOW_A, 255, 255, 255);
+                else if (btnId == ID_BTN_PRESET_OFF) btn.customGlowColor = Gdiplus::Color(GLOW_A, 100, 100, 100);
             }
 
             btn.Draw(hdcMem);
@@ -6556,10 +7195,25 @@ LRESULT CALLBACK BtnCheckboxSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
                     }
                 }
 
+                UpdateHoverState(hWnd);
                 InvalidateRect(hWnd, NULL, FALSE);
                 return 0;
             }
-            break;
+            // Push buttons run the click through the default proc, which holds
+            // the capture and - this is the part that showed - paints the
+            // classic button straight onto the window DC on the way. Nothing
+            // invalidates afterwards, so with the pointer held still the grey
+            // system button just stayed there. Hence: recompute the hover
+            // state, then repaint unconditionally.
+            {
+                LRESULT r = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+                if (IsWindow(hWnd)) {
+                    UpdateHoverState(hWnd);
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    UpdateWindow(hWnd);
+                }
+                return r;
+            }
         case WM_KEYDOWN:
             if (isCheckbox && (wParam == VK_SPACE || wParam == VK_RETURN)) {
                 LRESULT chk = SendMessage(hWnd, BM_GETCHECK, 0, 0);
@@ -6575,27 +7229,45 @@ LRESULT CALLBACK BtnCheckboxSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         case WM_CAPTURECHANGED:
             if (isCheckbox) {
                 RemovePropW(hWnd, L"pressed");
+                UpdateHoverState(hWnd);
                 InvalidateRect(hWnd, NULL, FALSE);
                 return 0;
             }
-            break;
-        case WM_MOUSEMOVE:
-            if (!GetPropW(hWnd, L"hover")) {
-                SetPropW(hWnd, L"hover", (HANDLE)1);
-                TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hWnd, 0};
-                TrackMouseEvent(&tme);
-                InvalidateRect(hWnd, NULL, FALSE);
+            {
+                LRESULT r = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+                if (IsWindow(hWnd)) {
+                    UpdateHoverState(hWnd);
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    UpdateWindow(hWnd);
+                }
+                return r;
             }
-            break;
-        case WM_MOUSELEAVE:
-            RemovePropW(hWnd, L"hover");
-            InvalidateRect(hWnd, NULL, FALSE);
-            break;
+        case WM_MOUSEMOVE:
+        case WM_MOUSELEAVE: {
+            LRESULT r = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+            if (IsWindow(hWnd)) {
+                UpdateHoverState(hWnd);
+                InvalidateRect(hWnd, NULL, FALSE);
+                UpdateWindow(hWnd);
+            }
+            return r;
+        }
         case WM_SETFOCUS:
         case WM_KILLFOCUS:
         case WM_ENABLE:
-            InvalidateRect(hWnd, NULL, FALSE);
-            break;
+        case BM_SETSTATE:
+        case BM_SETCHECK: {
+            // Same story as the click: the control draws itself for these
+            // messages without going through WM_PAINT. The old code invalidated
+            // BEFORE letting the default proc run, so the default's drawing was
+            // the last thing on screen and survived until the next repaint.
+            LRESULT r = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+            if (IsWindow(hWnd)) {
+                InvalidateRect(hWnd, NULL, FALSE);
+                UpdateWindow(hWnd);
+            }
+            return r;
+        }
     }
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
@@ -6651,13 +7323,20 @@ LRESULT CALLBACK ComboSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         return (LRESULT)g_hBgBrush;
     }
     case WM_MOUSEMOVE:
-        if (!GetPropW(hWnd, L"hover")) {
-            SetPropW(hWnd, L"hover", (HANDLE)1);
-            TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hWnd, 0};
-            TrackMouseEvent(&tme);
-            InvalidateRect(hWnd, NULL, FALSE);
-        }
+        UpdateHoverState(hWnd);
         break;
+    case WM_LBUTTONUP:
+    case WM_CAPTURECHANGED:
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS: {
+        LRESULT r = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+        if (IsWindow(hWnd)) {
+            UpdateHoverState(hWnd);
+            InvalidateRect(hWnd, NULL, FALSE);
+            UpdateWindow(hWnd);
+        }
+        return r;
+    }
     case WM_LBUTTONDOWN: {
         int x = LOWORD(lParam);
         RECT rc; GetClientRect(hWnd, &rc);
@@ -6670,9 +7349,24 @@ LRESULT CALLBACK ComboSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
         break;
     }
     case WM_MOUSELEAVE:
-        RemovePropW(hWnd, L"hover");
-        InvalidateRect(hWnd, NULL, FALSE);
+        UpdateHoverState(hWnd);
         break;
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+// Das Log-Textfeld hat keinen eigenen Scrollbalken mehr; das Rad wird deshalb
+// hier auf EM_LINESCROLL umgelegt und der selbst gezeichnete Balken nachgezogen.
+LRESULT CALLBACK LogWheelSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    if (uMsg == WM_MOUSEWHEEL) {
+        int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        int lines = -(delta / WHEEL_DELTA) * 3;
+        if (lines != 0) {
+            SendMessage(hWnd, EM_LINESCROLL, 0, (LPARAM)lines);
+            HWND hParent = GetParent(hWnd);
+            if (hParent) InvalidateLogScrollbar(hParent);
+        }
+        return 0;
     }
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
@@ -6716,6 +7410,7 @@ LRESULT CALLBACK ColorPreviewSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
     }
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
+
 
 LRESULT CALLBACK EditBorderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     switch (uMsg) {
@@ -9169,6 +9864,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         g_windowX, g_windowY, rc.right - rc.left, rc.bottom - rc.top,
         NULL, NULL, hInstance, NULL);
     LogDebug("Window Created");
+
+    ApplyThemedTitleBar(g_state.hWnd);
+
+    // The class only carries the large icon; the caption and the Alt-Tab list
+    // draw the small one and would otherwise shrink the 32px image themselves.
+    {
+        HICON hBig = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(101), IMAGE_ICON,
+            GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR);
+        HICON hSmall = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(101), IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+        if (hBig)   SendMessageW(g_state.hWnd, WM_SETICON, ICON_BIG,   (LPARAM)hBig);
+        if (hSmall) SendMessageW(g_state.hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hSmall);
+        if (!hBig || !hSmall) LogDebug("Fenstericon: LoadImage(101) fehlgeschlagen");
+    }
 
     if (!g_state.hWnd) {
         wchar_t err[256];

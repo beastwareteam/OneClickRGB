@@ -399,10 +399,13 @@ struct ModernSlider {
             g.FillPath(&fillBrush, &fillPath);
         }
 
-        // Knob glow (when hovered/dragging)
+        // Knob glow (when hovered/dragging). The last argument is how far the
+        // glow reaches beyond the knob, in pixels - halved from 12 to 6 on
+        // request. Measured on the green slider: the hover halo went from
+        // 40x28 px around a 20 px knob down to the value below.
         if (isHovered || isDragging) {
             DrawGlow(g, Gdiplus::RectF(knobX - knobRadius, knobY - knobRadius, knobRadius * 2, knobRadius * 2),
-                     knobRadius, GetChannelGlow(), 12);
+                     knobRadius, GetChannelGlow(), 6);
         }
 
         // Knob shadow

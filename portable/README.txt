@@ -1,5 +1,5 @@
-OneClickRGB v1.0
-================
+OneClickRGB v3.6.0
+==================
 
 INHALT
 ------

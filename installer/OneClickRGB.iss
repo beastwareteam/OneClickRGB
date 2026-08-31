@@ -2,7 +2,7 @@
 ; https://jrsoftware.org/isinfo.php
 
 #define MyAppName "OneClickRGB"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "3.6.0"
 #define MyAppPublisher "OneClickRGB"
 #define MyAppURL "https://github.com/yourusername/OneClickRGB"
 #define MyAppExeName "OneClickRGB.exe"
@@ -39,7 +39,7 @@ Name: "autostart"; Description: "Start with Windows"; GroupDescription: "Startup
 
 [Files]
 ; Main executable
-Source: "..\build\Release\OneClickRGB.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build\OneClickRGB.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Qt DLLs (adjust paths based on your Qt installation)
 Source: "..\build\Release\Qt6Core.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
@@ -63,7 +63,7 @@ Source: "..\dependencies\PawnIO\PawnIOLib.dll"; DestDir: "{app}"; Flags: ignorev
 Source: "..\dependencies\PawnIO\modules\*.bin"; DestDir: "{app}\modules"; Flags: ignoreversion
 
 ; Configuration files
-Source: "..\config\devices.json"; DestDir: "{app}\config"; Flags: ignoreversion
+Source: "..\config\devices.json"; DestDir: "{app}\config"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\config\controller_database.json"; DestDir: "{app}\config"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; Default profiles
